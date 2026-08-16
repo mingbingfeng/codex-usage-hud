@@ -185,6 +185,11 @@ class RendererHudClient:
                 callback,
                 timeout_seconds=self.timeout_seconds,
             )
+            # A renderer reinjection can close the CDP listener without
+            # changing the page target.  Keep this command channel eligible
+            # for same-target recovery; otherwise the page still exposes the
+            # old binding function while commands disappear silently.
+            self._settings_command_binding.retry_same_target = True
 
     def set_attachments_callback(self, callback: Any) -> None:
         """Receive renderer composer-attachment events over CDP instead of HTTP fetch.

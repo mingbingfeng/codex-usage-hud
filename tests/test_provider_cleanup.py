@@ -39,6 +39,7 @@ def test_remove_provider_pricing_removes_current_and_versioned_data() -> None:
             "provider_order": ["muyuan", "other"],
             "selected_providers": ["muyuan", "other"],
             "notification_only_providers": ["muyuan"],
+            "quick_launch_providers": ["MUYUAN", "other"],
             "provider_scope_mode": "custom",
             "pricing_versions": [
                 {
@@ -97,6 +98,7 @@ def test_remove_provider_pricing_removes_current_and_versioned_data() -> None:
     assert updated.provider_order == ["other"]
     assert updated.selected_providers == ["other"]
     assert updated.notification_only_providers == []
+    assert updated.quick_launch_providers == ["other"]
     assert [item.version_id for item in updated.pricing_versions] == ["other-version"]
     assert [item.audit_id for item in updated.pricing_audit] == ["other-audit"]
     assert counts == {
@@ -114,6 +116,7 @@ def test_delete_provider_for_context_refreshes_registry_after_config_delete() ->
                 "muyuan": {"model_prices": {"gpt-test": _price("gpt-test", "muyuan")}}
             },
             "provider_order": ["muyuan"],
+            "quick_launch_providers": ["muyuan"],
         }
     )
     store = SimpleNamespace(load=lambda: config, save=MagicMock())
@@ -148,6 +151,41 @@ def test_delete_provider_for_context_refreshes_registry_after_config_delete() ->
     assert context.provider_registry is registry
     assert result["status"] == "ok"
     assert result["pricing"]["providerSettings"] == 1
+
+
+def test_delete_provider_for_context_removes_quick_launch_without_price_deletion() -> None:
+    config = UserConfig.from_dict(
+        {
+            "provider_order": ["muyuan", "other"],
+            "quick_launch_providers": ["muyuan", "other"],
+        }
+    )
+    save = MagicMock()
+    context = SimpleNamespace(
+        app_provider="custom",
+        user_config=config,
+        settings_store=SimpleNamespace(load=lambda: config, save=save),
+        sessions_root=None,
+        reload_user_config=MagicMock(),
+    )
+    registry = SimpleNamespace(app_provider="custom")
+
+    with patch(
+        "codex_usage_hud.provider_cleanup.delete_provider_config",
+        return_value={"changed": True, "profilePaths": []},
+    ), patch(
+        "codex_usage_hud.provider_cleanup.discover_provider_registry",
+        return_value=registry,
+    ):
+        result = delete_provider_for_context(
+            context,
+            {"provider": "MUYUAN", "deleteModelPrices": False},
+        )
+
+    save.assert_called_once()
+    updated = save.call_args.args[0]
+    assert updated.quick_launch_providers == ["other"]
+    assert result["settingsChanged"] is True
 
 
 def test_delete_provider_for_context_rejects_default_provider() -> None:

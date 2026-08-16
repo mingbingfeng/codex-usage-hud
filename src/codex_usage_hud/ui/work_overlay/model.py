@@ -105,6 +105,7 @@ def _normalized_rest_reminder(value: object) -> dict[str, object] | None:
         "breakMinutes": max(1, int(value.get("breakMinutes") or 2)),
         "postponeMinutes": max(1, int(value.get("postponeMinutes") or 10)),
         "promptEndsAtMs": max(0, int(value.get("promptEndsAtMs") or 0)),
+        "promptStartedAtMs": max(0, int(value.get("promptStartedAtMs") or 0)),
         "promptWaitInfinite": bool(value.get("promptWaitInfinite")),
         "earlyRestOptionsMinutes": [3, 5, 10],
         "postponeEndsAtMs": max(0, int(value.get("postponeEndsAtMs") or 0)),
@@ -148,12 +149,20 @@ def _rest_reminder_card_copy(
     hint = ""
     status = ""
     header_meta = ""
+    header_elapsed = ""
     color_status = "waiting_user"
     actions: list[dict[str, object]] = []
     if phase == "prompt":
         title = "☕ 该休息一下了"
         hint = "如果您已提前休息过了，可以点击下方分钟数按钮标记已休息"
         header_meta = f"今日已休息 {_format_rest_duration(completed_today)}"
+        prompt_started_ms = int(item.get("promptStartedAtMs") or 0)
+        prompt_elapsed = (
+            max(0.0, (current_ms - prompt_started_ms) / 1000.0)
+            if prompt_started_ms > 0
+            else 0.0
+        )
+        header_elapsed = f"已等待 {_format_rest_duration(prompt_elapsed)}"
         status = "等待你的选择 · 不会自动跳过"
         if bool(item.get("canPostpone")):
             minutes = max(1, int(item.get("postponeMinutes") or 10))
@@ -222,6 +231,7 @@ def _rest_reminder_card_copy(
     return {
         "title": title,
         "headerMeta": header_meta,
+        "headerElapsed": header_elapsed,
         "detail": detail,
         "hint": hint,
         "statusText": status,
@@ -244,6 +254,7 @@ def _rest_reminder_overlay_item(reminder: Mapping[str, object]) -> dict[str, obj
         "breakMinutes": normalized["breakMinutes"],
         "postponeMinutes": normalized["postponeMinutes"],
         "promptEndsAtMs": normalized["promptEndsAtMs"],
+        "promptStartedAtMs": normalized["promptStartedAtMs"],
         "promptWaitInfinite": normalized["promptWaitInfinite"],
         "earlyRestOptionsMinutes": normalized["earlyRestOptionsMinutes"],
         "postponeEndsAtMs": normalized["postponeEndsAtMs"],
@@ -255,6 +266,7 @@ def _rest_reminder_overlay_item(reminder: Mapping[str, object]) -> dict[str, obj
         "completionEndsAtMs": normalized["completionEndsAtMs"],
         "title": copy["title"],
         "headerMeta": copy["headerMeta"],
+        "headerElapsed": copy["headerElapsed"],
         "status": copy["status"],
         "statusLabel": copy["statusText"],
         "statusText": copy["statusText"],

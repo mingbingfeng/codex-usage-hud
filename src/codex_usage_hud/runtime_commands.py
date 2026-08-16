@@ -945,6 +945,10 @@ def handle_general_command(
             if ports.codex_cli_launch is None:
                 return _status("Codex CLI 启动器当前不可用。", kind="error")
             result = ports.codex_cli_launch(command)
+            if bool(result.get("cancelled")):
+                status = _status("已停止 Codex CLI 启动，未创建终端。")
+                status["codexCliLaunchCancelled"] = True
+                return status
             launch_mode = "新标签页" if bool(result.get("openedAsTab")) else "新终端窗口"
             status = _status(
                 f"已在 {str(result.get('terminal') or '所选终端')} 的{launch_mode}中启动 Codex CLI。"
@@ -1519,6 +1523,8 @@ def _handle_renderer_settings_command(
         )
 
     def launch_cli(command: Mapping[str, object]) -> Mapping[str, object]:
+        cancel_requested = command.get("_codexCliCancelRequested")
+        commit_spawn = command.get("_codexCliCommitSpawn")
         return launch_codex_cli(
             terminal_id=str(command.get("terminalId") or "").strip(),
             command=str(command.get("command") or ""),
@@ -1528,6 +1534,8 @@ def _handle_renderer_settings_command(
                 or getattr(context, "app_provider", "")
                 or ""
             ).strip(),
+            cancel_requested=cancel_requested if callable(cancel_requested) else None,
+            commit_spawn=commit_spawn if callable(commit_spawn) else None,
         )
 
     def fetch_cli_provider_models(provider: str) -> Mapping[str, object]:

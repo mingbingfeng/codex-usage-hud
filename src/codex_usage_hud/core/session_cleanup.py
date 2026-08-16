@@ -605,6 +605,7 @@ class SessionCleanupManager:
         mode: str,
         *,
         fork: Callable[[str, str, str], str],
+        verify: Callable[[str, str], bool] | None = None,
         request_id: str = "",
     ) -> dict[str, object]:
         """Fork selected sessions to another Provider, optionally removing sources.
@@ -624,6 +625,8 @@ class SessionCleanupManager:
             raise SessionCleanupError("不支持的会话迁移模式。")
         if not callable(fork):
             raise SessionCleanupError("Codex fork 服务当前不可用。")
+        if not callable(verify):
+            raise SessionCleanupError("Codex 目标会话持久化验证当前不可用。")
         items = self._selected_items(item_ids, revision)
         if any(
             item.model_provider.casefold() != normalized_source
@@ -633,38 +636,43 @@ class SessionCleanupManager:
                 "所选会话已不属于当前源 Provider，请重新扫描后再试。"
             )
         results: list[dict[str, object]] = []
+        forked_items: list[SessionCleanupItem] = []
         publisher = getattr(self, "progress_publisher", None)
         total = len(items)
+        last_progress_publish = 0.0
+        copied_count = 0
+        migrated_count = 0
+        failed_count = 0
 
-        def publish_progress() -> None:
+        def publish_progress(*, force: bool = False) -> None:
+            nonlocal last_progress_publish
+            now = time.monotonic()
+            # App-server notifications and renderer payloads are relatively
+            # expensive for large selections. Keep progress responsive while
+            # coalescing bursts from fast local forks.
+            if not force and last_progress_publish and now - last_progress_publish < 0.075:
+                return
             snapshot = self.mark_operation(
                 request_id=request_id,
                 action="sessionTransfer",
                 state="running",
-                progress=min(99, round(100 * len(results) / max(1, total))),
+                progress=min(99, round(80 * len(results) / max(1, total))),
                 sourceProvider=normalized_source,
                 targetProvider=normalized_target,
                 mode=normalized_mode,
                 selectedIds=[item.id for item in items],
-                results=list(results),
                 completedCount=len(results),
-                copiedCount=sum(
-                    bool(result.get("forked")) for result in results
-                ),
-                migratedCount=sum(
-                    result.get("state") == "migrated" for result in results
-                ),
-                failedCount=(
-                    len(results) - sum(result.get("state") == "migrated" for result in results)
-                    if normalized_mode == "migrate"
-                    else sum(result.get("state") == "failed" for result in results)
-                ),
+                copiedCount=copied_count,
+                migratedCount=migrated_count,
+                failedCount=failed_count,
             )
             if callable(publisher):
                 publisher(snapshot)
+            last_progress_publish = now
 
         for item in items:
             forked = False
+            new_session_id = ""
             try:
                 new_session_id = str(
                     fork(item._session_id, normalized_target, item._cwd) or ""
@@ -672,57 +680,36 @@ class SessionCleanupManager:
                 if not _canonical_uuid(new_session_id) or new_session_id == item._session_id:
                     raise SessionCleanupError(
                         "Codex fork 未返回新的目标会话。"
-                    )
+                )
                 forked = True
-                source_deleted = False
+                if verify(new_session_id, normalized_target) is not True:
+                    raise SessionCleanupError(
+                        "目标会话已创建，但持久化验证未通过。"
+                    )
+                copied_count += 1
                 if normalized_mode == "migrate":
-                    preview = self.preview(
-                        [item.id],
-                        self._revision,
-                        request_id=request_id,
-                    )
-                    preview_operation = preview.get("operation")
-                    confirmation_token = str(
-                        preview_operation.get("confirmationToken")
-                        if isinstance(preview_operation, Mapping)
-                        else ""
-                    )
-                    if not confirmation_token:
-                        raise SessionCleanupError("源会话删除确认令牌生成失败。")
-                    deleted = self.execute(
-                        [item.id],
-                        self._revision,
-                        confirmation_token,
-                        request_id=request_id,
-                    )
-                    deleted_operation = deleted.get("operation")
-                    source_deleted = bool(
-                        isinstance(deleted_operation, Mapping)
-                        and deleted_operation.get("state") == "completed"
-                        and int(deleted_operation.get("deletedCount") or 0) == 1
-                    )
-                    if not source_deleted:
-                        raise SessionCleanupError(
-                            "目标会话已创建，但源会话未能安全删除。"
-                        )
+                    forked_items.append(item)
                 results.append(
                     {
                         "id": item.id,
                         "title": item.title,
-                        "state": "migrated" if source_deleted else "copied",
+                        "targetSessionId": new_session_id,
+                        "state": "copied",
                         "forked": True,
-                        "sourceDeleted": source_deleted,
+                        "sourceDeleted": False,
                         "error": "",
                     }
                 )
             except Exception as exc:
                 error_text = str(exc) or type(exc).__name__
                 if forked:
+                    failed_count += 1
                     results.append(
                         {
                             "id": item.id,
                             "title": item.title,
-                            "state": "copied",
+                            "targetSessionId": new_session_id,
+                            "state": "copied" if normalized_mode == "migrate" else "failed",
                             "forked": True,
                             "sourceDeleted": False,
                             "error": error_text,
@@ -734,13 +721,72 @@ class SessionCleanupManager:
                     {
                         "id": item.id,
                         "title": item.title,
+                        "targetSessionId": "",
                         "state": "failed",
                         "forked": False,
                         "sourceDeleted": False,
                         "error": error_text,
                     }
                 )
+                failed_count += 1
             publish_progress()
+
+        if normalized_mode == "migrate" and forked_items:
+            successful_ids = [item.id for item in forked_items]
+            deletion_error = ""
+            deleted_ids: set[str] = set()
+            try:
+                # All forks are created first, then the source trees are
+                # removed in one local transaction. This keeps the original
+                # safety ordering while avoiding one scan/preview/execute
+                # round-trip per selected session.
+                preview = self.preview(
+                    successful_ids,
+                    self._revision,
+                    request_id=request_id,
+                )
+                preview_operation = preview.get("operation")
+                confirmation_token = str(
+                    preview_operation.get("confirmationToken")
+                    if isinstance(preview_operation, Mapping)
+                    else ""
+                )
+                if not confirmation_token:
+                    raise SessionCleanupError("源会话删除确认令牌生成失败。")
+                deleted = self.execute(
+                    successful_ids,
+                    self._revision,
+                    confirmation_token,
+                    request_id=request_id,
+                )
+                deleted_operation = deleted.get("operation")
+                deleted_rows = (
+                    deleted_operation.get("results")
+                    if isinstance(deleted_operation, Mapping)
+                    else []
+                )
+                deleted_ids = {
+                    str(row.get("id") or "")
+                    for row in (deleted_rows if isinstance(deleted_rows, Sequence) else [])
+                    if isinstance(row, Mapping) and str(row.get("state") or "") == "deleted"
+                }
+                if len(deleted_ids) != len(successful_ids):
+                    raise SessionCleanupError("目标会话已创建，但源会话未能安全删除。")
+            except Exception as exc:
+                deletion_error = str(exc) or type(exc).__name__
+
+            for result in results:
+                result_id = str(result.get("id") or "")
+                if result_id not in successful_ids:
+                    continue
+                if result_id in deleted_ids:
+                    result["state"] = "migrated"
+                    result["sourceDeleted"] = True
+                else:
+                    result["error"] = deletion_error or "目标会话已创建，但源会话未能安全删除。"
+            migrated_count = len(deleted_ids)
+            failed_count = max(0, total - migrated_count)
+            publish_progress(force=True)
 
         if any(bool(result.get("forked")) for result in results):
             try:
@@ -750,7 +796,14 @@ class SessionCleanupManager:
                 # inventory refresh is unavailable; the next manual scan will
                 # reconcile the list.
                 pass
-        copied_count = sum(bool(result.get("forked")) for result in results)
+        copied_count = (
+            sum(bool(result.get("forked")) for result in results)
+            if normalized_mode == "migrate"
+            else sum(
+                bool(result.get("forked")) and not str(result.get("error") or "").strip()
+                for result in results
+            )
+        )
         migrated_count = sum(result.get("state") == "migrated" for result in results)
         failed_count = (
             total - migrated_count
@@ -762,7 +815,8 @@ class SessionCleanupManager:
             if normalized_mode == "migrate"
             else copied_count == total
         )
-        state = "completed" if completed else ("partial" if copied_count else "failed")
+        has_forked_result = any(bool(result.get("forked")) for result in results)
+        state = "completed" if completed else ("partial" if has_forked_result else "failed")
         return self.mark_operation(
             request_id=request_id,
             action="sessionTransfer",

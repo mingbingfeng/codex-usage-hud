@@ -651,6 +651,6 @@ console.log("renderer-leaf-domains-ok");
 def test_leaf_bundle_keeps_one_iife_and_one_boot_placeholder() -> None:
     script = manifest.RENDERER_HUD_SCRIPT_TEMPLATE
     assert script.lstrip().startswith("(() => {")
-    assert script.count('const version = "53";') == 1
+    assert script.count('const version = "54";') == 1
     assert script.count("__CODEX_MODEL_PICKER_CATALOG__") == 1
     assert script.rstrip().endswith("})()")

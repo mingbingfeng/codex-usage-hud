@@ -34,6 +34,20 @@ widget_attrs = Qt.WidgetAttribute
 focus_policy = Qt.FocusPolicy
 window_type = Qt.WindowType
 
+
+def _screen_item_limit(screen: object | None) -> int | None:
+    """Return a geometry clamp only after Qt exposes a usable screen."""
+    if screen is None:
+        return None
+    try:
+        screen_height = int(screen.availableGeometry().height())
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if screen_height <= 1:
+        return None
+    return work_overlay_max_items_for_screen_height(screen_height)
+
+
 def _multiline_elided_text(
     value: object,
     *,
@@ -665,15 +679,15 @@ class OverlayWindow(OverlayTransitionsMixin, OverlayRenderingMixin, QWidget):
                 theme_payload if isinstance(theme_payload, Mapping) else None
             )
             screen = self._qt_app.primaryScreen()
-            screen_height = (
-                screen.availableGeometry().height()
-                if screen is not None
-                else self.geometry().height()
-            )
+            # Qt can briefly report no primary screen while the helper window
+            # is being created.  The window's initial height is 1px; treating
+            # that placeholder as a real screen height clamps the configured
+            # limit to one card and leaves the overlay stuck there.  Defer the
+            # geometry-based clamp until a usable screen size is available.
             self._item_limit = normalize_work_overlay_max_items(
                 state.get("itemLimit"),
                 self._default_item_limit,
-                max_items=work_overlay_max_items_for_screen_height(screen_height),
+                max_items=_screen_item_limit(screen),
             )
             self.render_items(
                 items,

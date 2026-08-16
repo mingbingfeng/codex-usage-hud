@@ -6,7 +6,7 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 import logging
-from threading import Lock, Thread, current_thread
+from threading import Event, Lock, Thread, current_thread
 
 from .renderer_event_loop import RendererLoopState, RendererTickInputs
 
@@ -47,6 +47,7 @@ class RendererPreRefreshExecutor:
 
     _CODEX_CLI_LAUNCH_ACTION = "codexCliLaunch"
     _CODEX_CLI_LAUNCH_PENDING_ACTION = "codexCliLaunchPending"
+    _CODEX_CLI_LAUNCH_CANCEL_ACTION = "codexCliLaunchCancel"
     _BACKGROUND_QUERY_ACTIONS = frozenset(
         {
             "openBackgroundUsage",
@@ -69,6 +70,8 @@ class RendererPreRefreshExecutor:
         self._closed = False
         self._codex_cli_launch_request_id = ""
         self._codex_cli_launch_thread: Thread | None = None
+        self._codex_cli_launch_cancel_event: Event | None = None
+        self._codex_cli_launch_phase = ""
         self._codex_cli_launch_results: deque[tuple[str, dict[str, object]]] = deque()
 
     def close(self) -> None:
@@ -76,12 +79,17 @@ class RendererPreRefreshExecutor:
         with self._async_lock:
             self._closed = True
             thread = self._codex_cli_launch_thread
+            cancel_event = self._codex_cli_launch_cancel_event
+        if cancel_event is not None:
+            cancel_event.set()
         if thread is not None and thread is not current_thread() and thread.is_alive():
             thread.join(timeout=2.0)
         with self._async_lock:
             self._codex_cli_launch_results.clear()
             self._codex_cli_launch_request_id = ""
             self._codex_cli_launch_thread = None
+            self._codex_cli_launch_cancel_event = None
+            self._codex_cli_launch_phase = ""
 
     def apply(self, inputs: RendererTickInputs) -> None:
         self.apply_async_command_results(inputs)
@@ -99,6 +107,9 @@ class RendererPreRefreshExecutor:
                 if request_id != self._codex_cli_launch_request_id:
                     continue
                 self._codex_cli_launch_request_id = ""
+                self._codex_cli_launch_thread = None
+                self._codex_cli_launch_cancel_event = None
+                self._codex_cli_launch_phase = ""
             self.state.settings_command_status = dict(status)
             inputs.update_state = self.ports.update_status()
             self._request_settings_domain(inputs)
@@ -152,9 +163,12 @@ class RendererPreRefreshExecutor:
                 self._request_settings_domain(inputs)
                 return
             self._codex_cli_launch_request_id = request_id
+            cancel_event = Event()
+            self._codex_cli_launch_cancel_event = cancel_event
+            self._codex_cli_launch_phase = "queued"
             thread = Thread(
                 target=self._run_codex_cli_launch,
-                args=(dict(command), request_id),
+                args=(dict(command), request_id, cancel_event),
                 name="codex-usage-hud-cli-launch",
                 daemon=True,
             )
@@ -164,6 +178,7 @@ class RendererPreRefreshExecutor:
             request_id=request_id,
             message="正在打开终端并启动 Codex CLI...",
         )
+        self.state.settings_command_status["cancellable"] = True
         inputs.update_state = self.ports.update_status()
         self._request_settings_domain(inputs)
         _LOGGER.info("renderer_codex_cli_launch_started request_id=%s", request_id)
@@ -174,6 +189,8 @@ class RendererPreRefreshExecutor:
             with self._async_lock:
                 self._codex_cli_launch_request_id = ""
                 self._codex_cli_launch_thread = None
+                self._codex_cli_launch_cancel_event = None
+                self._codex_cli_launch_phase = ""
             self.state.settings_command_status = self._command_status(
                 action=self._CODEX_CLI_LAUNCH_ACTION,
                 request_id=request_id,
@@ -186,9 +203,27 @@ class RendererPreRefreshExecutor:
         self,
         command: dict[str, object],
         request_id: str,
+        cancel_event: Event,
     ) -> None:
         try:
-            status = dict(self.ports.execute_command(command))
+            with self._async_lock:
+                if (
+                    self._closed
+                    or request_id != self._codex_cli_launch_request_id
+                    or cancel_event.is_set()
+                ):
+                    status = self._cancelled_codex_cli_launch_status(request_id)
+                else:
+                    self._codex_cli_launch_phase = "validating"
+                    status = None
+            if status is None:
+                launch_command = dict(command)
+                launch_command["_codexCliCancelRequested"] = cancel_event.is_set
+                launch_command["_codexCliCommitSpawn"] = lambda: self._commit_codex_cli_spawn(
+                    request_id,
+                    cancel_event,
+                )
+                status = dict(self.ports.execute_command(launch_command))
         except Exception as exc:
             _LOGGER.exception(
                 "renderer_codex_cli_launch_failed request_id=%s",
@@ -215,6 +250,80 @@ class RendererPreRefreshExecutor:
             str(status.get("kind") or "ok"),
         )
 
+    def _commit_codex_cli_spawn(
+        self,
+        request_id: str,
+        cancel_event: Event,
+    ) -> bool:
+        """Atomically cross the last cancellable boundary before ``Popen``."""
+        with self._async_lock:
+            if (
+                self._closed
+                or request_id != self._codex_cli_launch_request_id
+                or cancel_event.is_set()
+                or self._codex_cli_launch_phase == "spawn_committed"
+            ):
+                return False
+            self._codex_cli_launch_phase = "spawn_committed"
+            return True
+
+    def _cancelled_codex_cli_launch_status(self, request_id: str) -> dict[str, object]:
+        status = self._command_status(
+            action=self._CODEX_CLI_LAUNCH_ACTION,
+            request_id=request_id,
+            message="已停止 Codex CLI 启动，未创建终端。",
+        )
+        status["codexCliLaunchCancelled"] = True
+        return status
+
+    def _cancel_codex_cli_launch(
+        self,
+        command: dict[str, object],
+        inputs: RendererTickInputs,
+    ) -> None:
+        cancel_request_id = str(
+            command.get("requestId") or command.get("id") or "codex-cli-launch-cancel"
+        ).strip()
+        launch_request_id = str(command.get("launchRequestId") or "").strip()
+        with self._async_lock:
+            active_request_id = self._codex_cli_launch_request_id
+            cancel_event = self._codex_cli_launch_cancel_event
+            spawn_committed = self._codex_cli_launch_phase == "spawn_committed"
+            request_matches = bool(
+                launch_request_id
+                and active_request_id
+                and launch_request_id == active_request_id
+            )
+            accepted = bool(request_matches and cancel_event is not None and not spawn_committed)
+            if accepted:
+                cancel_event.set()
+
+        if accepted:
+            message = "正在停止 Codex CLI 启动；终端创建前会安全取消。"
+            kind = ""
+        elif request_matches and spawn_committed:
+            message = "终端创建已经开始，无法再停止；可以关闭 Loading 等待结果。"
+            kind = "warning"
+        else:
+            message = "该 Codex CLI 启动请求已结束或不是当前请求。"
+            kind = "warning"
+        status = self._command_status(
+            action=self._CODEX_CLI_LAUNCH_CANCEL_ACTION,
+            request_id=cancel_request_id,
+            message=message,
+            kind=kind,
+        )
+        status.update(
+            {
+                "launchRequestId": launch_request_id,
+                "cancelAccepted": accepted,
+                "spawnCommitted": bool(request_matches and spawn_committed),
+            }
+        )
+        self.state.settings_command_status = status
+        inputs.update_state = self.ports.update_status()
+        self._request_settings_domain(inputs)
+
     def apply_usage_insights_refresh(self, inputs: RendererTickInputs) -> None:
         if not inputs.event_refresh_request.usage_insights_refresh:
             return
@@ -232,6 +341,9 @@ class RendererPreRefreshExecutor:
             return
         if action == self._CODEX_CLI_LAUNCH_ACTION:
             self._start_codex_cli_launch(dict(inputs.command), inputs)
+            return
+        if action == self._CODEX_CLI_LAUNCH_CANCEL_ACTION:
+            self._cancel_codex_cli_launch(dict(inputs.command), inputs)
             return
         previous_config = self.ports.current_config()
         if action in self._BACKGROUND_QUERY_ACTIONS:

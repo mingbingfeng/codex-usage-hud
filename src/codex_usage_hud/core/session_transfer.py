@@ -96,6 +96,15 @@ def _codex_command(executable: str) -> list[str]:
     return [path, "app-server", "--stdio"]
 
 
+def _codex_environment(codex_home: str | Path | None = None) -> dict[str, str]:
+    """Return the App Server environment bound to the selected Codex home."""
+    environment = os.environ.copy()
+    normalized_home = str(codex_home or "").strip()
+    if normalized_home:
+        environment["CODEX_HOME"] = normalized_home
+    return environment
+
+
 def _error_message(value: object) -> str:
     if isinstance(value, Mapping):
         for key in ("message", "error", "detail"):
@@ -119,10 +128,12 @@ class CodexAppServerClient:
         self,
         *,
         executable: str | None = None,
+        codex_home: str | Path | None = None,
         timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
         process_factory: Callable[..., Any] = subprocess.Popen,
     ) -> None:
         self.executable = str(executable or _codex_executable()).strip()
+        self.codex_home = str(codex_home or "").strip()
         self.timeout_seconds = max(1.0, float(timeout_seconds))
         self.process_factory = process_factory
         self._process: Any | None = None
@@ -164,6 +175,7 @@ class CodexAppServerClient:
                 errors="replace",
                 bufsize=1,
                 creationflags=creationflags,
+                env=_codex_environment(self.codex_home),
             )
         except OSError as exc:
             raise SessionTransferError(
@@ -338,6 +350,55 @@ class CodexAppServerClient:
                 f"Codex fork 的目标 Provider 不匹配：{returned_provider}。"
             )
         return new_id
+
+    def verify_persistent_thread(
+        self,
+        session_id: str,
+        target_provider: str,
+    ) -> bool:
+        """Confirm a fork is durable before reporting success or deleting source.
+
+        ``thread/fork`` returning an id proves creation was accepted, but a
+        destructive migration also needs evidence that the resulting thread is
+        in Codex's persistent store.  ``thread/read`` is the supported read path
+        used by Desktop, and the returned rollout path must already exist on
+        this local machine.
+        """
+        thread_id = _canonical_uuid(session_id)
+        provider = _provider_id(target_provider)
+        if not thread_id:
+            raise SessionTransferError("目标会话标识无效。")
+        if not provider:
+            raise SessionTransferError("目标 Provider 标识无效。")
+        result = self.request(
+            "thread/read",
+            {"threadId": thread_id, "includeTurns": False},
+        )
+        if not isinstance(result, Mapping):
+            raise SessionTransferError("Codex 目标会话读取返回了无效结果。")
+        thread = result.get("thread")
+        thread_payload = thread if isinstance(thread, Mapping) else {}
+        returned_id = _canonical_uuid(thread_payload.get("id"))
+        if returned_id != thread_id:
+            raise SessionTransferError("Codex 目标会话尚不可读取。")
+        returned_provider = _provider_id(
+            thread_payload.get("modelProvider")
+            or thread_payload.get("model_provider")
+        )
+        if returned_provider != provider:
+            raise SessionTransferError(
+                f"Codex 目标会话的 Provider 不匹配：{returned_provider or 'unknown'}。"
+            )
+        if thread_payload.get("ephemeral") is not False:
+            raise SessionTransferError("Codex 目标会话尚未持久化。")
+        rollout_path = str(thread_payload.get("path") or "").strip()
+        try:
+            persisted = bool(rollout_path) and Path(rollout_path).is_file()
+        except (OSError, ValueError):
+            persisted = False
+        if not persisted:
+            raise SessionTransferError("Codex 目标会话的本地记录尚不可用。")
+        return True
 
     def _write(self, payload: Mapping[str, object]) -> None:
         process = self._process

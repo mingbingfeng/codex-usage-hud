@@ -264,6 +264,82 @@ TEXT = r"""
           && new Set(["scanning", "accepted", "running"]).has(String(operation?.state || ""));
       }
 
+      function stopSessionCleanupScanWatchdog() {
+        if (sessionCleanupScanWatchdogTimer) {
+          ctx.lifecycle.clearTimeout(sessionCleanupScanWatchdogTimer);
+          sessionCleanupScanWatchdogTimer = 0;
+        }
+      }
+
+      function scheduleSessionCleanupScanWatchdog(requestId) {
+        stopSessionCleanupScanWatchdog();
+        const expectedRequestId = String(requestId || "").trim();
+        if (!expectedRequestId) return false;
+        sessionCleanupScanWatchdogTimer = ctx.lifecycle.timeout(
+          "session_cleanup_scan_watchdog",
+          () => {
+            sessionCleanupScanWatchdogTimer = 0;
+            const pending = String(sessionCleanupState.pendingRequestId || "");
+            const transferRequest = String(sessionTransferState.scanRequestId || "");
+            if (pending !== expectedRequestId && transferRequest !== expectedRequestId) return;
+            const data = sessionCleanupFromPayload();
+            const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
+            const operationRequestId = String(operation?.requestId || "");
+            const operationAction = String(operation?.action || "").toLowerCase();
+            const operationState = String(operation?.state || "").toLowerCase();
+            const active = new Set(["scan", "sessioncleanupscan"]).has(operationAction)
+              && new Set(["scanning", "accepted", "running"]).has(operationState)
+              && operationRequestId === expectedRequestId;
+            const terminal = new Set(["completed", "partial", "failed", "cancelled"]).has(operationState)
+              && operationRequestId === expectedRequestId;
+            if (active) {
+              scheduleSessionCleanupScanWatchdog(expectedRequestId);
+              return;
+            }
+            if (terminal) {
+              sessionCleanupState.pendingRequestId = "";
+              sessionCleanupState.scanStartedAt = 0;
+              stopSessionCleanupElapsedTicker();
+              stopSessionCleanupScanWatchdog();
+              if (sessionTransferState.scanRequestId === expectedRequestId) {
+                sessionTransferState.scanRequestId = "";
+                sessionTransferState.operation = operation;
+                if (sessionTransferState.open) renderSessionTransferDialog();
+              } else {
+                refreshStoragePanelIfVisible();
+              }
+              return;
+            }
+            sessionCleanupState.pendingRequestId = "";
+            sessionCleanupState.scanStartedAt = 0;
+            stopSessionCleanupElapsedTicker();
+            if (sessionTransferState.scanRequestId === expectedRequestId) {
+              sessionTransferState.scanRequestId = "";
+              sessionTransferState.operation = null;
+              if (sessionTransferState.open) renderSessionTransferDialog();
+            } else {
+              refreshStoragePanelIfVisible();
+            }
+            setSettingsStatus("扫描命令未收到响应，请重新扫描。", "error");
+          },
+          15000,
+        );
+        return true;
+      }
+
+      function activeSessionCleanupScanRequestId(data = sessionCleanupFromPayload()) {
+        const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
+        const action = String(operation?.action || "").toLowerCase();
+        const state = String(operation?.state || "").toLowerCase();
+        if (
+          !new Set(["scan", "sessioncleanupscan"]).has(action)
+          || !new Set(["scanning", "accepted", "running"]).has(state)
+        ) return "";
+        return String(
+          operation?.requestId || sessionCleanupState.pendingRequestId || "",
+        ).trim();
+      }
+
       function stopSessionCleanupElapsedTicker() {
         if (sessionCleanupElapsedTimer) {
           ctx.lifecycle.clearInterval(sessionCleanupElapsedTimer);
@@ -495,34 +571,46 @@ TEXT = r"""
         if (submitted) {
           sessionCleanupState.pendingRequestId = "";
           sessionCleanupState.scanStartedAt = 0;
+          stopSessionCleanupScanWatchdog();
           stopSessionCleanupElapsedTicker();
         }
         return submitted;
       }
 
-      function requestSessionCleanupScan() {
-        if (sessionCleanupState.pendingRequestId) return false;
+      function requestSessionCleanupScan({ preserveTransfer = false } = {}) {
+        if (sessionCleanupState.pendingRequestId || sessionCleanupScanActive()) return false;
         const requestId = typedSettingsRequestId("session-cleanup-scan");
-        sessionCleanupState.pendingRequestId = requestId;
-        sessionCleanupState.scanStartedAt = Date.now();
-        sessionCleanupState.selectedIds.clear();
-        sessionCleanupState.previewTokenShown = "";
-        // Paint the busy state before the command crosses the renderer bridge.
-        // Keeping the existing modal visible avoids a close/reopen flash when the
-        // scan acknowledgement arrives during the same interaction.
-        renderSettingsModal("storage", "正在扫描本地会话清单...");
+        const transferOpen = preserveTransfer && sessionTransferState.open;
         const submitted = submitSettingsCommand(
           { action: "sessionCleanupScan", requestId },
           "正在扫描本地会话清单...",
           { preserveOverlay: true },
         );
         if (!submitted) {
-          sessionCleanupState.pendingRequestId = "";
-          sessionCleanupState.scanStartedAt = 0;
-          stopSessionCleanupElapsedTicker();
-          refreshStoragePanelIfVisible();
+          return false;
         }
-        return submitted;
+        // The bridge call itself is the delivery acknowledgement available to
+        // the renderer.  Only now do we enter the pending state that disables
+        // controls and starts elapsed-time tracking.
+        sessionCleanupState.pendingRequestId = requestId;
+        sessionCleanupState.scanStartedAt = Date.now();
+        sessionCleanupState.selectedIds.clear();
+        sessionCleanupState.previewTokenShown = "";
+        if (transferOpen) {
+          sessionTransferState.scanRequestId = requestId;
+          sessionTransferState.operation = {
+            action: "sessionCleanupScan",
+            state: "scanning",
+            requestId,
+            progress: 0,
+          };
+          sessionTransferState.selectedIds.clear();
+          renderSessionTransferDialog();
+        } else {
+          renderSettingsModal("storage", "正在扫描本地会话清单...");
+        }
+        scheduleSessionCleanupScanWatchdog(requestId);
+        return true;
       }
 
       function requestSessionCleanupPreview() {
@@ -647,6 +735,9 @@ TEXT = r"""
           sessionCleanupState.pendingRequestId = "";
           if (new Set(["scan", "sessionCleanupScan"]).has(String(operation?.action || ""))) {
             sessionCleanupState.scanStartedAt = 0;
+            if (!pendingRequestId || responseRequestId === pendingRequestId) {
+              stopSessionCleanupScanWatchdog();
+            }
           }
         }
         rerenderUsageInsightsIfVisible();
@@ -670,6 +761,7 @@ TEXT = r"""
           restoreSessionCleanupConfirm(token);
         }
         ensureSessionCleanupElapsedTicker();
+        if (sessionTransferState.open) applySessionTransferPayload(payload);
       }
 
     function install() {
@@ -682,6 +774,7 @@ TEXT = r"""
 
     function dispose() {
       stopSessionCleanupElapsedTicker();
+      stopSessionCleanupScanWatchdog();
       return true;
     }
 
@@ -709,6 +802,7 @@ TEXT = r"""
       sessionCleanupPhaseLabel,
       formatSessionCleanupElapsed,
       sessionCleanupScanActive,
+      activeSessionCleanupScanRequestId,
       stopSessionCleanupElapsedTicker,
       syncSessionCleanupElapsed,
       ensureSessionCleanupElapsedTicker,
@@ -755,6 +849,7 @@ TEXT = r"""
     sessionCleanupPhaseLabel,
     formatSessionCleanupElapsed,
     sessionCleanupScanActive,
+    activeSessionCleanupScanRequestId,
     stopSessionCleanupElapsedTicker,
     syncSessionCleanupElapsed,
     ensureSessionCleanupElapsedTicker,

@@ -404,6 +404,7 @@ class UserConfigStoreTests(unittest.TestCase):
                 "provider_scope_mode": "custom",
                 "selected_providers": ["Muyuan", "custom", "muyuan"],
                 "notification_only_providers": ["Notice", "muyuan", "notice"],
+                "quick_launch_providers": ["Muyuan", "custom", "muyuan"],
                 "provider_settings": {
                     "muyuan": {
                         "pricing_url": "https://pricing.example/muyuan.json",
@@ -419,10 +420,12 @@ class UserConfigStoreTests(unittest.TestCase):
         self.assertEqual(config.provider_scope_mode, "custom")
         self.assertEqual(config.selected_providers, ["custom", "muyuan"])
         self.assertEqual(config.notification_only_providers, ["notice"])
+        self.assertEqual(config.quick_launch_providers, ["custom", "muyuan"])
         self.assertEqual(config.provider_settings["muyuan"].weekly_adjustment_usd, 2.5)
         self.assertEqual(config.provider_price_table("muyuan")["gpt-5"]["provider"], "muyuan")
         self.assertEqual(config.to_dict()["provider_settings"]["muyuan"]["pricing_url"], "https://pricing.example/muyuan.json")
         self.assertEqual(config.to_dict()["notification_only_providers"], ["notice"])
+        self.assertEqual(config.to_dict()["quick_launch_providers"], ["custom", "muyuan"])
 
     def test_provider_settings_collapse_legacy_prefixed_duplicate_prices(self) -> None:
         config = UserConfig.from_dict(

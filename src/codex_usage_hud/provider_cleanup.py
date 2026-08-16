@@ -20,6 +20,22 @@ def _provider_price_key_matches(key: object, raw_price: object, provider: str) -
     return text.startswith(f"{provider}/")
 
 
+def _remove_provider_quick_launch(
+    config: UserConfig,
+    provider_id: str,
+) -> UserConfig:
+    provider = normalize_provider(provider_id)
+    if not provider:
+        raise ValueError("Provider ID 不能为空。")
+    raw = config.to_dict()
+    raw["quick_launch_providers"] = [
+        item
+        for item in raw.get("quick_launch_providers", [])
+        if normalize_provider(item) != provider
+    ]
+    return UserConfig.from_dict(raw)
+
+
 def remove_provider_pricing(
     config: UserConfig,
     provider_id: str,
@@ -64,6 +80,11 @@ def remove_provider_pricing(
     raw["notification_only_providers"] = [
         item
         for item in raw.get("notification_only_providers", [])
+        if normalize_provider(item) != provider
+    ]
+    raw["quick_launch_providers"] = [
+        item
+        for item in raw.get("quick_launch_providers", [])
         if normalize_provider(item) != provider
     ]
 
@@ -119,15 +140,22 @@ def delete_provider_for_context(
         "pricingVersions": 0,
         "pricingAudit": 0,
     }
+    settings_store = getattr(context, "settings_store", None)
+    load = getattr(settings_store, "load", None)
+    save = getattr(settings_store, "save", None)
     settings_changed = False
     if bool(command.get("deleteModelPrices")):
-        settings_store = getattr(context, "settings_store", None)
-        load = getattr(settings_store, "load", None)
-        save = getattr(settings_store, "save", None)
         if not callable(load) or not callable(save):
             raise RuntimeError("HUD 单价配置存储当前不可用。")
         current = load()
         updated, pricing_result = remove_provider_pricing(current, provider)
+    elif callable(load) and callable(save):
+        current = load()
+        updated = _remove_provider_quick_launch(current, provider)
+    else:
+        current = None
+        updated = None
+    if updated is not None:
         settings_changed = updated != current
         if settings_changed:
             save(updated)

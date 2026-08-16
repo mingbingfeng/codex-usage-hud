@@ -1,6 +1,6 @@
 HEAD = r"""
 (() => {
-  const version = "53";
+  const version = "54";
   const rootId = "codex-usage-hud-root";
   // Reinstalling the same Renderer bundle in a live document must be
   // idempotent.  In particular, do not tear down the old runtime while a
@@ -171,6 +171,7 @@ SHARED_HEAD = r"""
   let storageRefreshTimer = 0;
   let storageRefreshLastAt = 0;
   let sessionCleanupElapsedTimer = 0;
+  let sessionCleanupScanWatchdogTimer = 0;
   let restReminderCountdownTimer = 0;
   let restReminderSavedRequestId = "";
 const sessionCleanupState = {

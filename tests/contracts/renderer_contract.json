@@ -6,8 +6,8 @@
   },
   "currentBundle": {
     "phase": "P6.7",
-    "sha256": "1e584bf26cd00c62333a4b1a5eff83c796c5302ddd6c5365806a929af8cf7b50",
-    "byteLength": 899404
+    "sha256": "d9c23865e602be05c9e4347a6abc7242aa1af09cf28c74962575fb26b0502d2f",
+    "byteLength": 947253
   },
   "sha256": "f83d65265c55143fa775f509f09ce109c2aa75a03946b42cf462cb6cbd4ea637",
   "byteLength": 548705,
@@ -38,10 +38,10 @@
     "backgroundUsage", "diagnostics", "usageInsights", "sessionCleanup"
   ],
   "lifecycleCounts": {
-    "mutationObservers": 6,
+    "mutationObservers": 7,
     "resizeObservers": 1,
     "setIntervals": 4,
-    "setTimeouts": 24,
+    "setTimeouts": 25,
     "kernelSetIntervals": 1,
     "kernelSetTimeouts": 2
   },
@@ -137,7 +137,7 @@
     "settings_restart", "settings_export", "composer_attachments", "layout_report",
     "layout_settle", "layout_settle", "layout_settle", "composer_layout", "layout_bootstrap",
     "session_view_progress", "copy_feedback", "stale_guard", "codex_cli_launch_timeout",
-    "codex_cli_launch_min_visible"
+    "codex_cli_launch_min_visible", "session_cleanup_scan_watchdog"
   ],
   "timeoutInventory": [
     {"owner": "model_picker", "creation": "ctx.lifecycle.timeout(\"model_picker\", patchCodexModelPicker, delay)", "cleanup": "ctx.lifecycle.clearTimeout(timer)"},
@@ -160,7 +160,8 @@
     {"owner": "layout_bootstrap", "creation": "window[bootstrapTimerName] = setTimeout(stopBootstrapObserver, 5000)", "cleanup": "clearTimeout(window[bootstrapTimerName] || 0)"},
     {"owner": "session_view_progress", "creation": "setTimeout(() => root.querySelectorAll(\".codex-usage-hud-progress-rail\")", "cleanup": "one-shot callback"},
     {"owner": "copy_feedback", "creation": "setTimeout(() => {\n      if (!node.isConnected) return", "cleanup": "one-shot callback"},
-    {"owner": "stale_guard", "creation": "window[staleTimerName] = setTimeout(markHudStale, staleUpdateMs + 250)", "cleanup": "clearTimeout(window[staleTimerName] || 0)"}
+    {"owner": "stale_guard", "creation": "window[staleTimerName] = setTimeout(markHudStale, staleUpdateMs + 250)", "cleanup": "clearTimeout(window[staleTimerName] || 0)"},
+    {"owner": "session_cleanup_scan_watchdog", "creation": "ctx.lifecycle.timeout(\n          \"session_cleanup_scan_watchdog\"", "cleanup": "ctx.lifecycle.clearTimeout(sessionCleanupScanWatchdogTimer)"}
   ],
   "bindingInventory": [
     {"name": "codexUsageHudActiveSession", "installOrder": 1, "owner": "active_session", "startCondition": "active-session callback is configured", "cleanup": "self._active_session_binding.close()"},

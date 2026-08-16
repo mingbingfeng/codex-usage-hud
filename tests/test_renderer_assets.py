@@ -158,19 +158,35 @@ def test_provider_settings_expose_session_copy_and_transfer_workflow() -> None:
     assert "codex-usage-hud-session-transfer-card" in LAYOUT_STYLE
 
 
+def test_session_transfer_reuses_session_management_scan_state_and_controls() -> None:
+    script = renderer_script._RENDERER_HUD_SCRIPT_TEMPLATE
+    assert "function activeSessionCleanupScanRequestId" in script
+    assert "requestSessionCleanupScan({ preserveTransfer: true })" in script
+    assert "function sessionTransferSelectableIds" in script
+    assert "for (const id of sessionTransferSelectableIds())" in script
+    assert "sessionTransferMode.dataset.sessionTransferMode" in script
+    assert "if (sessionTransferState.open) applySessionTransferPayload(payload);" in script
+    assert "function scheduleSessionCleanupScanWatchdog(requestId)" in script
+    assert 'const bindingAvailable = !!ctx.bindings?.available?.(settingsCommandBindingName);' in SETTINGS_SHELL
+    assert "sessionCleanupScanWatchdogTimer" in script
+
+
 def test_codex_cli_dialog_is_compact_and_persists_profile_scoped_launches() -> None:
     form_start = SETTINGS_SHELL.index("function codexCliFormHtml()")
     form_end = SETTINGS_SHELL.index("function renderCodexCliDialog()", form_start)
     form = SETTINGS_SHELL[form_start:form_end]
-    launch_start = SETTINGS_SHELL.index("function launchCodexCliFromDialog()")
+    launch_start = SETTINGS_SHELL.index("function launchCodexCliWithState(command)")
     launch_end = SETTINGS_SHELL.index("function applyCodexCliCommandStatus", launch_start)
     launch = SETTINGS_SHELL[launch_start:launch_end]
 
     assert "codexCliLaunchStorageKey" in renderer_script._RENDERER_HUD_SCRIPT_TEMPLATE
-    assert "function codexCliLaunchStateKey()" in SETTINGS_SHELL
+    assert "function codexCliLaunchStateKey(" in SETTINGS_SHELL
     assert "profile:" in SETTINGS_SHELL
     assert "|provider:" in SETTINGS_SHELL
-    assert "applyCodexCliPersistedLaunchState(codexCliPersistedLaunchState());" in SETTINGS_SHELL
+    assert "const persistedLaunchState = codexCliPersistedLaunchState();" in SETTINGS_SHELL
+    assert "function codexCliValidatedQuickLaunchState(" in SETTINGS_SHELL
+    assert "if (saved.commandEdited === true) return null;" in SETTINGS_SHELL
+    assert "applyCodexCliPersistedLaunchState(persistedLaunchState);" in SETTINGS_SHELL
     assert "codexCliState.useProxy = false;" in SETTINGS_SHELL
     assert 'data-codex-cli-proxy-port="true"' in form
     assert 'proxyPort.hidden = codexCliState.useProxy !== true;' in SETTINGS_SHELL
@@ -185,9 +201,10 @@ def test_codex_cli_dialog_is_compact_and_persists_profile_scoped_launches() -> N
     assert 'data-codex-cli-field="resume"' in form
     assert form.index('data-codex-cli-field="resume"') < form.index("启动终端")
     assert "codex-usage-hud-codex-cli-check codex-usage-hud-codex-cli-wide" not in form
-    assert "codexCliPersistLaunchState(command);" in launch
-    assert launch.index("codexCliPersistLaunchState(command);") < launch.index(
-        "submitSettingsCommand("
+    assert "codexCliPersistLaunchState(pendingLaunchState);" in SETTINGS_SHELL
+    assert "codexCliState.pendingLaunchState = codexCliLaunchState(command);" in launch
+    assert SETTINGS_SHELL.index("codexCliPersistLaunchState(pendingLaunchState);") > SETTINGS_SHELL.index(
+        'if (action === "codexCliLaunch"'
     )
     assert 'const requestId = typedSettingsRequestId("codex-cli-launch");' in launch
     assert 'mode: "codex-cli-launch"' in launch
@@ -202,6 +219,70 @@ def test_codex_cli_dialog_is_compact_and_persists_profile_scoped_launches() -> N
     assert "codexCliState.launchRequestId" in launch
     assert "codex-usage-hud-codex-cli-proxy {" in LAYOUT_STYLE
     assert "width: 76px;" in LAYOUT_STYLE
+
+
+def test_codex_cli_quick_launch_menu_is_idempotent_and_provider_scoped() -> None:
+    assert 'quick_launch_providers: []' in SETTINGS_SHELL
+    assert 'data-provider-quick-launch="true"' in SETTINGS_SHELL
+    assert 'data-codex-usage-hud-cli-menu-toggle="true"' in SETTINGS_SHELL
+    assert 'data-codex-usage-hud-cli-provider="true"' in SETTINGS_SHELL
+    assert 'role="menubar"' in SETTINGS_SHELL
+    assert "function syncCodexCliQuickLaunchMenu()" in SETTINGS_SHELL
+    assert "function openCodexCliFromApplicationMenu(provider)" in SETTINGS_SHELL
+    assert "openCodexCliQuickLaunch(normalizedProvider);" in SETTINGS_SHELL
+    assert 'data-codex-cli-quick-launch="true"' in SETTINGS_SHELL
+    assert 'data-codex-cli-quick-action="stop"' in SETTINGS_SHELL
+    assert 'action: "codexCliLaunchCancel"' in SETTINGS_SHELL
+    assert "codex-usage-hud-codex-cli-menu-style" in SETTINGS_SHELL
+    assert "MutationObserver" in SETTINGS_SHELL
+
+
+def test_codex_cli_quick_launch_auto_launch_requires_exact_saved_state() -> None:
+    key_start = SETTINGS_SHELL.index("function codexCliLaunchStateKey(")
+    key_end = SETTINGS_SHELL.index("function codexCliStoredLaunchStates()", key_start)
+    key = SETTINGS_SHELL[key_start:key_end]
+    validation_start = SETTINGS_SHELL.index("function codexCliValidatedQuickLaunchState(")
+    validation_end = SETTINGS_SHELL.index("function applyCodexCliPersistedLaunchState", validation_start)
+    validation = SETTINGS_SHELL[validation_start:validation_end]
+    discover_start = SETTINGS_SHELL.index('if (action === "codexCliDiscover"')
+    discover_end = SETTINGS_SHELL.index('if (action === "codexCliLaunch"', discover_start)
+    discover = SETTINGS_SHELL[discover_start:discover_end]
+
+    assert '"profile:" + (profile || "default")' in key
+    assert '"|provider:" + (provider || "default")' in key
+    assert "savedProvider !== provider || savedProfile !== profile" in validation
+    assert 'Object.prototype.hasOwnProperty.call(saved, "provider")' in validation
+    assert 'Object.prototype.hasOwnProperty.call(saved, "profile")' in validation
+    assert "if (saved.commandEdited === true) return null;" in validation
+    assert "terminals.some" in validation
+    assert "permissions.some" in validation
+    assert "if (!workdir) return null;" in validation
+    assert "proxyPort < 1 || proxyPort > 65535" in validation
+    assert discover.index("const validatedLaunchState = codexCliValidatedQuickLaunchState(") < discover.index(
+        "if (!validatedLaunchState)"
+    ) < discover.index("openCodexCliQuickLaunchConfiguration();")
+    assert discover.index("applyCodexCliPersistedLaunchState(validatedLaunchState);") < discover.index(
+        'ctx.lifecycle.frame("codex_cli_quick_launch"'
+    )
+    assert "if (codexCliState.open && codexCliIsQuickLaunch()) launchCodexCliFromQuickState();" in discover
+
+
+def test_codex_cli_quick_launch_invalid_runtime_configuration_reopens_dialog() -> None:
+    invalid_start = SETTINGS_SHELL.index("function codexCliQuickLaunchConfigurationInvalid(")
+    invalid_end = SETTINGS_SHELL.index("function applyCodexCliPersistedLaunchState", invalid_start)
+    invalid = SETTINGS_SHELL[invalid_start:invalid_end]
+    launch_status_start = SETTINGS_SHELL.index('if (action === "codexCliLaunch"')
+    launch_status_end = SETTINGS_SHELL.index("function settingsChromeMarkup", launch_status_start)
+    launch_status = SETTINGS_SHELL[launch_status_start:launch_status_end]
+
+    assert "工作目录不存在或不可访问" in invalid
+    assert "所选终端当前不可用" in invalid
+    assert "codexCliQuickLaunchConfigurationInvalid(status)" in launch_status
+    assert "quickLaunch && !quickDismissed && codexCliQuickLaunchConfigurationInvalid(status)" in launch_status
+    assert launch_status.index("quickLaunch && !quickDismissed && codexCliQuickLaunchConfigurationInvalid(status)") < launch_status.index(
+        'renderCodexCliQuickLaunch(\n                "error"'
+    )
+    assert "openCodexCliQuickLaunchConfiguration();" in launch_status
 
 
 def test_renderer_reinject_captures_active_session_sequences_before_remove() -> None:

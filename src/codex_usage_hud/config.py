@@ -238,6 +238,7 @@ class UserConfig:
     provider_scope_mode: str = "all"
     selected_providers: list[str] = field(default_factory=list)
     notification_only_providers: list[str] = field(default_factory=list)
+    quick_launch_providers: list[str] = field(default_factory=list)
     support_url: str = DEFAULT_SUPPORT_URL
     rest_reminder_enabled: bool = DEFAULT_REST_REMINDER_ENABLED
     rest_reminder_interval_minutes: int = DEFAULT_REST_REMINDER_INTERVAL_MINUTES
@@ -290,6 +291,9 @@ class UserConfig:
         notification_only_providers = normalize_provider_names(
             value.get("notification_only_providers")
         )
+        quick_launch_providers = normalize_provider_names(
+            value.get("quick_launch_providers")
+        )
         if scope_mode == "all":
             notification_only_providers = []
         else:
@@ -341,6 +345,7 @@ class UserConfig:
             provider_scope_mode=scope_mode,
             selected_providers=selected_providers,
             notification_only_providers=notification_only_providers,
+            quick_launch_providers=quick_launch_providers,
             support_url=_optional_str(value.get("support_url")) or DEFAULT_SUPPORT_URL,
             rest_reminder_enabled=_optional_bool(value.get("rest_reminder_enabled"))
             if value.get("rest_reminder_enabled") is not None
@@ -409,6 +414,7 @@ class UserConfig:
             "provider_scope_mode": self.provider_scope_mode,
             "selected_providers": list(self.selected_providers),
             "notification_only_providers": list(self.notification_only_providers),
+            "quick_launch_providers": list(self.quick_launch_providers),
             "support_url": self.support_url,
             "rest_reminder_enabled": bool(self.rest_reminder_enabled),
             "rest_reminder_interval_minutes": int(self.rest_reminder_interval_minutes),

@@ -260,26 +260,26 @@ TEXT = r"""
       const sessionTransferTarget = event.target?.closest?.('[data-session-transfer-target="true"]');
       if (sessionTransferTarget && root.contains(sessionTransferTarget)) {
         sessionTransferState.targetProvider = String(sessionTransferTarget.value || "").trim().toLowerCase();
-        renderSessionTransferDialog();
+        syncSessionTransferDialogControls();
         return;
       }
       const sessionTransferMode = event.target?.closest?.('[data-session-transfer-mode]');
       if (sessionTransferMode && root.contains(sessionTransferMode)) {
-        sessionTransferState.mode = String(sessionTransferMode.value || "copy").toLowerCase() === "migrate"
+        sessionTransferState.mode = String(
+          sessionTransferMode.value || sessionTransferMode.dataset.sessionTransferMode || "copy",
+        ).toLowerCase() === "migrate"
           ? "migrate"
           : "copy";
-        renderSessionTransferDialog();
+        syncSessionTransferDialogControls();
         return;
       }
       const sessionTransferSelectAll = event.target?.closest?.('[data-session-transfer-select-all="true"]');
       if (sessionTransferSelectAll && root.contains(sessionTransferSelectAll)) {
-        for (const item of sessionTransferRows()) {
-          const id = String(item?.id || "");
-          if (!id || item?.selectable !== true) continue;
+        for (const id of sessionTransferSelectableIds()) {
           if (sessionTransferSelectAll.checked) sessionTransferState.selectedIds.add(id);
           else sessionTransferState.selectedIds.delete(id);
         }
-        renderSessionTransferDialog();
+        syncSessionTransferDialogControls();
         return;
       }
       const sessionTransferItem = event.target?.closest?.('[data-session-transfer-id]');
@@ -287,7 +287,7 @@ TEXT = r"""
         const id = String(sessionTransferItem.dataset.sessionTransferId || "");
         if (sessionTransferItem.checked) sessionTransferState.selectedIds.add(id);
         else sessionTransferState.selectedIds.delete(id);
-        renderSessionTransferDialog();
+        syncSessionTransferDialogControls();
         return;
       }
       const sessionFilter = event.target?.closest?.("[data-session-cleanup-filter]");

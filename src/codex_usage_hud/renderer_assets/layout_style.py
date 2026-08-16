@@ -2640,6 +2640,25 @@ TEXT = r"""
             opacity: .78;
             cursor: not-allowed;
           }
+          #${rootId} .codex-usage-hud-provider-quick-launch {
+            min-width: 0;
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            color: var(--codex-usage-hud-muted, #8492a6);
+            white-space: nowrap;
+            cursor: pointer;
+            font-size: 10px;
+          }
+          #${rootId} .codex-usage-hud-provider-quick-launch input {
+            width: 14px;
+            height: 14px;
+            margin: 0;
+            accent-color: var(--codex-usage-hud-accent, #f3d27a);
+          }
+          #${rootId} .codex-usage-hud-provider-quick-launch:has(input:checked) {
+            color: var(--codex-usage-hud-accent, #f3d27a);
+          }
           #${rootId} .codex-usage-hud-provider-meta {
             min-width: 0;
             color: var(--codex-usage-hud-muted, #8492a6);
@@ -4938,6 +4957,18 @@ TEXT = r"""
             line-height: 1.3;
             letter-spacing: 0;
           }
+          #${rootId} .codex-usage-hud-rest-toast-title-row {
+            display: flex;
+            align-items: baseline;
+            flex-wrap: wrap;
+            gap: 8px;
+          }
+          #${rootId} .codex-usage-hud-rest-prompt-elapsed {
+            color: rgba(243, 210, 122, 0.82);
+            font-size: 11px;
+            font-variant-numeric: tabular-nums;
+            white-space: nowrap;
+          }
           #${rootId} .codex-usage-hud-rest-toast-message {
             margin: 0;
             color: rgba(220, 231, 242, 0.92);
@@ -5099,6 +5130,10 @@ TEXT = r"""
             color: var(--codex-usage-hud-warning, #ffb86b);
             font-size: 13px;
             font-weight: 750;
+          }
+          #${rootId} .codex-usage-hud-rest-bubble-head .codex-usage-hud-rest-prompt-elapsed {
+            margin-left: auto;
+            font-weight: 650;
           }
           #${rootId} .codex-usage-hud-rest-bubble-detail {
             color: var(--codex-usage-hud-request-text, #b8c6d8);

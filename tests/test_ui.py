@@ -3339,6 +3339,7 @@ class BudgetHelperTests(unittest.TestCase):
             "canPostpone": True,
             "breakMinutes": 2,
             "postponeMinutes": 10,
+            "promptStartedAtMs": 90_000,
             "completedTodaySeconds": 65,
             "todayRestedSeconds": 95,
         }
@@ -3352,6 +3353,7 @@ class BudgetHelperTests(unittest.TestCase):
         )
         prompt_copy = _rest_reminder_card_copy(prompt, now_ms=100_000)
         self.assertEqual(prompt_copy["headerMeta"], "今日已休息 01:05")
+        self.assertEqual(prompt_copy["headerElapsed"], "已等待 00:10")
         self.assertEqual(
             prompt_copy["hint"],
             "如果您已提前休息过了，可以点击下方分钟数按钮标记已休息",
@@ -16222,7 +16224,7 @@ class DaemonLifecycleTests(unittest.TestCase):
         )
         fake_client.update.assert_called_once()
         self.assertEqual(fake_work_overlay.update.call_count, 1)
-        fake_work_overlay.keep_alive.assert_called_once()
+        self.assertEqual(fake_work_overlay.keep_alive.call_count, 2)
 
     def test_run_renderer_hud_session_does_not_create_startup_loading_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -16379,7 +16381,7 @@ class DaemonLifecycleTests(unittest.TestCase):
         runtime_signature.assert_not_called()
         build_snapshot.assert_called_once()
         fake_client.update.assert_called_once()
-        fake_work_overlay.keep_alive.assert_called_once()
+        self.assertEqual(fake_work_overlay.keep_alive.call_count, 2)
         self.assertIs(command_pump_factory.call_args.args[0], fake_work_overlay)
         self.assertTrue(callable(command_pump_factory.call_args.args[1]))
 
@@ -19066,7 +19068,7 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertEqual(exit_code, 130)
         build_snapshot.assert_called_once()
         fake_client.update.assert_called_once()
-        fake_work_overlay.keep_alive.assert_called_once()
+        self.assertEqual(fake_work_overlay.keep_alive.call_count, 2)
 
     def test_renderer_runtime_failures_retry_without_tk_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

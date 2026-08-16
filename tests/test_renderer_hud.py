@@ -690,6 +690,11 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("从 provider registry 刷新 API key 回显值", script)
         self.assertIn('data-provider-enabled="true"', script)
         self.assertIn('data-provider-notification-only="true"', script)
+        self.assertIn('data-provider-quick-launch="true"', script)
+        self.assertIn("quick_launch_providers: Array.from(draft.quickLaunchProviders || [])", script)
+        self.assertIn("function syncCodexCliQuickLaunchMenu", script)
+        self.assertIn('data-codex-usage-hud-cli-menu-toggle="true"', script)
+        self.assertIn('data-codex-usage-hud-cli-provider="true"', script)
         self.assertIn("仅气泡通知不统计", script)
         self.assertIn("function captureSettingsProviderForm", script)
         self.assertIn('data-price-model="${escapeHtml(model)}"', script)
@@ -750,6 +755,8 @@ class RendererHudPayloadTests(unittest.TestCase):
     def test_renderer_payload_exposes_default_prices_for_new_providers(self) -> None:
         payload = payload_from_snapshot(ParsedSession(status="waiting")).to_json()
         defaults = payload["settings"]["default_model_prices"]
+
+        self.assertEqual(payload["settings"]["quick_launch_providers"], [])
 
         self.assertEqual(
             set(defaults),
@@ -1305,8 +1312,8 @@ class RendererHudPayloadTests(unittest.TestCase):
         scan_end = script.index("function requestSessionCleanupPreview", scan_start)
         scan_script = script[scan_start:scan_end]
         self.assertLess(
-            scan_script.index('renderSettingsModal("storage"'),
             scan_script.index("submitSettingsCommand("),
+            scan_script.index('renderSettingsModal("storage"'),
         )
         self.assertIn("function formatSessionCleanupElapsed(startedAt)", script)
         self.assertIn(
@@ -1314,6 +1321,9 @@ class RendererHudPayloadTests(unittest.TestCase):
             script,
         )
         self.assertIn("function sessionCleanupScanActive()", script)
+        self.assertIn("function scheduleSessionCleanupScanWatchdog(requestId)", script)
+        self.assertIn('"session_cleanup_scan_watchdog"', script)
+        self.assertIn("扫描命令未收到响应，请重新扫描。", script)
         self.assertIn("function ensureSessionCleanupElapsedTicker()", script)
         self.assertIn(
             'ctx.lifecycle.interval(\n            "session_cleanup_elapsed"',
@@ -1870,7 +1880,7 @@ class RendererHudPayloadTests(unittest.TestCase):
     def test_renderer_top_redesign_styles_are_theme_tokenized(self) -> None:
         script = renderer_hud.RENDERER_HUD_SCRIPT
 
-        self.assertIn('const version = "53";', script)
+        self.assertIn('const version = "54";', script)
         self.assertIn("function refreshProgressRailBadge", script)
         self.assertIn("function progressBadgeCandidates", script)
         self.assertIn("function progressRailLeftLabelFits", script)
@@ -2022,6 +2032,10 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("data-rest-reminder-start-time", script)
         self.assertIn("data-rest-reminder-status-title", script)
         self.assertIn("data-rest-reminder-remaining", script)
+        self.assertIn("data-rest-reminder-prompt-elapsed", script)
+        self.assertIn("promptStartedAtMs", script)
+        self.assertIn("restReminderPromptElapsedText", script)
+        self.assertIn('bubbleVisible && phase === "prompt"', script)
         self.assertIn("restReminderStatusTitle", script)
         self.assertIn('"rest_reminder_settings"', script)
         self.assertIn('startInput.dataset.userEdited !== "true"', script)
@@ -3787,12 +3801,15 @@ class RendererHudClientTests(unittest.TestCase):
         )
 
         captured: list[str] = []
+        bindings: list[object] = []
 
         class FakeBinding:
             def __init__(self, binding_name, callback, *, timeout_seconds, disconnect_callback=None):
                 self.binding_name = binding_name
                 self.callback = callback
                 self.timeout_seconds = timeout_seconds
+                self.retry_same_target = False
+                bindings.append(self)
                 captured.append(binding_name)
 
             def ensure(self, websocket_url: str, target_id: str) -> None:
@@ -3847,6 +3864,7 @@ class RendererHudClientTests(unittest.TestCase):
             ) = originals
 
         self.assertIn(renderer_hud.SETTINGS_COMMAND_BINDING_NAME, captured)
+        self.assertTrue(bindings[0].retry_same_target)
         self.assertEqual(ensure_calls, [("ws://127.0.0.1/devtools/page/1", "target-1")])
         self.assertEqual(close_calls, 1)
 

@@ -12,7 +12,10 @@ TEXT = r"""
             <div class="codex-usage-hud-rest-toast-icon" aria-hidden="true">☕</div>
             <div>
               <p class="codex-usage-hud-rest-toast-kicker">专注休息</p>
-              <h2 class="codex-usage-hud-rest-toast-title" id="codex-usage-hud-rest-title">该休息一下了</h2>
+              <div class="codex-usage-hud-rest-toast-title-row">
+                <h2 class="codex-usage-hud-rest-toast-title" id="codex-usage-hud-rest-title">该休息一下了</h2>
+                <span class="codex-usage-hud-rest-prompt-elapsed" data-rest-reminder-prompt-elapsed="true">已等待 00:00</span>
+              </div>
             </div>
           </div>
           <p class="codex-usage-hud-rest-toast-message" data-rest-reminder-message="true">站起来走走，让眼睛放松片刻。</p>
@@ -42,6 +45,7 @@ TEXT = r"""
         <div class="codex-usage-hud-rest-bubble-head">
           <span aria-hidden="true">☕</span>
           <span data-rest-reminder-bubble-title="true">休息提醒</span>
+          <span class="codex-usage-hud-rest-prompt-elapsed" data-rest-reminder-prompt-elapsed="true" hidden>已等待 00:00</span>
         </div>
         <div class="codex-usage-hud-rest-bubble-detail" data-rest-reminder-bubble-detail="true"></div>
         <div class="codex-usage-hud-rest-bubble-early-actions" data-rest-reminder-bubble-early-actions="true" hidden>
@@ -80,6 +84,12 @@ TEXT = r"""
     const parts = [minutes, remainder].map((value) => String(value).padStart(2, "0"));
     if (hours > 0) parts.unshift(String(hours).padStart(2, "0"));
     return parts.join(":");
+  }
+
+  function restReminderPromptElapsedText(reminder, now = Date.now()) {
+    const startedAt = Number(reminder?.promptStartedAtMs) || 0;
+    if (startedAt <= 0) return "已等待 00:00";
+    return `已等待 ${formatRestReminderBubbleDuration(Math.max(0, (now - startedAt) / 1000))}`;
   }
 
   function restReminderBubbleCopy(reminder, now = Date.now()) {
@@ -134,9 +144,14 @@ TEXT = r"""
     const title = bubble.querySelector('[data-rest-reminder-bubble-title="true"]');
     const detail = bubble.querySelector('[data-rest-reminder-bubble-detail="true"]');
     const status = bubble.querySelector('[data-rest-reminder-bubble-status="true"]');
+    const promptElapsed = bubble.querySelector('[data-rest-reminder-prompt-elapsed="true"]');
     if (title) title.textContent = copy.title;
     if (detail) detail.textContent = copy.detail;
     if (status) status.textContent = copy.status;
+    if (promptElapsed) {
+      promptElapsed.textContent = restReminderPromptElapsedText(reminder);
+      promptElapsed.hidden = String(reminder?.phase || "") !== "prompt" || reminder?.preview === true;
+    }
     const earlyActions = bubble.querySelector('[data-rest-reminder-bubble-early-actions="true"]');
     if (earlyActions) earlyActions.hidden = String(reminder?.phase || "") !== "prompt";
     const secondary = bubble.querySelector('[data-rest-reminder-bubble-secondary="true"]');
@@ -196,17 +211,22 @@ TEXT = r"""
     }
     const reminder = currentPayload()?.restReminder;
     const phase = String(reminder?.phase || "");
-    const infinitePrompt = reminder?.promptWaitInfinite === true && !reminder?.preview;
     const needsTicker = (
       (toastVisible && phase === "preview")
       || (bubbleVisible && (phase === "postponed" || phase === "resting"))
-      || (toastVisible && phase === "prompt" && !infinitePrompt)
+      || (toastVisible && phase === "prompt")
+      || (bubbleVisible && phase === "prompt")
     );
     if (!needsTicker) {
       stopRestReminderOverlayTicker();
     }
     if (bubbleVisible) applyRestReminderBubbleContent(bubble, reminder);
     if (toastVisible) {
+      const promptElapsed = toast.querySelector('[data-rest-reminder-prompt-elapsed="true"]');
+      if (promptElapsed) {
+        promptElapsed.textContent = restReminderPromptElapsedText(reminder);
+        promptElapsed.hidden = phase !== "prompt" || reminder?.preview === true;
+      }
       const countdown = toast.querySelector('[data-rest-reminder-break-countdown="true"]');
       const infinite = reminder?.promptWaitInfinite === true && !reminder?.preview;
       const seconds = (Number(reminder?.promptEndsAtMs) - Date.now()) / 1000;
@@ -235,13 +255,13 @@ TEXT = r"""
     syncRestReminderOverlayCountdown();
     const reminder = currentPayload()?.restReminder;
     const phase = String(reminder?.phase || "");
-    const infinitePrompt = reminder?.promptWaitInfinite === true && !reminder?.preview;
     const toast = document.querySelector(`#${rootId} [data-rest-reminder-toast="true"]`);
     const bubble = document.querySelector(`#${rootId} [data-rest-reminder-bubble="true"]`);
     const needsTicker = (
       (toast?.dataset.visible === "true" && phase === "preview")
       || (bubble?.dataset.visible === "true" && (phase === "postponed" || phase === "resting"))
-      || (toast?.dataset.visible === "true" && phase === "prompt" && !infinitePrompt)
+      || (toast?.dataset.visible === "true" && phase === "prompt")
+      || (bubble?.dataset.visible === "true" && phase === "prompt")
     );
     if (!needsTicker) return;
     if (!restReminderOverlayTimer) {

@@ -227,6 +227,7 @@ class RestReminderScheduler:
         self._next_fire_wall = 0.0
         self._prompt_until = 0.0
         self._prompt_until_wall = 0.0
+        self._prompt_started_wall = 0.0
         self._postpone_until_wall = 0.0
         self._rest_started_at = 0.0
         self._rest_started_wall = 0.0
@@ -287,6 +288,10 @@ class RestReminderScheduler:
     @property
     def prompt_ends_at_wall(self) -> float:
         return self._prompt_until_wall if self.showing else 0.0
+
+    @property
+    def prompt_started_at_wall(self) -> float:
+        return self._prompt_started_wall if self.showing else 0.0
 
     @property
     def postpone_ends_at_wall(self) -> float:
@@ -468,6 +473,7 @@ class RestReminderScheduler:
             # keeps the persisted schema compatible with older installations.
             snapshot["promptEndsAtMs"] = 0
             snapshot["promptWaitInfinite"] = True
+            snapshot["promptStartedAtMs"] = int(round(self._prompt_started_wall * 1000.0))
             snapshot["reminderCanPostpone"] = not self._postpone_used
         elif self._phase == "postponed":
             snapshot["postponeEndsAtMs"] = int(round(self._postpone_until_wall * 1000.0))
@@ -586,6 +592,14 @@ class RestReminderScheduler:
             self._phase = "prompt"
             self._prompt_until_wall = 0.0
             self._prompt_until = 0.0
+            try:
+                prompt_started_wall = float(state.get("promptStartedAtMs") or 0.0) / 1000.0
+            except (TypeError, ValueError):
+                prompt_started_wall = 0.0
+            # Older snapshots do not have a prompt start timestamp.  Keep
+            # them compatible while making all new prompts count from the
+            # moment the prompt was actually shown.
+            self._prompt_started_wall = prompt_started_wall if prompt_started_wall > 0 else wall_now
             self._last_event = RestReminderEvent(
                 message=self._active_message or REST_REMINDER_MESSAGES[0],
                 can_postpone=not self._postpone_used,
@@ -844,6 +858,7 @@ class RestReminderScheduler:
         self._active_message = message
         self._prompt_until = 0.0
         self._prompt_until_wall = 0.0
+        self._prompt_started_wall = wall_now
         self._postpone_until_wall = 0.0
         self._last_event = event
         return event
@@ -881,6 +896,7 @@ class RestReminderScheduler:
     def _clear_prompt(self) -> None:
         self._prompt_until = 0.0
         self._prompt_until_wall = 0.0
+        self._prompt_started_wall = 0.0
         self._last_event = None
 
     def _clear_rest(self) -> None:
@@ -1205,6 +1221,9 @@ class RestReminderPresenter:
             else 0,
             "promptRemainingSeconds": int(round(prompt_remaining or 0.0)),
             "promptEndsAtMs": int(round(self.scheduler.prompt_ends_at_wall * 1000.0)),
+            "promptStartedAtMs": int(
+                round(self.scheduler.prompt_started_at_wall * 1000.0)
+            ),
             "postponeEndsAtMs": int(round(self.scheduler.postpone_ends_at_wall * 1000.0)),
             "restStartedAtMs": int(round(self.scheduler.rest_started_at_wall * 1000.0)),
             "restEndsAtMs": int(round(self.scheduler.rest_ends_at_wall * 1000.0)),
@@ -1264,6 +1283,7 @@ class RestReminderPresenter:
             "breakMinutes",
             "postponeMinutes",
             "promptEndsAtMs",
+            "promptStartedAtMs",
             "postponeEndsAtMs",
             "promptWaitInfinite",
             "earlyRestOptionsMinutes",

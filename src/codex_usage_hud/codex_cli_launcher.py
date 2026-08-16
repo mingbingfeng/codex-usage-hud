@@ -7,7 +7,7 @@ local work-directory discovery, and launching a new terminal process.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 import json
 import os
 from pathlib import Path
@@ -882,14 +882,33 @@ def launch_codex_cli(
     workdir: str,
     provider: str = "",
     platform_name: str | None = None,
+    cancel_requested: Callable[[], bool] | None = None,
+    commit_spawn: Callable[[], bool] | None = None,
 ) -> dict[str, object]:
     """Launch the user-edited command in a new terminal window or tab."""
+    def cancelled() -> bool:
+        try:
+            return bool(cancel_requested is not None and cancel_requested())
+        except Exception:
+            return True
+
+    def cancelled_result() -> dict[str, object]:
+        return {
+            "cancelled": True,
+            "terminalId": str(terminal_id or ""),
+            "workdir": str(workdir or "").strip(),
+        }
+
+    if cancelled():
+        return cancelled_result()
     command_text = str(command or "").strip()
     if not command_text:
         raise ValueError("Codex CLI 命令不能为空。")
     path = _normalise_existing_path(workdir)
     if path is None:
         raise ValueError("工作目录不存在或不可访问。")
+    if cancelled():
+        return cancelled_result()
     terminals = discover_terminals(platform_name=platform_name)
     terminal = next(
         (
@@ -901,6 +920,8 @@ def launch_codex_cli(
     )
     if terminal is None:
         raise ValueError("所选终端当前不可用，请重新打开终端列表。")
+    if cancelled():
+        return cancelled_result()
     executable = str(terminal.get("executable") or "").strip()
     if not executable:
         raise ValueError("所选终端没有可执行文件。")
@@ -917,12 +938,22 @@ def launch_codex_cli(
             opened_as_tab = True
     elif is_terminal_open(terminal, platform_name=platform):
         opened_as_tab = True
+    if cancelled():
+        return cancelled_result()
     creationflags = (
         getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
         if platform == "windows"
         else 0
     )
     title = build_codex_cli_title(provider=provider, workdir=str(path))
+    if commit_spawn is not None:
+        try:
+            if not bool(commit_spawn()):
+                return cancelled_result()
+        except Exception:
+            return cancelled_result()
+    elif cancelled():
+        return cancelled_result()
     # Redirected stdio makes PowerShell treat -NoExit as non-interactive and
     # exit after -Command completes. Let the new terminal own its stdio.
     process = subprocess.Popen(

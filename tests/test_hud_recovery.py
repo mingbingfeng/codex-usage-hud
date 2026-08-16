@@ -3,7 +3,10 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 from codex_usage_hud.renderer_client import RendererHudClient
-from codex_usage_hud.ui.work_overlay.qt_window import _state_has_persistent_sidecar
+from codex_usage_hud.ui.work_overlay.qt_window import (
+    _screen_item_limit,
+    _state_has_persistent_sidecar,
+)
 
 
 def test_unacknowledged_renderer_payload_reinstalls_immediately() -> None:
@@ -79,3 +82,23 @@ def test_visible_rest_reminder_is_a_persistent_overlay_sidecar() -> None:
     assert _state_has_persistent_sidecar({"persistent": True}, None, None)
     assert _state_has_persistent_sidecar(None, {"persistent": True}, None)
     assert not _state_has_persistent_sidecar(None, None, None)
+
+
+def test_missing_qt_screen_does_not_clamp_overlay_to_one_item() -> None:
+    class Geometry:
+        def __init__(self, height: int) -> None:
+            self._height = height
+
+        def height(self) -> int:
+            return self._height
+
+    class Screen:
+        def __init__(self, height: int) -> None:
+            self._geometry = Geometry(height)
+
+        def availableGeometry(self) -> Geometry:
+            return self._geometry
+
+    assert _screen_item_limit(None) is None
+    assert _screen_item_limit(Screen(1)) is None
+    assert _screen_item_limit(Screen(1080)) == 6

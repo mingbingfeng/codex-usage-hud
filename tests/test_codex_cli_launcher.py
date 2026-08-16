@@ -273,6 +273,41 @@ def test_launch_codex_cli_uses_selected_terminal_and_workdir(tmp_path: Path, mon
     assert "stderr" not in process_calls[0]
 
 
+def test_launch_codex_cli_cancel_gate_prevents_popen(tmp_path: Path, monkeypatch) -> None:
+    process_calls: list[object] = []
+    monkeypatch.setattr(
+        launcher,
+        "discover_terminals",
+        lambda **_: [
+            {
+                "id": "powershell7",
+                "label": "PowerShell 7",
+                "executable": "C:/pwsh.exe",
+                "shell": "powershell",
+                "kind": "shell",
+                "shellExecutable": "C:/pwsh.exe",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        launcher.subprocess,
+        "Popen",
+        lambda *args, **kwargs: process_calls.append((args, kwargs)),
+    )
+
+    result = launcher.launch_codex_cli(
+        terminal_id="powershell7",
+        command="codex --help",
+        workdir=str(tmp_path),
+        platform_name="linux",
+        cancel_requested=lambda: False,
+        commit_spawn=lambda: False,
+    )
+
+    assert result["cancelled"] is True
+    assert process_calls == []
+
+
 def test_launch_codex_cli_refreshes_missing_windows_environment(
     tmp_path: Path, monkeypatch
 ) -> None:

@@ -182,6 +182,41 @@ class RestReminderSchedulerTests(unittest.TestCase):
         self.assertEqual(payload["remainingSeconds"], 48)
         self.assertEqual(payload["timerStartedAtMs"], 1_700_000_000_000)
 
+    def test_prompt_payload_exposes_popup_start_for_elapsed_title_timer(self) -> None:
+        clock = {"now": 0.0}
+        wall = {"now": self.WORK_WALL}
+        scheduler = RestReminderScheduler(
+            idle_seconds_provider=lambda: 0.0,
+            message_picker=lambda: "rest",
+            clock=lambda: clock["now"],
+            wall_clock=lambda: wall["now"],
+        )
+        presenter = RestReminderPresenter(
+            scheduler,
+            wall_clock=lambda: wall["now"],
+            persist_enabled=False,
+        )
+        presenter.configure(
+            RestReminderConfig(
+                enabled=True,
+                interval_minutes=1,
+                break_minutes=1,
+                idle_reset_minutes=0,
+            ),
+            force_reset=True,
+        )
+
+        clock["now"] = 61.0
+        wall["now"] += 61.0
+        self.assertIsNotNone(presenter.tick())
+        first = presenter.desktop_bubble_payload()
+        self.assertEqual(first["phase"], "prompt")
+        self.assertEqual(first["promptStartedAtMs"], int(wall["now"] * 1000))
+
+        wall["now"] += 7.0
+        second = presenter.renderer_payload()
+        self.assertEqual(second["promptStartedAtMs"], first["promptStartedAtMs"])
+
     def test_prompt_start_and_early_finish_reschedules(self) -> None:
         clock = {"now": 1000.0}
         wall = {"now": self.WORK_WALL}
@@ -1186,6 +1221,7 @@ class RestReminderSchedulerTests(unittest.TestCase):
         assert snapshot is not None
         self.assertEqual(snapshot["phase"], "prompt")
         self.assertEqual(snapshot["promptEndsAtMs"], 0)
+        self.assertEqual(snapshot["promptStartedAtMs"], int(wall["now"] * 1000))
         self.assertTrue(snapshot["promptWaitInfinite"])
 
         wall["now"] += 20.0

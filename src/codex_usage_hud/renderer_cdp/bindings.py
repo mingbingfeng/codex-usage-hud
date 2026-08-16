@@ -227,13 +227,23 @@ class _RendererBinding:
                     return
                 self._sock = sock
             self._send_command(sock, 1, "Runtime.enable", {})
+            # A page can retain a Runtime binding after the owning CDP
+            # websocket dies.  Remove the old registration before adding the
+            # same name again so a restarted HUD does not leave a callable
+            # JavaScript function pointed at a dead listener.
             self._send_command(
                 sock,
                 2,
+                "Runtime.removeBinding",
+                {"name": self.binding_name},
+            )
+            self._send_command(
+                sock,
+                3,
                 "Runtime.addBinding",
                 {"name": self.binding_name},
             )
-            pending = {1, 2}
+            pending = {1, 2, 3}
             while not stop_event.is_set():
                 try:
                     message = receive_message(sock)

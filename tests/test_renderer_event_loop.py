@@ -731,6 +731,7 @@ def test_pre_refresh_codex_cli_launch_runs_async_and_wakes_renderer() -> None:
             "message": "正在打开终端并启动 Codex CLI...",
             "kind": "",
             "restartVisible": False,
+            "cancellable": True,
         }
         assert inputs.event_refresh_request.domains == {"settings"}
         assert not inputs.event_refresh_request.snapshot
@@ -745,6 +746,114 @@ def test_pre_refresh_codex_cli_launch_runs_async_and_wakes_renderer() -> None:
         assert state.settings_command_status["codexCliLaunch"] == {"pid": 42}
         assert result_inputs.event_refresh_request.domains == {"settings"}
         assert not result_inputs.event_refresh_request.snapshot
+    finally:
+        release.set()
+        executor.close()
+
+
+def test_pre_refresh_codex_cli_cancel_before_spawn_prevents_commit() -> None:
+    started = Event()
+    release = Event()
+    woke = Event()
+
+    def execute(command: dict[str, object]) -> dict[str, object]:
+        started.set()
+        assert release.wait(timeout=1.0)
+        cancel_requested = command["_codexCliCancelRequested"]
+        commit_spawn = command["_codexCliCommitSpawn"]
+        assert callable(cancel_requested)
+        assert callable(commit_spawn)
+        assert cancel_requested() is True
+        assert commit_spawn() is False
+        return {
+            "action": "codexCliLaunch",
+            "requestId": command["requestId"],
+            "message": "已停止 Codex CLI 启动，未创建终端。",
+            "kind": "",
+            "codexCliLaunchCancelled": True,
+        }
+
+    state = RendererLoopState(latest_snapshot=SimpleNamespace())
+    executor = RendererPreRefreshExecutor(
+        state,
+        _pre_refresh_ports(execute_command=execute, wake=woke.set),
+    )
+    launch_inputs = _tick_inputs(
+        plan=RefreshPlan(snapshot=True),
+        command={"action": "codexCliLaunch", "requestId": "launch-cancel"},
+    )
+
+    try:
+        executor.apply_settings_command(launch_inputs)
+        assert started.wait(timeout=1.0)
+        cancel_inputs = _tick_inputs(
+            plan=RefreshPlan(snapshot=True),
+            command={
+                "action": "codexCliLaunchCancel",
+                "requestId": "cancel-1",
+                "launchRequestId": "launch-cancel",
+            },
+        )
+        executor.apply_settings_command(cancel_inputs)
+
+        assert state.settings_command_status["action"] == "codexCliLaunchCancel"
+        assert state.settings_command_status["cancelAccepted"] is True
+        assert state.settings_command_status["spawnCommitted"] is False
+        release.set()
+        assert woke.wait(timeout=1.0)
+
+        result_inputs = _tick_inputs(plan=RefreshPlan(snapshot=True))
+        executor.apply(result_inputs)
+        assert state.settings_command_status["codexCliLaunchCancelled"] is True
+    finally:
+        release.set()
+        executor.close()
+
+
+def test_pre_refresh_codex_cli_cancel_after_spawn_commit_is_rejected() -> None:
+    committed = Event()
+    release = Event()
+
+    def execute(command: dict[str, object]) -> dict[str, object]:
+        commit_spawn = command["_codexCliCommitSpawn"]
+        assert callable(commit_spawn)
+        assert commit_spawn() is True
+        committed.set()
+        assert release.wait(timeout=1.0)
+        return {
+            "action": "codexCliLaunch",
+            "requestId": command["requestId"],
+            "message": "已启动 Codex CLI。",
+            "kind": "",
+            "codexCliLaunch": {"pid": 43},
+        }
+
+    state = RendererLoopState(latest_snapshot=SimpleNamespace())
+    executor = RendererPreRefreshExecutor(
+        state,
+        _pre_refresh_ports(execute_command=execute),
+    )
+    launch_inputs = _tick_inputs(
+        plan=RefreshPlan(snapshot=True),
+        command={"action": "codexCliLaunch", "requestId": "launch-committed"},
+    )
+
+    try:
+        executor.apply_settings_command(launch_inputs)
+        assert committed.wait(timeout=1.0)
+        cancel_inputs = _tick_inputs(
+            plan=RefreshPlan(snapshot=True),
+            command={
+                "action": "codexCliLaunchCancel",
+                "requestId": "cancel-too-late",
+                "launchRequestId": "launch-committed",
+            },
+        )
+        executor.apply_settings_command(cancel_inputs)
+
+        assert state.settings_command_status["cancelAccepted"] is False
+        assert state.settings_command_status["spawnCommitted"] is True
+        assert state.settings_command_status["kind"] == "warning"
     finally:
         release.set()
         executor.close()

@@ -471,6 +471,15 @@ class OverlayRenderingMixin:
                 )
             )
         )
+        if rest_reminder and str(item.get("headerElapsed") or "").strip():
+            header_text = " · ".join(
+                part
+                for part in (
+                    header_text,
+                    str(item.get("headerElapsed") or "").strip(),
+                )
+                if part
+            )
 
         card = record["card"]
         card.setStyleSheet(

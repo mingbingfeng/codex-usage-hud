@@ -222,7 +222,13 @@ class SessionCleanupWorker:
                     previous_publisher = getattr(self.manager, "progress_publisher", None)
                     self.manager.progress_publisher = self._publish
                     try:
-                        with CodexAppServerClient() as app_server:
+                        sessions_root = getattr(self._context, "sessions_root", None)
+                        codex_home = (
+                            Path(sessions_root).parent
+                            if sessions_root is not None
+                            else None
+                        )
+                        with CodexAppServerClient(codex_home=codex_home) as app_server:
                             snapshot = self.manager.transfer(
                                 item_ids,
                                 revision,
@@ -233,6 +239,10 @@ class SessionCleanupWorker:
                                     session_id,
                                     provider,
                                     cwd=cwd,
+                                ),
+                                verify=lambda session_id, provider: app_server.verify_persistent_thread(
+                                    session_id,
+                                    provider,
                                 ),
                                 request_id=request_id,
                             )
