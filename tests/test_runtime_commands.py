@@ -343,6 +343,42 @@ def test_general_command_status_keeps_request_and_action() -> None:
     assert status["action"] == "dismissWarningsToday"
 
 
+def test_general_command_can_request_codex_restart() -> None:
+    config = UserConfig.defaults()
+    restart_codex = MagicMock()
+    ports = GeneralCommandPorts(
+        load_config=lambda: config,
+        save_config=lambda value: None,
+        fetch_prices=lambda url: {},
+        rest_reminder=None,
+        update_manager=None,
+        work_overlay=None,
+        request_restart=lambda: None,
+        request_exit=lambda: None,
+        check_update=lambda: SimpleNamespace(error="", available=False, current_version="1"),
+        install_update=lambda info: None,
+        overlay_status=lambda: {},
+        start_overlay_install=lambda: False,
+        clear_forced_missing=lambda: None,
+        forced_missing_with_real_install=lambda: False,
+        pyside_version=lambda: "",
+        default_overlay_limit=lambda: 1,
+        dismiss_warnings_today=lambda: True,
+        request_restart_codex=restart_codex,
+    )
+
+    status = dispatch_command(
+        {"action": "restartCodex", "requestId": "codex-restart-1"},
+        RuntimeCommandPorts(),
+        ports,
+    )
+
+    restart_codex.assert_called_once_with()
+    assert status["requestId"] == "codex-restart-1"
+    assert status["action"] == "restartCodex"
+    assert "Codex Desktop" in status["message"]
+
+
 def test_general_command_dispatches_provider_delete() -> None:
     deleted: list[dict[str, object]] = []
     config = UserConfig.defaults()

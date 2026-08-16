@@ -18,6 +18,17 @@ TEXT = r"""
         return value && typeof value === "object" && Object.keys(value).length ? value : null;
       }
 
+      function sessionCleanupPayloadWithInventory(data) {
+        const incoming = data && typeof data === "object" ? data : {};
+        const previous = sessionCleanupState.data && typeof sessionCleanupState.data === "object"
+          ? sessionCleanupState.data
+          : {};
+        if (Array.isArray(incoming.sessions) || !Array.isArray(previous.sessions)) {
+          return incoming;
+        }
+        return { ...previous, ...incoming, sessions: previous.sessions };
+      }
+
       function cleanupIconSvg(name, extraClass = "") {
         const paths = {
           scan: '<path d="M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2"/><circle cx="11" cy="11" r="4"/><path d="m16 16 3 3"/>',
@@ -711,8 +722,9 @@ TEXT = r"""
       }
 
       function applySessionCleanupPayload(_root, payload) {
-        const data = payload?.sessionCleanup;
-        if (!data || typeof data !== "object") return;
+        const incoming = payload?.sessionCleanup;
+        if (!incoming || typeof incoming !== "object") return;
+        const data = sessionCleanupPayloadWithInventory(incoming);
         sessionCleanupState.data = data;
         const sessions = Array.isArray(data?.sessions) ? data.sessions : [];
         const validIds = new Set(sessions.filter((item) => item?.selectable === true).map((item) => String(item?.id || "")));

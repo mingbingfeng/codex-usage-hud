@@ -6,8 +6,8 @@
   },
   "currentBundle": {
     "phase": "P6.7",
-    "sha256": "63c5e4ef7ea19951032d5ccb6e3619beabf2df7869ba13dde22e30a10e736fb0",
-    "byteLength": 949238
+    "sha256": "1659417bb9e7f857cc19d46f7ac79159d2f8efceb145ce5c3ccd434809c463ee",
+    "byteLength": 960657
   },
   "sha256": "f83d65265c55143fa775f509f09ce109c2aa75a03946b42cf462cb6cbd4ea637",
   "byteLength": 548705,
@@ -41,7 +41,7 @@
     "mutationObservers": 7,
     "resizeObservers": 1,
     "setIntervals": 4,
-    "setTimeouts": 25,
+    "setTimeouts": 28,
     "kernelSetIntervals": 1,
     "kernelSetTimeouts": 2
   },
@@ -137,7 +137,8 @@
     "settings_restart", "settings_export", "composer_attachments", "layout_report",
     "layout_settle", "layout_settle", "layout_settle", "composer_layout", "layout_bootstrap",
     "session_view_progress", "copy_feedback", "stale_guard", "codex_cli_launch_timeout",
-    "codex_cli_launch_min_visible", "session_cleanup_scan_watchdog"
+    "codex_cli_launch_min_visible", "session_cleanup_scan_watchdog",
+    "session_transfer_selection", "session_transfer_select_all", "session_transfer_selection"
   ],
   "timeoutInventory": [
     {"owner": "model_picker", "creation": "ctx.lifecycle.timeout(\"model_picker\", patchCodexModelPicker, delay)", "cleanup": "ctx.lifecycle.clearTimeout(timer)"},
@@ -161,7 +162,10 @@
     {"owner": "session_view_progress", "creation": "setTimeout(() => root.querySelectorAll(\".codex-usage-hud-progress-rail\")", "cleanup": "one-shot callback"},
     {"owner": "copy_feedback", "creation": "setTimeout(() => {\n      if (!node.isConnected) return", "cleanup": "one-shot callback"},
     {"owner": "stale_guard", "creation": "window[staleTimerName] = setTimeout(markHudStale, staleUpdateMs + 250)", "cleanup": "clearTimeout(window[staleTimerName] || 0)"},
-    {"owner": "session_cleanup_scan_watchdog", "creation": "ctx.lifecycle.timeout(\n          \"session_cleanup_scan_watchdog\"", "cleanup": "ctx.lifecycle.clearTimeout(sessionCleanupScanWatchdogTimer)"}
+    {"owner": "session_cleanup_scan_watchdog", "creation": "ctx.lifecycle.timeout(\n          \"session_cleanup_scan_watchdog\"", "cleanup": "ctx.lifecycle.clearTimeout(sessionCleanupScanWatchdogTimer)"},
+    {"owner": "session_transfer_selection", "creation": "ctx.lifecycle.timeout(\"session_transfer_selection\"", "cleanup": "lifecycle teardown"},
+    {"owner": "session_transfer_select_all", "creation": "ctx.lifecycle.timeout(\"session_transfer_select_all\"", "cleanup": "lifecycle teardown"},
+    {"owner": "session_transfer_selection", "creation": "ctx.lifecycle.timeout(\"session_transfer_selection\"", "cleanup": "lifecycle teardown"}
   ],
   "bindingInventory": [
     {"name": "codexUsageHudActiveSession", "installOrder": 1, "owner": "active_session", "startCondition": "active-session callback is configured", "cleanup": "self._active_session_binding.close()"},

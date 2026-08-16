@@ -151,6 +151,7 @@ class GeneralCommandPorts:
     pyside_version: Callable[[], str]
     default_overlay_limit: Callable[[], int]
     dismiss_warnings_today: Callable[[], bool]
+    request_restart_codex: Callable[[], None] | None = None
     pricing_open_path: Callable[[Path], None] | None = None
     save_codex_providers: Callable[[object], Mapping[str, object]] | None = None
     delete_provider: Callable[[Mapping[str, object]], Mapping[str, object]] | None = None
@@ -1288,6 +1289,11 @@ def handle_general_command(
         if action == "restart":
             ports.request_restart()
             return _status("已请求重启 HUD；daemon 模式会自动恢复。")
+        if action == "restartCodex":
+            if ports.request_restart_codex is None:
+                return _status("当前运行模式不支持立即重启 Codex Desktop。", kind="error")
+            ports.request_restart_codex()
+            return _status("已请求立即重启 Codex Desktop；HUD 将在重启后重新连接。")
         if action == "exit":
             ports.request_exit()
             return _status("已请求退出 HUD；后台守护进程也会一并停止。")
@@ -1470,6 +1476,7 @@ def _handle_renderer_settings_command(
     update_manager: AutoUpdateManager | None = None,
     work_overlay: DesktopWorkOverlay | None = None,
     session_controller: SessionSwitchController | None = None,
+    request_restart_codex: Callable[[], None] | None = None,
 ) -> dict[str, object]:
     command_ports = RuntimeCommandPorts(
         background_usage=getattr(context, "background_usage_runtime", None),
@@ -1603,6 +1610,7 @@ def _handle_renderer_settings_command(
         update_manager=update_manager,
         work_overlay=work_overlay,
         request_restart=restart_requested.set,
+        request_restart_codex=request_restart_codex,
         request_exit=exit_requested.set,
         check_update=lambda: check_for_update(current_version=__version__),
         install_update=install_update,

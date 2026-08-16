@@ -153,6 +153,7 @@ TEXT = r"""
       if (search === sessionTransferState.search) return false;
       sessionTransferState.search = search;
       sessionTransferState.selectedIds.clear();
+      sessionTransferState.page = 0;
       renderSessionTransferDialog();
       return true;
     };
@@ -184,6 +185,15 @@ TEXT = r"""
       const codexCliField = event.target?.closest?.("[data-codex-cli-field]");
       if (codexCliField && root.contains(codexCliField)) {
         codexCliFieldInput(String(codexCliField.dataset.codexCliField || ""));
+        return;
+      }
+      const sessionTransferMode = event.target?.closest?.('[data-session-transfer-mode]');
+      if (sessionTransferMode && root.contains(sessionTransferMode)) {
+        // Radio input events fire as soon as the native selection changes.
+        // Update the action label without waiting for a renderer payload or a
+        // later change event.
+        sessionTransferState.mode = sessionTransferModeValue(sessionTransferMode);
+        syncSessionTransferSubmitButton(sessionTransferState.mode);
         return;
       }
       const restStartInput = event.target?.closest?.('[data-rest-reminder-start-time="true"]');
@@ -265,12 +275,8 @@ TEXT = r"""
       }
       const sessionTransferMode = event.target?.closest?.('[data-session-transfer-mode]');
       if (sessionTransferMode && root.contains(sessionTransferMode)) {
-        sessionTransferState.mode = String(
-          sessionTransferMode.value || sessionTransferMode.dataset.sessionTransferMode || "copy",
-        ).toLowerCase() === "migrate"
-          ? "migrate"
-          : "copy";
-        syncSessionTransferDialogControls();
+        sessionTransferState.mode = sessionTransferModeValue(sessionTransferMode);
+        syncSessionTransferSubmitButton(sessionTransferState.mode);
         return;
       }
       const sessionTransferSelectAll = event.target?.closest?.('[data-session-transfer-select-all="true"]');
@@ -406,6 +412,42 @@ TEXT = r"""
           }
           return;
         }
+      }
+      const sessionTransferItem = event.target?.closest?.('[data-session-transfer-id]');
+      if (sessionTransferItem && root.contains(sessionTransferItem)) {
+        // Keep the native checkbox interaction and reconcile after its default action.
+        ctx.lifecycle.timeout("session_transfer_selection", () => {
+          syncSessionTransferSelection(sessionTransferItem);
+        }, 0);
+        return;
+      }
+      const sessionTransferModeInput = event.target?.closest?.('[data-session-transfer-mode]');
+      const sessionTransferModeLabel = event.target?.closest?.('.codex-usage-hud-session-transfer-mode label');
+      const sessionTransferMode = sessionTransferModeInput
+        || sessionTransferModeLabel?.querySelector?.('[data-session-transfer-mode]');
+      if (sessionTransferMode && root.contains(sessionTransferMode)) {
+        // Update the primary action in the same click task, before any list
+        // synchronization can run.
+        sessionTransferState.mode = sessionTransferModeValue(sessionTransferMode);
+        syncSessionTransferSubmitButton(sessionTransferState.mode);
+        return;
+      }
+      const sessionTransferSelectAll = event.target?.closest?.('[data-session-transfer-select-all="true"]');
+      if (sessionTransferSelectAll && root.contains(sessionTransferSelectAll)) {
+        ctx.lifecycle.timeout("session_transfer_select_all", () => {
+          syncSessionTransferSelectAll(sessionTransferSelectAll);
+        }, 0);
+        return;
+      }
+      const sessionTransferRow = event.target?.closest?.('[data-session-transfer-row="true"]');
+      if (sessionTransferRow && root.contains(sessionTransferRow)) {
+        const checkbox = sessionTransferRow.querySelector('[data-session-transfer-id]');
+        if (checkbox && !checkbox.disabled) {
+          ctx.lifecycle.timeout("session_transfer_selection", () => {
+            syncSessionTransferSelection(checkbox);
+          }, 0);
+        }
+        return;
       }
       const action = event.target?.closest?.("[data-action]");
       if (!action || !root.contains(action)) return;
@@ -581,6 +623,24 @@ TEXT = r"""
         event.preventDefault();
         event.stopPropagation();
         submitSessionTransfer();
+        return;
+      }
+      if (action.dataset.action === "session-transfer-page") {
+        event.preventDefault();
+        event.stopPropagation();
+        moveSessionTransferPage(action.dataset.direction === "prev" ? -1 : 1);
+        return;
+      }
+      if (action.dataset.action === "session-transfer-refresh-desktop") {
+        event.preventDefault();
+        event.stopPropagation();
+        refreshCodexDesktopSessionList();
+        return;
+      }
+      if (action.dataset.action === "session-transfer-restart-codex") {
+        event.preventDefault();
+        event.stopPropagation();
+        restartCodexDesktop();
         return;
       }
       if (action.dataset.action === "session-cleanup-date-toggle") {

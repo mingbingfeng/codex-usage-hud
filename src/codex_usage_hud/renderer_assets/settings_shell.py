@@ -1758,7 +1758,6 @@ _TEXT_PREFIX = r"""
         const parts = [];
         let tone = "";
         if (provider === settingsProviderDraft?.appProvider) {
-          parts.push("Codex App · 必选");
           tone = "required";
         } else if (detail.historicalOnly) {
           parts.push("历史通道");
@@ -3117,6 +3116,8 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
         }
       }
 
+      const sessionTransferPageSize = 50;
+
       function sessionTransferProviderTargets(settings, sourceProvider) {
         const draft = ensureSettingsProviderDraft(settings);
         const source = String(sourceProvider || "").trim().toLowerCase();
@@ -3163,8 +3164,18 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
       }
 
       function sessionTransferView(data = sessionCleanupFromPayload()) {
-        const rows = sessionTransferRows(data);
-        const selectableIds = rows
+        const allRows = sessionTransferRows(data);
+        const totalPages = Math.max(1, Math.ceil(allRows.length / sessionTransferPageSize));
+        const page = Math.min(
+          Math.max(0, Number(sessionTransferState.page || 0)),
+          totalPages - 1,
+        );
+        sessionTransferState.page = page;
+        const rows = allRows.slice(
+          page * sessionTransferPageSize,
+          (page + 1) * sessionTransferPageSize,
+        );
+        const selectableIds = allRows
           .filter((item) => item?.selectable === true)
           .map((item) => String(item?.id || "").trim())
           .filter(Boolean);
@@ -3175,11 +3186,51 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
         if (selected.size !== sessionTransferState.selectedIds.size) {
           sessionTransferState.selectedIds = selected;
         }
-        return { rows, selectableIds, selectableSet, selected };
+        return {
+          rows,
+          allRows,
+          selectableIds,
+          selectableSet,
+          selected,
+          page,
+          totalPages,
+        };
       }
 
       function sessionTransferSelectableIds(data = sessionCleanupFromPayload()) {
         return new Set(sessionTransferView(data).selectableIds);
+      }
+
+      function syncSessionTransferSelection(input) {
+        const id = String(input?.dataset?.sessionTransferId || "").trim();
+        if (!id) return false;
+        if (input.checked) sessionTransferState.selectedIds.add(id);
+        else sessionTransferState.selectedIds.delete(id);
+        syncSessionTransferDialogControls();
+        return true;
+      }
+
+      function syncSessionTransferSelectAll(input) {
+        const selectedIds = sessionTransferSelectableIds();
+        for (const id of selectedIds) {
+          if (input?.checked) sessionTransferState.selectedIds.add(id);
+          else sessionTransferState.selectedIds.delete(id);
+        }
+        syncSessionTransferDialogControls();
+        return true;
+      }
+
+      function moveSessionTransferPage(direction) {
+        const view = sessionTransferView();
+        const delta = Number(direction || 0) < 0 ? -1 : 1;
+        const nextPage = Math.min(
+          Math.max(0, view.page + delta),
+          view.totalPages - 1,
+        );
+        if (nextPage === view.page) return false;
+        sessionTransferState.page = nextPage;
+        renderSessionTransferDialog();
+        return true;
       }
 
       function sessionTransferOperation() {
@@ -3196,6 +3247,19 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
           || !!sessionTransferState.requestId
           || !!activeSessionCleanupScanRequestId()
           || new Set(["scanning", "accepted", "running"]).has(state);
+      }
+
+      function sessionTransferModeValue(input) {
+        return String(input?.value || input?.dataset?.sessionTransferMode || "copy").toLowerCase() === "migrate"
+          ? "migrate"
+          : "copy";
+      }
+
+      function syncSessionTransferSubmitButton(mode = sessionTransferState.mode) {
+        const submit = sessionTransferDialogLayer()?.querySelector?.('[data-session-transfer-submit-button="true"]');
+        if (!submit) return false;
+        submit.textContent = String(mode || "copy").toLowerCase() === "migrate" ? "开始迁移" : "开始复制";
+        return true;
       }
 
       function sessionTransferResultHtml(operation) {
@@ -3215,6 +3279,23 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
           ? `已复制 ${copied} · 已删除源会话 ${migrated} · 失败 ${failed}`
           : `已复制 ${copied} · 失败 ${failed}`;
         const operationError = String(operation?.error || "").trim();
+        const targetProvider = String(operation?.targetProvider || "").trim().toLowerCase();
+        const appProvider = String(hudSettingsFromPayload()?.app_provider || "").trim().toLowerCase();
+        const hasTargetSession = Array.isArray(operation?.results)
+          && operation.results.some((item) => String(item?.targetSessionId || "").trim());
+        const isCodexDesktopTarget = state !== "failed"
+          && !!targetProvider
+          && targetProvider === appProvider
+          && hasTargetSession;
+        const targetNotice = isCodexDesktopTarget
+          ? '<span class="codex-usage-hud-session-transfer-target-notice">Codex Desktop 不会实时更新对应工作目录的会话列表。可刷新列表，或立即重启 Codex Desktop 使会话显示。</span>'
+          : "";
+        const refreshAction = isCodexDesktopTarget
+          ? '<button type="button" class="codex-usage-hud-settings-action" data-action="session-transfer-refresh-desktop">刷新 Codex 会话列表</button>'
+          : "";
+        const restartAction = isCodexDesktopTarget
+          ? '<button type="button" class="codex-usage-hud-settings-action" data-action="session-transfer-restart-codex" data-primary="true">立即重启 Codex Desktop</button>'
+          : "";
         const errors = [
           operationError
             ? `<div class="codex-usage-hud-session-transfer-error">${escapeHtml(operationError)}</div>`
@@ -3224,7 +3305,24 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
           .slice(0, 4)
           .map((item) => `<div class="codex-usage-hud-session-transfer-error">${escapeHtml(item?.title || "会话")}：${escapeHtml(item?.error || "未知错误")}</div>`),
         ].join("");
-        return `<div class="codex-usage-hud-session-transfer-result" data-kind="${state === "completed" ? "success" : "error"}"><strong>${escapeHtml(headline)}</strong><span>${escapeHtml(details)}</span>${errors}</div>`;
+        return `<div class="codex-usage-hud-session-transfer-result" data-kind="${state === "completed" ? "success" : "error"}"><strong>${escapeHtml(headline)}</strong><span>${escapeHtml(details)}</span>${targetNotice}${refreshAction}${restartAction}${errors}</div>`;
+      }
+
+      function refreshCodexDesktopSessionList() {
+        try {
+          window.location.reload();
+          return true;
+        } catch (_) {
+          return false;
+        }
+      }
+
+      function restartCodexDesktop() {
+        return submitSettingsCommand(
+          { action: "restartCodex" },
+          "正在重启 Codex Desktop，HUD 将在重启后重新连接...",
+          { preserveOverlay: true },
+        );
       }
 
       function syncSessionTransferDialogControls(data = sessionCleanupFromPayload(), viewOverride = null) {
@@ -3277,7 +3375,7 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
         const submit = layer.querySelector('[data-session-transfer-submit-button="true"]');
         if (submit) {
           submit.disabled = submitDisabled;
-          submit.textContent = sessionTransferState.mode === "migrate" ? "开始迁移" : "开始复制";
+          syncSessionTransferSubmitButton(sessionTransferState.mode);
         }
         const scanButton = layer.querySelector('[data-action="session-transfer-scan"]');
         if (scanButton) {
@@ -3349,6 +3447,12 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
           : busy
             ? (String(sessionTransferState.mode || "copy") === "migrate" ? "正在复制并安全删除源会话..." : "正在复制会话...")
             : "";
+        const totalRows = view.allRows.length;
+        const pageStart = totalRows ? view.page * sessionTransferPageSize + 1 : 0;
+        const pageEnd = Math.min(totalRows, (view.page + 1) * sessionTransferPageSize);
+        const pagination = view.totalPages > 1
+          ? `<div class="codex-usage-hud-session-transfer-pagination"><button type="button" class="codex-usage-hud-settings-icon-action" data-action="session-transfer-page" data-direction="prev" aria-label="上一页" title="上一页" ${busy || view.page <= 0 ? "disabled" : ""}>‹</button><span>第 ${view.page + 1}/${view.totalPages} 页 · ${pageStart}-${pageEnd}/${totalRows}</span><button type="button" class="codex-usage-hud-settings-icon-action" data-action="session-transfer-page" data-direction="next" aria-label="下一页" title="下一页" ${busy || view.page >= view.totalPages - 1 ? "disabled" : ""}>›</button></div>`
+          : "";
         const result = sessionTransferResultHtml(operation);
         return `<div class="codex-usage-hud-settings-confirm-card codex-usage-hud-session-transfer-card" role="dialog" aria-modal="true" aria-label="复制或迁移 Provider 会话">
           <div class="codex-usage-hud-session-transfer-head"><div><div class="codex-usage-hud-settings-confirm-kicker">Provider 会话</div><div class="codex-usage-hud-settings-confirm-title">复制或迁移会话</div></div><button type="button" class="codex-usage-hud-settings-icon-action" data-action="session-transfer-close" aria-label="关闭" title="关闭">×</button></div>
@@ -3358,6 +3462,7 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
             <div class="codex-usage-hud-session-transfer-search"><span aria-hidden="true">⌕</span><input type="search" data-session-transfer-search="true" value="${escapeHtml(sessionTransferState.search)}" placeholder="搜索标题或工作目录" aria-label="搜索会话"></div>
              <div class="codex-usage-hud-session-transfer-toolbar"><label><input type="checkbox" data-session-transfer-select-all="true" ${allSelected ? "checked" : ""} ${busy || !selectableIds.length ? "disabled" : ""}>全选当前筛选</label><span data-session-transfer-selection-count="true">${selected.size} / ${selectableIds.length} 个可选会话</span></div>
              <div class="codex-usage-hud-session-transfer-list">${rowHtml}</div>
+             ${pagination}
              <div class="codex-usage-hud-session-transfer-progress" data-session-transfer-progress="true" ${progressText ? "" : "hidden"}><span data-session-transfer-progress-label="true">${escapeHtml(progressText)}</span><span data-session-transfer-progress-value="true">${progress}%</span></div>
              <div data-session-transfer-result="true" ${result ? "" : "hidden"}>${result}</div>
            </div>
@@ -3378,11 +3483,13 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
 
       function closeSessionTransferDialog() {
         sessionTransferDialogLayer()?.remove();
+        delete window[sessionTransferStateName];
         sessionTransferState.open = false;
         sessionTransferState.sourceProvider = "";
         sessionTransferState.targetProvider = "";
         sessionTransferState.mode = "copy";
         sessionTransferState.search = "";
+        sessionTransferState.page = 0;
         sessionTransferState.selectedIds.clear();
         sessionTransferState.scanRequestId = "";
         sessionTransferState.requestId = "";
@@ -3414,10 +3521,12 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
         closeSettingsConfirm();
         closeSessionTransferDialog();
         sessionTransferState.open = true;
+        window[sessionTransferStateName] = sessionTransferState;
         sessionTransferState.sourceProvider = source;
         sessionTransferState.targetProvider = targets[0];
         sessionTransferState.mode = "copy";
         sessionTransferState.search = "";
+        sessionTransferState.page = 0;
         const data = sessionTransferDataFromPayload();
         sessionTransferState.data = data && typeof data === "object" ? data : null;
         sessionTransferState.operation = sessionTransferState.data?.operation || null;
@@ -3483,8 +3592,14 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
       }
 
       function applySessionTransferPayload(payload) {
-        const data = payload?.sessionCleanup;
-        if (!data || typeof data !== "object") return;
+        const incoming = payload?.sessionCleanup;
+        if (!incoming || typeof incoming !== "object") return;
+        const previous = sessionTransferState.data && typeof sessionTransferState.data === "object"
+          ? sessionTransferState.data
+          : {};
+        const data = Array.isArray(incoming.sessions) || !Array.isArray(previous.sessions)
+          ? incoming
+          : { ...previous, ...incoming, sessions: previous.sessions };
         sessionTransferState.data = data;
         const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
         const action = String(operation?.action || "").toLowerCase();
@@ -5244,7 +5359,12 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
       requestSessionTransferScan,
       submitSessionTransfer,
       sessionTransferSelectableIds,
+      syncSessionTransferSelection,
+      syncSessionTransferSelectAll,
+      moveSessionTransferPage,
       applySessionTransferPayload,
+      refreshCodexDesktopSessionList,
+      restartCodexDesktop,
       submitSettingsCommand,
       settingsDialogRoot,
       closeSettingsConfirm,
@@ -5376,7 +5496,12 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
     requestSessionTransferScan,
     submitSessionTransfer,
     sessionTransferSelectableIds,
+    syncSessionTransferSelection,
+    syncSessionTransferSelectAll,
+    moveSessionTransferPage,
     applySessionTransferPayload,
+    refreshCodexDesktopSessionList,
+    restartCodexDesktop,
     submitSettingsCommand,
     settingsDialogRoot,
     closeSettingsConfirm,

@@ -4136,6 +4136,22 @@ TEXT = r"""
             justify-content: space-between;
             gap: 8px;
           }
+          #${rootId} .codex-usage-hud-session-transfer-pagination {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            min-height: 28px;
+            color: var(--codex-usage-hud-muted, #9da1a8);
+            font-size: 10px;
+          }
+          #${rootId} .codex-usage-hud-session-transfer-pagination .codex-usage-hud-settings-icon-action {
+            flex: 0 0 26px;
+            width: 26px;
+            min-width: 26px;
+            height: 26px;
+            padding: 0;
+          }
           #${rootId} .codex-usage-hud-session-transfer-result[data-kind="success"] {
             border-color: #315b41;
             background: #18271e;
@@ -4147,6 +4163,10 @@ TEXT = r"""
             color: #ffb9bd;
           }
           #${rootId} .codex-usage-hud-session-transfer-error {
+            overflow-wrap: anywhere;
+            color: #ffcf9a;
+          }
+          #${rootId} .codex-usage-hud-session-transfer-target-notice {
             overflow-wrap: anywhere;
             color: #ffcf9a;
           }

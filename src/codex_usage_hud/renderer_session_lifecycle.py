@@ -88,6 +88,8 @@ class RendererSessionLoopControls:
     restart_event: object
     overlay: object
     daemon_restart_result: int
+    restart_codex_event: object | None = None
+    restart_codex_result: int = 0
     daemon_manager: object | None = None
     daemon_failure_exception: type[Exception] = RuntimeError
     unavailable_result: int = 0
@@ -124,12 +126,20 @@ class RendererSessionLoopControls:
         return requested
 
     def restart_requested(self) -> bool:
-        requested = bool(self.restart_event.is_set())
+        requested = bool(self.restart_event.is_set()) or bool(
+            self.restart_codex_event is not None
+            and self.restart_codex_event.is_set()
+        )
         if requested:
-            _LOGGER.info("renderer_hud_restart_requested")
+            _LOGGER.info(
+                "renderer_hud_restart_requested kind=%s",
+                "codex" if self.restart_codex_event is not None and self.restart_codex_event.is_set() else "hud",
+            )
         return requested
 
     def restart_result(self) -> int:
+        if self.restart_codex_event is not None and self.restart_codex_event.is_set():
+            return self.restart_codex_result
         return self.daemon_restart_result
 
     def daemon_tick(self) -> int | None:

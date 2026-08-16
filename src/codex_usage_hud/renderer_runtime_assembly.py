@@ -47,6 +47,7 @@ class RendererSessionAssembly:
     update_manager: object
     client: object
     restart_requested: Event
+    restart_codex_requested: Event
     exit_requested: Event
     runtime_signals: runtime_policies.RendererRuntimeSignals
     command_refresh_requested: Event
@@ -136,6 +137,7 @@ def assemble_renderer_session(
     resources.client = client
 
     restart_requested = Event()
+    restart_codex_requested = Event()
     exit_requested = Event()
     runtime_signals = runtime_policies.RendererRuntimeSignals()
     command_refresh_requested = runtime_signals.command_refresh
@@ -243,6 +245,7 @@ def assemble_renderer_session(
         update_manager=update_manager,
         client=client,
         restart_requested=restart_requested,
+        restart_codex_requested=restart_codex_requested,
         exit_requested=exit_requested,
         runtime_signals=runtime_signals,
         command_refresh_requested=command_refresh_requested,

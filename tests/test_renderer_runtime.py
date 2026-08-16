@@ -223,6 +223,25 @@ def test_renderer_session_loop_controls_maintain_connection_after_iteration() ->
     manager.maybe_probe.assert_called_once_with(snapshot, update_failures=3)
 
 
+def test_renderer_session_loop_controls_return_codex_restart_result() -> None:
+    state = RendererLoopState()
+    controls = RendererSessionLoopControls(
+        state=state,
+        monotonic=lambda: 0.0,
+        response_pending=lambda _status: False,
+        response_retry_delay=lambda _attempt: None,
+        exit_event=SimpleNamespace(is_set=lambda: False),
+        restart_event=SimpleNamespace(is_set=lambda: False),
+        restart_codex_event=SimpleNamespace(is_set=lambda: True),
+        restart_codex_result=32,
+        overlay=SimpleNamespace(),
+        daemon_restart_result=17,
+    )
+
+    assert controls.restart_requested()
+    assert controls.restart_result() == 32
+
+
 def test_renderer_session_loop_controls_resolve_current_snapshot_session() -> None:
     state = RendererLoopState(
         latest_snapshot=SimpleNamespace(session_path="session.jsonl")

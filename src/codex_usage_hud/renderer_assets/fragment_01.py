@@ -55,6 +55,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
   const settingsUiStorageKey = "codexUsageHudSettingsUiState:v1";
   const sessionCleanupFiltersStateName = "__codexUsageHudSessionCleanupFilters";
   const sessionCleanupFiltersStorageKey = "codexUsageHudSessionCleanupFilters:v1";
+  const sessionTransferStateName = "__codexUsageHudSessionTransferState";
   const activeSessionObserverName = "__codexUsageHudActiveSessionObserver";
   const activeSessionBootstrapObserverName = "__codexUsageHudActiveSessionBootstrapObserver";
   const activeSessionBootstrapTimerName = "__codexUsageHudActiveSessionBootstrapTimer";
@@ -193,18 +194,36 @@ previewTokenShown: "",
 scanStartedAt: 0,
 ...readSessionCleanupFilters(),
 };
-  const sessionTransferState = {
-    open: false,
-    sourceProvider: "",
-    targetProvider: "",
-    mode: "copy",
-    search: "",
-    selectedIds: new Set(),
-    scanRequestId: "",
-    requestId: "",
-    data: null,
-    operation: null,
-  };
+  const retainedSessionTransferState = window[sessionTransferStateName];
+  const sessionTransferState = retainedSessionTransferState && typeof retainedSessionTransferState === "object"
+    ? retainedSessionTransferState
+    : {
+      open: false,
+      sourceProvider: "",
+      targetProvider: "",
+      mode: "copy",
+      search: "",
+      selectedIds: new Set(),
+      scanRequestId: "",
+      requestId: "",
+      data: null,
+      operation: null,
+      page: 0,
+    };
+  sessionTransferState.open = sessionTransferState.open === true;
+  sessionTransferState.sourceProvider = String(sessionTransferState.sourceProvider || "");
+  sessionTransferState.targetProvider = String(sessionTransferState.targetProvider || "");
+  sessionTransferState.mode = String(sessionTransferState.mode || "copy").toLowerCase() === "migrate"
+    ? "migrate"
+    : "copy";
+  sessionTransferState.search = String(sessionTransferState.search || "");
+  sessionTransferState.selectedIds = sessionTransferState.selectedIds instanceof Set
+    ? sessionTransferState.selectedIds
+    : new Set(Array.isArray(sessionTransferState.selectedIds) ? sessionTransferState.selectedIds : []);
+  sessionTransferState.scanRequestId = String(sessionTransferState.scanRequestId || "");
+  sessionTransferState.requestId = String(sessionTransferState.requestId || "");
+  sessionTransferState.page = Math.max(0, Number(sessionTransferState.page || 0));
+  window[sessionTransferStateName] = sessionTransferState;
   let backgroundUsageFetchSeq = 0;
   let backgroundUsageDetailSeq = 0;
   const backgroundUsageRequestTimeoutMs = 5000;

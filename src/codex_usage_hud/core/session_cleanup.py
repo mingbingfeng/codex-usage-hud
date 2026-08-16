@@ -252,14 +252,14 @@ class SessionCleanupManager:
             "error": "",
         }
 
-    def snapshot(self) -> dict[str, object]:
+    def snapshot(self, *, include_sessions: bool = True) -> dict[str, object]:
         sessions = sorted(
             self._items.values(),
             key=lambda item: (item.updated_at, item.title.casefold()),
             reverse=True,
         )
         selectable = [item for item in sessions if item.selectable]
-        return {
+        payload: dict[str, object] = {
             "revision": self._revision,
             "generatedAt": _updated_at_iso(int(self._generated_at * 1000)),
             "capability": self._capability.to_payload(),
@@ -271,9 +271,11 @@ class SessionCleanupManager:
                 "bytes": sum(item.size for item in sessions),
                 "descendants": sum(item.descendant_count for item in sessions),
             },
-            "sessions": [item.to_payload() for item in sessions],
             "operation": dict(self._operation),
         }
+        if include_sessions:
+            payload["sessions"] = [item.to_payload() for item in sessions]
+        return payload
 
     def workdir_for_item(self, item_id: object, revision: object) -> Path | None:
         """Resolve one current inventory item without exposing its path in the payload."""
@@ -377,7 +379,7 @@ class SessionCleanupManager:
                 phaseCount=3,
             )
             if callable(publisher):
-                publisher(self.snapshot())
+                publisher(self.snapshot(include_sessions=False))
 
         report("sessions", "Reading session index", 1, 10)
         capability = self.probe_capability()
@@ -652,7 +654,7 @@ class SessionCleanupManager:
             # coalescing bursts from fast local forks.
             if not force and last_progress_publish and now - last_progress_publish < 0.075:
                 return
-            snapshot = self.mark_operation(
+            self.mark_operation(
                 request_id=request_id,
                 action="sessionTransfer",
                 state="running",
@@ -667,7 +669,7 @@ class SessionCleanupManager:
                 failedCount=failed_count,
             )
             if callable(publisher):
-                publisher(snapshot)
+                publisher(self.snapshot(include_sessions=False))
             last_progress_publish = now
 
         for item in items:

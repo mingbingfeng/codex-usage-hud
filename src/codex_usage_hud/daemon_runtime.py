@@ -187,6 +187,7 @@ def run_hud_session(
         seamless_recovery=seamless_recovery,
         overlay_handoff=overlay_handoff,
         loading_feedback=loading_feedback_instance,
+        restart_codex=restart,
     )
     if renderer_exit == HUD_SWITCH_TO_RENDERER_RESTART_CODEX:
         previous_pid = _manager_primary_pid(daemon_manager)
@@ -210,6 +211,7 @@ def run_hud_session(
             seamless_recovery=seamless_recovery,
             overlay_handoff=overlay_handoff,
             loading_feedback=loading_feedback_instance,
+            restart_codex=restart,
         )
     if renderer_exit == HUD_SWITCH_TO_RENDERER:
         _LOGGER.info("renderer_hud_legacy_switch_ignored code=%s", renderer_exit)

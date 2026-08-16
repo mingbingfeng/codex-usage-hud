@@ -170,10 +170,14 @@ class SessionCleanupManagerTests(unittest.TestCase):
         fixture = self._fixture()
         temporary, _root, _state, _index, _rollouts, manager = fixture
         self.addCleanup(temporary.cleanup)
+        progress_payloads: list[dict[str, object]] = []
         operations: list[dict[str, object]] = []
-        manager.progress_publisher = lambda payload: operations.append(
-            dict(payload["operation"])
-        )
+
+        def publish(payload: dict[str, object]) -> None:
+            progress_payloads.append(dict(payload))
+            operations.append(dict(payload["operation"]))
+
+        manager.progress_publisher = publish
 
         manager.scan(request_id="scan-progress")
 
@@ -186,6 +190,8 @@ class SessionCleanupManagerTests(unittest.TestCase):
         self.assertEqual(phase_three[0]["phaseLabel"], "Checking deletion protection")
         self.assertEqual(phase_three[0]["progress"], 60)
         self.assertEqual(phase_three[-1]["progress"], 99)
+        self.assertTrue(progress_payloads)
+        self.assertTrue(all("sessions" not in payload for payload in progress_payloads))
 
     def test_current_and_running_session_trees_are_blocked(self) -> None:
         fixture = self._fixture(child_status="running")
@@ -406,6 +412,7 @@ class SessionCleanupManagerTests(unittest.TestCase):
         self.assertEqual(len(execute.call_args.args[0]), 2)
         self.assertTrue(progress)
         self.assertTrue(all("results" not in row["operation"] for row in progress))
+        self.assertTrue(all("sessions" not in row for row in progress))
 
     def test_session_transfer_migrate_keeps_source_when_target_is_not_persistent(self) -> None:
         fixture = self._fixture()

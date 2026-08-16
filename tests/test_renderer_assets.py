@@ -156,16 +156,39 @@ def test_provider_settings_expose_session_copy_and_transfer_workflow() -> None:
     assert 'action: "sessionTransfer"' in SETTINGS_SHELL
     assert "sessionTransferState.selectedIds" in SETTINGS_SHELL
     assert "codex-usage-hud-session-transfer-card" in LAYOUT_STYLE
+    assert 'data-action="session-transfer-refresh-desktop"' in SETTINGS_SHELL
+    assert "function refreshCodexDesktopSessionList" in SETTINGS_SHELL
+    assert "window.location.reload()" in SETTINGS_SHELL
+    assert "const sessionTransferPageSize = 50" in SETTINGS_SHELL
+    assert 'data-action="session-transfer-page"' in SETTINGS_SHELL
+    assert "function moveSessionTransferPage" in SETTINGS_SHELL
+    assert 'data-action="session-transfer-restart-codex"' in SETTINGS_SHELL
+    assert "Codex Desktop 不会实时更新对应工作目录" in SETTINGS_SHELL
+    assert "function restartCodexDesktop" in SETTINGS_SHELL
+    assert 'parts.push("Codex App · 必选")' not in SETTINGS_SHELL
 
 
 def test_session_transfer_reuses_session_management_scan_state_and_controls() -> None:
     script = renderer_script._RENDERER_HUD_SCRIPT_TEMPLATE
+    assert 'const sessionTransferStateName = "__codexUsageHudSessionTransferState";' in script
+    assert "const retainedSessionTransferState = window[sessionTransferStateName];" in script
+    assert "window[sessionTransferStateName] = sessionTransferState;" in script
+    assert "delete window[sessionTransferStateName];" in script
     assert "function activeSessionCleanupScanRequestId" in script
     assert "requestSessionCleanupScan({ preserveTransfer: true })" in script
     assert "function sessionTransferSelectableIds" in script
+    assert "function syncSessionTransferSelection" in script
+    assert "function syncSessionTransferSelectAll" in script
+    assert "sessionCleanupPayloadWithInventory" in script
+    assert "function syncSessionTransferSubmitButton" in script
+    assert "sessionTransferState.mode = sessionTransferModeValue(sessionTransferMode);" in script
+    assert 'action.dataset.action === "session-transfer-restart-codex"' in script
     assert "for (const id of sessionTransferSelectableIds())" in script
-    assert "sessionTransferMode.dataset.sessionTransferMode" in script
+    assert "function sessionTransferModeValue" in script
+    assert 'const sessionTransferMode = event.target?.closest?.(\'[data-session-transfer-mode]\');' in script
+    assert "Radio input events fire as soon as the native selection changes." in script
     assert "if (sessionTransferState.open) applySessionTransferPayload(payload);" in script
+    assert 'action.dataset.action === "session-transfer-refresh-desktop"' in script
     assert "function scheduleSessionCleanupScanWatchdog(requestId)" in script
     assert 'const bindingAvailable = !!ctx.bindings?.available?.(settingsCommandBindingName);' in SETTINGS_SHELL
     assert "sessionCleanupScanWatchdogTimer" in script

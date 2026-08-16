@@ -214,6 +214,7 @@ def run_renderer_hud_session(
     loading_feedback: object | None = None,
     overlay_handoff: dict[str, object] | None = None,
     seamless_recovery: bool = False,
+    restart_codex: object | None = None,
     services: RuntimeServices | None = None,
 ) -> int:
     return renderer_runtime.run_renderer_hud_session(
@@ -225,6 +226,7 @@ def run_renderer_hud_session(
         loading_feedback=loading_feedback,
         overlay_handoff=overlay_handoff,
         seamless_recovery=seamless_recovery,
+        restart_codex=restart_codex,
         services=services,
         ports=RendererSessionPorts.from_mapping(globals()),
     )
