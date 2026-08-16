@@ -40,6 +40,7 @@ from .constants import (
 )
 from .geometry import (
     OverlayRect,
+    _card_slot_rect,
     _completed_badge_row_width,
     _completed_slot_rect,
     _defer_other_transition_items,
@@ -924,6 +925,24 @@ class OverlayRenderingMixin:
             visible_items,
             item_id,
             "card",
+            layout_width=self._layout_width,
+            side=self._side,
+        )
+        return QRect(
+            int(round(rect[0])),
+            int(round(rect[1])),
+            max(1, int(round(rect[2]))),
+            max(1, int(round(rect[3]))),
+        )
+
+    def _card_slot_record_geometry(
+        self,
+        index_from_top: int,
+        completed_count: int,
+    ) -> QRect:
+        rect = _card_slot_rect(
+            index_from_top,
+            completed_count,
             layout_width=self._layout_width,
             side=self._side,
         )

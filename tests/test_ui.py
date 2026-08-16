@@ -206,6 +206,7 @@ from codex_usage_hud.ui.work_overlay_qt import (
     _workdir_display_name,
     run_work_overlay_helper_qt,
 )
+from codex_usage_hud.ui.work_overlay.qt_rendering import OverlayRenderingMixin
 
 
 class _FakeWindow:
@@ -7150,6 +7151,22 @@ class WorkOverlayTransitionTests(unittest.TestCase):
         self.assertEqual(len(actual), len(expected))
         for actual_value, expected_value in zip(actual, expected):
             self.assertAlmostEqual(actual_value, expected_value, places=places)
+
+    def test_transition_card_slot_geometry_preserves_mirrored_targets(self) -> None:
+        owner = OverlayRenderingMixin()
+        owner._layout_width = 600
+
+        owner._side = "right"
+        right_rect = owner._card_slot_record_geometry(1, 1)
+        owner._side = "left"
+        left_rect = owner._card_slot_record_geometry(1, 1)
+
+        self.assertEqual((right_rect.x(), right_rect.y()), (170, 306))
+        self.assertEqual((left_rect.x(), left_rect.y()), (0, 306))
+        self.assertEqual(
+            (right_rect.width(), right_rect.height()),
+            (left_rect.width(), left_rect.height()),
+        )
 
     @staticmethod
     def _light_overlay_theme() -> dict[str, str]:

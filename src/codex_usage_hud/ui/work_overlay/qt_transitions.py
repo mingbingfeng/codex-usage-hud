@@ -466,7 +466,7 @@ class OverlayTransitionsMixin:
                     phase3 = QParallelAnimationGroup(self)
                     source_widget = self._transition_source_widget
                     circle_count_after = max(0, len(staged_circles) - 1)
-                    target_card = self._card_record_geometry(0, circle_count_after)
+                    target_card = self._card_slot_record_geometry(0, circle_count_after)
 
                     if source_widget is not None:
                         source_rect = source_widget.geometry()
@@ -498,7 +498,7 @@ class OverlayTransitionsMixin:
                         phase3.addAnimation(
                             self._animate_widget_geometry(
                                 widget,
-                                self._card_record_geometry(index_from_top + 1, circle_count_after),
+                                self._card_slot_record_geometry(index_from_top + 1, circle_count_after),
                                 duration_ms,
                                 QEasingCurve.Type.OutBack,
                             )
@@ -807,7 +807,7 @@ class OverlayTransitionsMixin:
                         widget = self._record_visual_widget(record)
                         if widget is None:
                             continue
-                        target = self._card_record_geometry(index_from_top, circle_count_after)
+                        target = self._card_slot_record_geometry(index_from_top, circle_count_after)
                         old_index = rects.index(record) if record in rects else index_from_top
                         if clicked_idx >= 0 and old_index < clicked_idx:
                             sequence = QSequentialAnimationGroup(self)
