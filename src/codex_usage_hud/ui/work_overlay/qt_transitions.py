@@ -566,6 +566,7 @@ class OverlayTransitionsMixin:
                         float(circle_rect.width()),
                         float(circle_rect.height()),
                     ),
+                    side=self._side,
                 )
                 return self._card_geometry_for_slot(target)
 
@@ -636,7 +637,8 @@ class OverlayTransitionsMixin:
                                     source_rect.y(),
                                     source_rect.width(),
                                     source_rect.height(),
-                                )
+                                ),
+                                side=self._side,
                             )
                         )
                     )

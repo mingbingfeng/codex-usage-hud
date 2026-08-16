@@ -48,6 +48,7 @@ from .geometry import (
     _find_item_rect,
     _overlay_items_required_height,
     _overlay_window_top_y,
+    _overlay_window_x,
     _transition_layout_width,
 )
 from .model import (
@@ -910,6 +911,7 @@ class OverlayRenderingMixin:
                 index_from_right,
                 completed_count,
                 layout_width=self._layout_width,
+                side=self._side,
             )
         )
 
@@ -923,6 +925,7 @@ class OverlayRenderingMixin:
             item_id,
             "card",
             layout_width=self._layout_width,
+            side=self._side,
         )
         return QRect(
             int(round(rect[0])),
@@ -1000,14 +1003,18 @@ class OverlayRenderingMixin:
             _overlay_items_required_height(
                 self._layout_items,
                 layout_width=layout_width,
+                side=self._side,
             ),
         )
         screen = self._qt_app.primaryScreen()
         available_geometry = screen.availableGeometry() if screen is not None else self.geometry()
         screen_geometry = screen.geometry() if screen is not None else available_geometry
-        x = max(
+        x = _overlay_window_x(
             available_geometry.left(),
-            available_geometry.right() - layout_width - WORK_OVERLAY_MARGIN,
+            available_geometry.right(),
+            layout_width,
+            WORK_OVERLAY_MARGIN,
+            self._side,
         )
         y = _overlay_window_top_y(screen_geometry.top())
         max_height = max(1, available_geometry.bottom() - y - WORK_OVERLAY_MARGIN + 1)

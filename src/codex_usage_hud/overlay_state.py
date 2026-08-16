@@ -7,6 +7,7 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 from . import overlay_ipc
+from .config import DEFAULT_WORK_OVERLAY_SIDE, normalize_work_overlay_side
 
 StateWriter = Callable[[Path, Mapping[str, object]], None]
 
@@ -14,6 +15,7 @@ StateWriter = Callable[[Path, Mapping[str, object]], None]
 def state_signature(
     *,
     item_limit: int,
+    side: str = DEFAULT_WORK_OVERLAY_SIDE,
     command_path: Path,
     items: Sequence[Mapping[str, object]],
     system_action: Mapping[str, object] | None = None,
@@ -26,6 +28,7 @@ def state_signature(
     return json.dumps(
         {
             "itemLimit": int(item_limit),
+            "side": normalize_work_overlay_side(side),
             "commandPath": str(command_path),
             "items": list(items),
             "systemAction": dict(system_action or {}) if not close else {},
@@ -43,6 +46,7 @@ def build_state_message(
     *,
     owner_pid: int,
     item_limit: int,
+    side: str = DEFAULT_WORK_OVERLAY_SIDE,
     command_path: Path,
     state_path: Path,
     revision: int,
@@ -59,6 +63,7 @@ def build_state_message(
     return overlay_ipc.state_message(
         ownerPid=owner_pid,
         itemLimit=int(item_limit),
+        side=normalize_work_overlay_side(side),
         commandPath=str(command_path),
         ackPath=str(overlay_ipc.ack_path(state_path)),
         revision=revision,

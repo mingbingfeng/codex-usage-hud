@@ -695,6 +695,70 @@ def test_pre_refresh_command_replaces_full_snapshot_with_partial_domains() -> No
     )
 
 
+def test_pre_refresh_command_updates_overlay_for_partial_overlay_domain() -> None:
+    configured = MagicMock()
+    updated = MagicMock()
+    state = RendererLoopState(
+        latest_snapshot=SimpleNamespace(active_work_items=["session-work"])
+    )
+    executor = RendererPreRefreshExecutor(
+        state,
+        _pre_refresh_ports(
+            current_config=lambda: "after",
+            execute_command=lambda command: {},
+            partial_domains_for_command=lambda command, previous, current: {
+                "settings",
+                "overlay",
+            },
+            overlay_configure=configured,
+            overlay_update=updated,
+            items_with_background_usage=lambda items: [*items, "background"],
+        ),
+    )
+    inputs = _tick_inputs(
+        plan=RefreshPlan(snapshot=True),
+        command={"action": "save"},
+    )
+
+    executor.apply_settings_command(inputs)
+
+    configured.assert_called_once_with()
+    updated.assert_called_once_with(["session-work", "background"])
+
+
+def test_pre_refresh_settings_file_updates_overlay_for_partial_overlay_domain() -> None:
+    configured = MagicMock()
+    updated = MagicMock()
+    store = SimpleNamespace(load=lambda: "next", mtime=lambda: 4.0)
+    state = RendererLoopState(
+        latest_snapshot=SimpleNamespace(active_work_items=["session-work"])
+    )
+    executor = RendererPreRefreshExecutor(
+        state,
+        _pre_refresh_ports(
+            current_config=lambda: "previous",
+            settings_store=store,
+            apply_config=MagicMock(),
+            changed_config_keys=lambda previous, current: {"work_overlay_side"},
+            partial_domains_for_changes=lambda keys: {"settings", "overlay"},
+            refresh_latest_snapshot=MagicMock(),
+            overlay_configure=configured,
+            overlay_update=updated,
+            items_with_background_usage=lambda items: [*items, "background"],
+        ),
+    )
+    inputs = _tick_inputs(
+        plan=RefreshPlan(snapshot=True),
+        reasons={"settings"},
+        events=[_event("settings_changed")],
+    )
+
+    executor.apply_partial_settings_file_change(inputs)
+
+    configured.assert_called_once_with()
+    updated.assert_called_once_with(["session-work", "background"])
+
+
 def test_pre_refresh_codex_cli_launch_runs_async_and_wakes_renderer() -> None:
     started = Event()
     release = Event()

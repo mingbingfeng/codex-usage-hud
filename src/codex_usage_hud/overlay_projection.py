@@ -10,7 +10,12 @@ import sys
 from typing import MutableMapping
 
 from . import overlay_ipc
-from .config import DEFAULT_WORK_OVERLAY_MAX_ITEMS, normalize_work_overlay_max_items
+from .config import (
+    DEFAULT_WORK_OVERLAY_MAX_ITEMS,
+    DEFAULT_WORK_OVERLAY_SIDE,
+    normalize_work_overlay_max_items,
+    normalize_work_overlay_side,
+)
 from .core import WorkStatusItem
 from .core.background_usage import BACKGROUND_USAGE_KIND
 
@@ -450,6 +455,13 @@ def _work_overlay_item_limit_for_context(context: object) -> int:
     if configured <= 0:
         return 0
     return min(configured, _work_overlay_screen_max_items())
+
+
+def _work_overlay_side_for_context(context: object) -> str:
+    config = getattr(context, "user_config", None)
+    return normalize_work_overlay_side(
+        getattr(config, "work_overlay_side", DEFAULT_WORK_OVERLAY_SIDE)
+    )
 
 
 def _work_overlay_runtime_task_key(item: WorkStatusItem) -> str:

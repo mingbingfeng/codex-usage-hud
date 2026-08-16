@@ -47,6 +47,8 @@ DEFAULT_DISPLAY_MODE = "renderer"
 VALID_DISPLAY_MODES = {"renderer"}
 DEFAULT_SUPPORT_URL = "https://github.com/mingbingfeng/codex-usage-hud"
 DEFAULT_WORK_OVERLAY_MAX_ITEMS = 6
+DEFAULT_WORK_OVERLAY_SIDE = "right"
+VALID_WORK_OVERLAY_SIDES = {"left", "right"}
 DEFAULT_COMPOSER_TIKTOKEN_BADGE_ENABLED = False
 DEFAULT_REST_REMINDER_ENABLED = False
 DEFAULT_REST_REMINDER_INTERVAL_MINUTES = 45
@@ -225,6 +227,7 @@ class UserConfig:
     weekly_reset_time: str = DEFAULT_WEEKLY_RESET_TIME
     display_mode: str = DEFAULT_DISPLAY_MODE
     work_overlay_max_items: int = DEFAULT_WORK_OVERLAY_MAX_ITEMS
+    work_overlay_side: str = DEFAULT_WORK_OVERLAY_SIDE
     model_prices: dict[str, ModelPrice] = field(default_factory=default_model_prices)
     pricing_versions: tuple[PriceVersion, ...] = ()
     pricing_audit: tuple[PriceAuditRecord, ...] = ()
@@ -327,6 +330,7 @@ class UserConfig:
             ),
             display_mode=normalize_display_mode(value.get("display_mode")),
             work_overlay_max_items=work_overlay_max_items,
+            work_overlay_side=normalize_work_overlay_side(value.get("work_overlay_side")),
             model_prices=prices,
             pricing_versions=pricing_versions,
             pricing_audit=pricing_audit,
@@ -403,6 +407,7 @@ class UserConfig:
             "weekly_reset_time": self.weekly_reset_time,
             "display_mode": self.display_mode,
             "work_overlay_max_items": int(self.work_overlay_max_items),
+            "work_overlay_side": self.work_overlay_side,
             "pricing_url": self.pricing_url,
             "budget_thresholds": list(self.budget_thresholds),
             "weekly_adjustment_usd": float(self.weekly_adjustment_usd),
@@ -1263,6 +1268,11 @@ def normalize_work_overlay_max_items(
     return min(amount, max(0, int(max_items)))
 
 
+def normalize_work_overlay_side(value: Any) -> str:
+    side = str(value or DEFAULT_WORK_OVERLAY_SIDE).strip().lower().replace("-", "_")
+    return side if side in VALID_WORK_OVERLAY_SIDES else DEFAULT_WORK_OVERLAY_SIDE
+
+
 def _extract_price_collection(value: Any) -> dict[str, ModelPrice]:
     prices: dict[str, ModelPrice] = {}
     if isinstance(value, Mapping):
@@ -1358,6 +1368,7 @@ __all__ = [
     "DEFAULT_WEEKLY_RESET_TIME",
     "DEFAULT_WEEKLY_RESET_WEEKDAY",
     "DEFAULT_WORK_OVERLAY_MAX_ITEMS",
+    "DEFAULT_WORK_OVERLAY_SIDE",
     "HUD_SETTINGS_FILENAME",
     "MAX_PRICING_RESPONSE_BYTES",
     "ModelPrice",
@@ -1389,6 +1400,7 @@ __all__ = [
     "normalize_provider_settings",
     "save_rest_reminder_state",
     "normalize_work_overlay_max_items",
+    "normalize_work_overlay_side",
     "parse_thresholds",
     "pricing_export_payload",
     "minimal_price_example",

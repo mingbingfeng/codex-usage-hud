@@ -615,6 +615,23 @@ class UserConfigStoreTests(unittest.TestCase):
         self.assertNotIn("work_overlay_enabled", config.to_dict())
         self.assertEqual(config.to_dict()["work_overlay_max_items"], 0)
 
+    def test_user_config_normalizes_work_overlay_side(self) -> None:
+        self.assertEqual(UserConfig.defaults().work_overlay_side, "right")
+        self.assertEqual(
+            UserConfig.from_dict({"work_overlay_side": "left"}).work_overlay_side,
+            "left",
+        )
+        self.assertEqual(
+            UserConfig.from_dict({"work_overlay_side": "invalid"}).work_overlay_side,
+            "right",
+        )
+        self.assertEqual(
+            UserConfig.from_dict({"work_overlay_side": "left"}).to_dict()[
+                "work_overlay_side"
+            ],
+            "left",
+        )
+
     def test_display_mode_normalizes_legacy_modes_to_renderer(self) -> None:
         self.assertEqual(normalize_display_mode("auto"), "renderer")
         self.assertEqual(normalize_display_mode("qt"), "renderer")

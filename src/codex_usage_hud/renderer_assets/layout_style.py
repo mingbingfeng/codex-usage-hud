@@ -2381,6 +2381,28 @@ TEXT = r"""
           #${rootId} .codex-usage-hud-settings-compact-row [data-setting-key="budget_thresholds"] {
             max-width: 100%;
           }
+          #${rootId} .codex-usage-hud-overlay-runtime-row {
+            min-width: 0;
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) 72px;
+            gap: 6px;
+            align-items: end;
+          }
+          #${rootId} .codex-usage-hud-overlay-runtime-row [data-desktop-overlay-dependency="true"] {
+            min-width: 0;
+          }
+          #${rootId} .codex-usage-hud-overlay-side-control {
+            min-width: 0;
+            display: grid;
+            gap: 4px;
+            color: var(--codex-usage-hud-muted, #8492a6);
+            font-size: 10px;
+            font-weight: 700;
+          }
+          #${rootId} .codex-usage-hud-overlay-side-control select {
+            min-width: 0;
+            width: 100%;
+          }
           #${rootId} .codex-usage-hud-settings-field,
           #${rootId} .codex-usage-hud-price-table {
             min-width: 0;

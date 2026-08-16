@@ -17,7 +17,7 @@ SESSION_CLEANUP_COMMANDS = frozenset(
     }
 )
 
-_OVERLAY_KEYS = frozenset({"work_overlay_max_items"})
+_OVERLAY_KEYS = frozenset({"work_overlay_max_items", "work_overlay_side"})
 _QUICK_LAUNCH_KEYS = frozenset({"quick_launch_providers"})
 _REST_KEYS = frozenset(
     {

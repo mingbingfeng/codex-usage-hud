@@ -26,7 +26,9 @@ from . import (
 )
 from .config import (
     DEFAULT_WORK_OVERLAY_MAX_ITEMS,
+    DEFAULT_WORK_OVERLAY_SIDE,
     normalize_work_overlay_max_items,
+    normalize_work_overlay_side,
     write_json_object,
 )
 from .core import WorkStatusItem
@@ -127,6 +129,7 @@ class DesktopWorkOverlay:
         *,
         enabled: bool = True,
         item_limit: int = DEFAULT_WORK_OVERLAY_MAX_ITEMS,
+        side: str = DEFAULT_WORK_OVERLAY_SIDE,
         clock: OverlayClock | None = None,
         runtime_dir: Callable[[], Path] | None = None,
         diagnostic_sink: Callable[..., None] | None = None,
@@ -142,6 +145,7 @@ class DesktopWorkOverlay:
         self._producer_instance_id = str(uuid.uuid4())
         self._state_revision = 0
         self.item_limit = normalize_work_overlay_max_items(item_limit)
+        self.side = normalize_work_overlay_side(side)
         self.enabled = bool(enabled) and self.item_limit > 0
         self._state_path = state_path or (
             self._runtime_dir() / f"work-overlay-{os.getpid()}-{int(self._clock.time() * 1000)}.json"
@@ -188,10 +192,13 @@ class DesktopWorkOverlay:
         *,
         enabled: bool | None = None,
         item_limit: int | None = None,
+        side: str | None = None,
     ) -> None:
         next_enabled = self.enabled if enabled is None else bool(enabled)
         if item_limit is not None:
             self.item_limit = normalize_work_overlay_max_items(item_limit)
+        if side is not None:
+            self.side = normalize_work_overlay_side(side)
         self.enabled = next_enabled and self.item_limit > 0
         if (
             not self.enabled
@@ -908,6 +915,7 @@ class DesktopWorkOverlay:
             state_payload = overlay_state.build_state_message(
                 owner_pid=os.getpid(),
                 item_limit=int(self.item_limit),
+                side=self.side,
                 command_path=self._command_path,
                 state_path=self._state_path,
                 revision=next_revision,
@@ -945,6 +953,7 @@ class DesktopWorkOverlay:
     ) -> str:
         return overlay_state.state_signature(
             item_limit=int(self.item_limit),
+            side=self.side,
             command_path=self._command_path,
             items=items,
             system_action=self._system_action,

@@ -14,7 +14,7 @@ from PySide6.QtGui import QCursor, QFont, QFontMetrics, QTextLayout, QTextOption
 from PySide6.QtWidgets import QApplication, QGraphicsOpacityEffect, QInputDialog, QWidget
 
 from ... import overlay_ipc
-from ...config import normalize_work_overlay_max_items
+from ...config import normalize_work_overlay_max_items, normalize_work_overlay_side
 from .constants import *  # noqa: F401,F403
 from .geometry import *  # noqa: F401,F403
 from .model import *  # noqa: F401,F403
@@ -174,6 +174,7 @@ class OverlayWindow(OverlayTransitionsMixin, OverlayRenderingMixin, QWidget):
             self._command_path = _work_overlay_command_path(path)
             self._default_item_limit = normalize_work_overlay_max_items(item_limit, item_limit)
             self._item_limit = self._default_item_limit
+            self._side = normalize_work_overlay_side(None)
             self._qt_app = app
             self._header_title_limit = int(header_title_limit)
             self._multiline_elided_text = _multiline_elided_text
@@ -649,6 +650,8 @@ class OverlayWindow(OverlayTransitionsMixin, OverlayRenderingMixin, QWidget):
                 self.shutdown()
                 return True
             self._state_read_failed_at = 0.0
+            previous_side = self._side
+            self._side = normalize_work_overlay_side(state.get("side"))
             should_close = bool(state.get("close"))
             system_action = _normalized_system_action(state.get("systemAction"))
             system_notice = _normalized_system_notice(state.get("systemNotice"))
@@ -689,6 +692,8 @@ class OverlayWindow(OverlayTransitionsMixin, OverlayRenderingMixin, QWidget):
                 self._default_item_limit,
                 max_items=_screen_item_limit(screen),
             )
+            if self._side != previous_side:
+                self._last_payload_signature = ""
             self.render_items(
                 items,
                 system_action=system_action or {},
@@ -849,6 +854,7 @@ class OverlayWindow(OverlayTransitionsMixin, OverlayRenderingMixin, QWidget):
                         anchor.height(),
                         pending=hotspot_pending,
                         screen_left=geometry.left(),
+                        side=self._side,
                     )
                 )
                 workdir_window.show()

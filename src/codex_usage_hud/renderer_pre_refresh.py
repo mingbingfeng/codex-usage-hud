@@ -373,6 +373,7 @@ class RendererPreRefreshExecutor:
                 previous_config,
                 current_config,
             )
+        self._refresh_overlay_for_partial_domains(partial_domains)
         inputs.event_refresh_request.snapshot = False
         inputs.event_refresh_request.request_domains(
             *sorted(partial_domains or set()),
@@ -443,10 +444,27 @@ class RendererPreRefreshExecutor:
             previous_config,
             next_config,
         )
+        self._refresh_overlay_for_partial_domains(partial_domains)
         inputs.event_refresh_request.snapshot = False
         inputs.event_refresh_request.request_domains(
             *sorted(partial_domains),
             force_fast=True,
+        )
+
+    def _refresh_overlay_for_partial_domains(
+        self,
+        partial_domains: set[str] | None,
+    ) -> None:
+        if not partial_domains or "overlay" not in partial_domains:
+            return
+        session_items = (
+            list(self.state.latest_snapshot.active_work_items)
+            if self.state.latest_snapshot is not None
+            else []
+        )
+        self.ports.overlay_configure()
+        self.ports.overlay_update(
+            self.ports.items_with_background_usage(session_items)
         )
 
     @staticmethod

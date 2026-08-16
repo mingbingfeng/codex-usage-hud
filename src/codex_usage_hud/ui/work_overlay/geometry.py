@@ -64,6 +64,26 @@ from .model import (
 
 OverlayRect = tuple[float, float, float, float]
 
+
+def _is_left_side(side: str) -> bool:
+    return str(side or "right").strip().lower() == "left"
+
+
+def _mirror_rect_x(
+    rect: OverlayRect,
+    *,
+    layout_width: int,
+    side: str,
+) -> OverlayRect:
+    if not _is_left_side(side):
+        return rect
+    return (
+        float(layout_width) - rect[0] - rect[2],
+        rect[1],
+        rect[2],
+        rect[3],
+    )
+
 def work_overlay_max_items_for_screen_height(screen_height: int) -> int:
     available_height = max(
         1,
@@ -80,6 +100,7 @@ def _pending_workdir_window_rect(
     *,
     pending: bool,
     screen_left: int = 0,
+    side: str = "right",
 ) -> tuple[int, int, int, int]:
     width = max(1, int(anchor_width))
     height = max(1, int(anchor_height))
@@ -89,7 +110,11 @@ def _pending_workdir_window_rect(
         return x, y, width, height
     right = x + width
     width = max(width, WORK_OVERLAY_SWITCH_PENDING_MIN_WIDTH)
-    x = max(int(screen_left), right - width)
+    x = (
+        max(int(screen_left), x)
+        if _is_left_side(side)
+        else max(int(screen_left), right - width)
+    )
     return x, y, width, height
 
 def _ease_out_cubic(value: float) -> float:
@@ -165,6 +190,7 @@ def _completed_badge_slot_rects(
     items: Sequence[Mapping[str, object]],
     *,
     layout_width: int = WORK_OVERLAY_WIDTH,
+    side: str = "right",
 ) -> dict[str, OverlayRect]:
     completed_items = [item for item in items if _item_is_completed(item)]
     rects: dict[str, OverlayRect] = {}
@@ -177,6 +203,7 @@ def _completed_badge_slot_rects(
             completed_count - 1 - index,
             completed_count,
             layout_width=layout_width,
+            side=side,
         )
     return rects
 
@@ -185,6 +212,7 @@ def _completed_slot_rect(
     completed_count: int,
     *,
     layout_width: int = WORK_OVERLAY_WIDTH,
+    side: str = "right",
 ) -> OverlayRect:
     completed_count = max(0, int(completed_count))
     if completed_count <= 0:
@@ -193,7 +221,7 @@ def _completed_slot_rect(
     index_from_left = completed_count - 1 - index_from_right
     row_width = _completed_badge_row_width(completed_count)
     start_x = max(0, int(layout_width) - row_width)
-    return (
+    rect = (
         float(
             start_x
             + index_from_left
@@ -203,12 +231,14 @@ def _completed_slot_rect(
         float(WORK_OVERLAY_COMPLETED_BADGE_SIZE),
         float(WORK_OVERLAY_COMPLETED_BADGE_SIZE),
     )
+    return _mirror_rect_x(rect, layout_width=layout_width, side=side)
 
 def _card_slot_rect(
     index_from_top: int,
     completed_count: int,
     *,
     layout_width: int = WORK_OVERLAY_WIDTH,
+    side: str = "right",
 ) -> OverlayRect:
     row_top = 0
     if int(completed_count) > 0:
@@ -216,7 +246,7 @@ def _card_slot_rect(
     index_from_top = max(0, int(index_from_top))
     card_height = WORK_OVERLAY_TRANSITION_CARD_HEIGHT
     row_top += index_from_top * (card_height + WORK_OVERLAY_STACK_SPACING)
-    x = max(0, int(layout_width) - WORK_OVERLAY_WIDTH)
+    x = 0 if _is_left_side(side) else max(0, int(layout_width) - WORK_OVERLAY_WIDTH)
     return (
         float(x),
         float(row_top),
@@ -229,20 +259,40 @@ def _overlay_required_height_for_counts(
     card_count: int,
     *,
     layout_width: int = WORK_OVERLAY_WIDTH,
+    side: str = "right",
 ) -> int:
-    del layout_width
     bottoms: list[float] = [1.0]
     completed_count = max(0, int(completed_count))
     card_count = max(0, int(card_count))
     if completed_count > 0:
         bottoms.append(float(WORK_OVERLAY_COMPLETED_BADGE_ROW_HEIGHT))
     if card_count > 0:
-        last_card = _card_slot_rect(card_count - 1, completed_count)
+        last_card = _card_slot_rect(
+            card_count - 1,
+            completed_count,
+            layout_width=layout_width,
+            side=side,
+        )
         bottoms.append(last_card[1] + last_card[3])
     return max(1, int(math.ceil(max(bottoms))))
 
 def _overlay_window_top_y(screen_top: int) -> int:
     return int(screen_top) + WORK_OVERLAY_TOP_OFFSET
+
+
+def _overlay_window_x(
+    screen_left: int,
+    screen_right: int,
+    layout_width: int,
+    margin: int = WORK_OVERLAY_MARGIN,
+    side: str = "right",
+) -> int:
+    if _is_left_side(side):
+        return int(screen_left) + int(margin)
+    return max(
+        int(screen_left),
+        int(screen_right) - int(layout_width) - int(margin),
+    )
 
 def _find_item_rect(
     items: Sequence[Mapping[str, object]],
@@ -250,13 +300,18 @@ def _find_item_rect(
     kind: str,
     *,
     layout_width: int = WORK_OVERLAY_WIDTH,
+    side: str = "right",
 ) -> OverlayRect:
     if not item_id:
         return (0.0, 0.0, 0.0, 0.0)
     completed_items = [item for item in items if _item_is_completed(item)]
     active_items = [item for item in items if not _item_is_completed(item)]
     if kind == "completed":
-        return _completed_badge_slot_rects(items, layout_width=layout_width).get(
+        return _completed_badge_slot_rects(
+            items,
+            layout_width=layout_width,
+            side=side,
+        ).get(
             item_id,
             (0.0, 0.0, 0.0, 0.0),
         )
@@ -275,6 +330,7 @@ def _find_item_rect(
         active_index,
         len(completed_items),
         layout_width=layout_width,
+        side=side,
     )
 
 def _find_item_position(
@@ -283,17 +339,30 @@ def _find_item_position(
     kind: str,
     *,
     layout_width: int = WORK_OVERLAY_WIDTH,
+    side: str = "right",
 ) -> tuple[int, int]:
-    rect = _find_item_rect(items, item_id, kind, layout_width=layout_width)
+    rect = _find_item_rect(
+        items,
+        item_id,
+        kind,
+        layout_width=layout_width,
+        side=side,
+    )
     return int(rect[0]), int(rect[1])
 
 def _remembered_card_rect_for_layout(
     rect: OverlayRect,
     *,
     layout_width: int = WORK_OVERLAY_WIDTH,
+    side: str = "right",
 ) -> OverlayRect:
+    x = (
+        0
+        if _is_left_side(side)
+        else max(0, int(layout_width) - int(rect[2]))
+    )
     return (
-        float(max(0, int(layout_width) - int(rect[2]))),
+        float(x),
         rect[1],
         rect[2],
         rect[3],
@@ -328,20 +397,34 @@ def _circle_rect_at_rect_center(rect: OverlayRect) -> OverlayRect:
     return _rect_from_center(center_x, center_y, size, size)
 
 def _right_edge_circle_rect_for_rect(rect: OverlayRect) -> OverlayRect:
+    return _edge_circle_rect_for_rect(rect, side="right")
+
+
+def _edge_circle_rect_for_rect(
+    rect: OverlayRect,
+    *,
+    side: str = "right",
+) -> OverlayRect:
     size = float(WORK_OVERLAY_COMPLETED_BADGE_SIZE)
     center_y = rect[1] + rect[3] / 2.0
     top = max(0.0, center_y - size / 2.0)
+    left = rect[0] if _is_left_side(side) else rect[0] + rect[2] - size
     return (
-        rect[0] + rect[2] - size,
+        left,
         top,
         size,
         size,
     )
 
-def _card_height_circle_rect_for_rect(rect: OverlayRect) -> OverlayRect:
+def _card_height_circle_rect_for_rect(
+    rect: OverlayRect,
+    *,
+    side: str = "right",
+) -> OverlayRect:
     diameter = max(1.0, float(rect[3]))
+    left = rect[0] if _is_left_side(side) else float(rect[0]) + rect[2] - diameter
     return (
-        float(rect[0]) + float(rect[2]) - diameter,
+        left,
         float(rect[1]),
         diameter,
         diameter,
@@ -350,10 +433,16 @@ def _card_height_circle_rect_for_rect(rect: OverlayRect) -> OverlayRect:
 def _card_yield_rect_for_circle_path(
     card_rect: OverlayRect,
     circle_rect: OverlayRect,
+    *,
+    side: str = "right",
 ) -> OverlayRect:
-    target_right = float(circle_rect[0]) - WORK_OVERLAY_COMPLETED_BADGE_SPACING
-    current_right = float(card_rect[0]) + float(card_rect[2])
-    offset_x = min(0.0, target_right - current_right)
+    if _is_left_side(side):
+        target_left = float(circle_rect[0]) + float(circle_rect[2]) + WORK_OVERLAY_COMPLETED_BADGE_SPACING
+        offset_x = max(0.0, target_left - float(card_rect[0]))
+    else:
+        target_right = float(circle_rect[0]) - WORK_OVERLAY_COMPLETED_BADGE_SPACING
+        current_right = float(card_rect[0]) + float(card_rect[2])
+        offset_x = min(0.0, target_right - current_right)
     return (
         float(card_rect[0]) + offset_x,
         float(card_rect[1]),
@@ -457,14 +546,24 @@ def _transition_required_height(
     transition_type: str,
     source_rect: OverlayRect,
     target_rect: OverlayRect,
+    *,
+    side: str = "right",
 ) -> int:
     rects = [
         source_rect,
         target_rect,
-        _transition_rect_for_progress(transition_type, source_rect, target_rect, 0.0),
-        _transition_rect_for_progress(transition_type, source_rect, target_rect, 0.35),
-        _transition_rect_for_progress(transition_type, source_rect, target_rect, 0.75),
-        _transition_rect_for_progress(transition_type, source_rect, target_rect, 1.0),
+        _transition_rect_for_progress(
+            transition_type, source_rect, target_rect, 0.0, side=side
+        ),
+        _transition_rect_for_progress(
+            transition_type, source_rect, target_rect, 0.35, side=side
+        ),
+        _transition_rect_for_progress(
+            transition_type, source_rect, target_rect, 0.75, side=side
+        ),
+        _transition_rect_for_progress(
+            transition_type, source_rect, target_rect, 1.0, side=side
+        ),
     ]
     return max(1, int(math.ceil(max(rect[1] + rect[3] for rect in rects))))
 
@@ -473,6 +572,8 @@ def _transition_rect_for_progress(
     source_rect: OverlayRect,
     target_rect: OverlayRect,
     progress: float,
+    *,
+    side: str = "right",
 ) -> OverlayRect:
     progress = _clamp01(progress)
     total_ms = float(_transition_total_ms())
@@ -480,7 +581,7 @@ def _transition_rect_for_progress(
     pause_end = (WORK_OVERLAY_TRANSITION_SHRINK_MS + WORK_OVERLAY_TRANSITION_PAUSE_MS) / total_ms
 
     if transition_type == "card_to_completed":
-        source_circle = _right_edge_circle_rect_for_rect(source_rect)
+        source_circle = _edge_circle_rect_for_rect(source_rect, side=side)
         if progress <= shrink_end:
             return _lerp_rect(source_rect, source_circle, _ease_out_cubic(progress / shrink_end))
         if progress <= pause_end:
@@ -489,7 +590,7 @@ def _transition_rect_for_progress(
         return _lerp_rect(source_circle, target_rect, _ease_in_out_cubic(move_progress))
 
     if transition_type == "completed_to_card":
-        target_circle = _right_edge_circle_rect_for_rect(target_rect)
+        target_circle = _edge_circle_rect_for_rect(target_rect, side=side)
         move_end = WORK_OVERLAY_TRANSITION_MOVE_MS / total_ms
         pause_end = (WORK_OVERLAY_TRANSITION_MOVE_MS + WORK_OVERLAY_TRANSITION_PAUSE_MS) / total_ms
         if progress <= move_end:
@@ -570,9 +671,18 @@ def _completed_badge_slot_moves(
     new_items: Sequence[Mapping[str, object]],
     *,
     layout_width: int = WORK_OVERLAY_WIDTH,
+    side: str = "right",
 ) -> dict[str, tuple[OverlayRect, OverlayRect]]:
-    old_rects = _completed_badge_slot_rects(old_items, layout_width=layout_width)
-    new_rects = _completed_badge_slot_rects(new_items, layout_width=layout_width)
+    old_rects = _completed_badge_slot_rects(
+        old_items,
+        layout_width=layout_width,
+        side=side,
+    )
+    new_rects = _completed_badge_slot_rects(
+        new_items,
+        layout_width=layout_width,
+        side=side,
+    )
     return {
         item_id: (old_rects[item_id], new_rects[item_id])
         for item_id in old_rects.keys() & new_rects.keys()
@@ -606,13 +716,23 @@ def _completed_badge_restore_slot_moves(
     item_id: str,
     *,
     layout_width: int = WORK_OVERLAY_WIDTH,
+    side: str = "right",
 ) -> dict[str, tuple[OverlayRect, OverlayRect, OverlayRect]]:
-    old_rects = _completed_badge_slot_rects(old_items, layout_width=layout_width)
+    old_rects = _completed_badge_slot_rects(
+        old_items,
+        layout_width=layout_width,
+        side=side,
+    )
     staged_rects = _completed_badge_slot_rects(
         _completed_restore_staged_items(old_items, item_id),
         layout_width=layout_width,
+        side=side,
     )
-    new_rects = _completed_badge_slot_rects(new_items, layout_width=layout_width)
+    new_rects = _completed_badge_slot_rects(
+        new_items,
+        layout_width=layout_width,
+        side=side,
+    )
     return {
         completed_id: (
             old_rects[completed_id],
@@ -650,6 +770,7 @@ def _overlay_items_required_height(
     items: Sequence[Mapping[str, object]],
     *,
     layout_width: int = WORK_OVERLAY_WIDTH,
+    side: str = "right",
 ) -> int:
     completed_items = [item for item in items if _item_is_completed(item)]
     active_items = [item for item in items if not _item_is_completed(item)]
@@ -660,7 +781,13 @@ def _overlay_items_required_height(
         item_id = _item_id(item)
         if not item_id:
             continue
-        rect = _find_item_rect(items, item_id, "card", layout_width=layout_width)
+        rect = _find_item_rect(
+            items,
+            item_id,
+            "card",
+            layout_width=layout_width,
+            side=side,
+        )
         bottoms.append(rect[1] + rect[3])
     return max(1, int(math.ceil(max(bottoms))))
 
@@ -734,6 +861,7 @@ __all__ = [
     "_card_slot_rect",
     "_overlay_required_height_for_counts",
     "_overlay_window_top_y",
+    "_overlay_window_x",
     "_find_item_rect",
     "_find_item_position",
     "_remembered_card_rect_for_layout",

@@ -173,7 +173,9 @@ from codex_usage_hud.ui.work_overlay_qt import (
     _overlay_hover_hit_test,
     _ordered_overlay_items,
     _overlay_items_required_height,
+    _overlay_required_height_for_counts,
     _overlay_window_top_y,
+    _overlay_window_x,
     _normalized_rest_reminder,
     _pending_workdir_window_rect,
     _point_in_inscribed_circle,
@@ -7459,6 +7461,50 @@ class WorkOverlayTransitionTests(unittest.TestCase):
         self.assertEqual(oldest, (86, 0))
         self.assertEqual(latest, (262, 0))
 
+    def test_left_side_mirrors_completed_badges_to_left_edge(self) -> None:
+        items = [
+            {"id": "oldest", "status": "recent"},
+            {"id": "latest", "status": "recent"},
+        ]
+
+        oldest = _find_item_position(
+            items,
+            "oldest",
+            "completed",
+            layout_width=430,
+            side="left",
+        )
+        latest = _find_item_position(
+            items,
+            "latest",
+            "completed",
+            layout_width=430,
+            side="left",
+        )
+
+        self.assertEqual(oldest, (176, 0))
+        self.assertEqual(latest, (0, 0))
+
+    def test_overlay_window_x_uses_selected_screen_edge(self) -> None:
+        self.assertEqual(_overlay_window_x(100, 1100, 360, 16, "right"), 724)
+        self.assertEqual(_overlay_window_x(100, 1100, 360, 16, "left"), 116)
+
+    def test_overlay_required_height_preserves_layout_width_argument(self) -> None:
+        self.assertEqual(
+            _overlay_required_height_for_counts(
+                1,
+                2,
+                layout_width=520,
+                side="left",
+            ),
+            _overlay_required_height_for_counts(
+                1,
+                2,
+                layout_width=520,
+                side="right",
+            ),
+        )
+
     def test_find_active_item_position_respects_completed_row_and_right_alignment(self) -> None:
         items = [
             {"id": "done", "status": "recent"},
@@ -7598,6 +7644,20 @@ class WorkOverlayTransitionTests(unittest.TestCase):
         self.assertAlmostEqual(moving[0], after_morph[0])
         self.assertLess(moving[1], after_morph[1])
         self.assertRectAlmostEqual(final, target)
+
+    def test_left_side_card_to_completed_morphs_from_left_edge(self) -> None:
+        source = (0.0, 188.0, 430.0, 110.0)
+        target = (0.0, 0.0, 168.0, 168.0)
+
+        after_morph = _transition_rect_for_progress(
+            "card_to_completed",
+            source,
+            target,
+            0.35,
+            side="left",
+        )
+
+        self.assertRectAlmostEqual(after_morph, (0.0, 159.0, 168.0, 168.0))
 
     def test_top_card_to_completed_circle_stays_inside_transition_canvas(self) -> None:
         source = (0.0, 0.0, 430.0, 110.0)

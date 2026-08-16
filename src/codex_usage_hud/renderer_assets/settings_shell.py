@@ -1222,6 +1222,7 @@ _TEXT_PREFIX = r"""
           weekly_reset_time: "10:00",
           display_mode: "renderer",
           work_overlay_max_items: 6,
+          work_overlay_side: "right",
           pricing_url: "",
           budget_thresholds: [0.5, 0.8, 0.9, 1.0],
           weekly_adjustment_usd: 0,
@@ -2763,6 +2764,13 @@ _TEXT_PREFIX = r"""
         const overlayOptions = Array.from({ length: overlaySelectableMax + 1 }, (_, index) => `
           <option value="${index}" ${overlayValue === index ? "selected" : ""}>${index}${index === 0 ? " - 不启用" : ""}</option>
         `).join("");
+        const overlaySide = String(settings.work_overlay_side || "right").toLowerCase() === "left"
+          ? "left"
+          : "right";
+        const overlaySideOptions = `
+          <option value="right" ${overlaySide === "right" ? "selected" : ""}>右侧</option>
+          <option value="left" ${overlaySide === "left" ? "selected" : ""}>左侧</option>
+        `;
         const weekdayOptions = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
           .map((label, index) => `<option value="${index}" ${Number(settings.weekly_reset_weekday) === index ? "selected" : ""}>${label}</option>`)
           .join("");
@@ -2798,7 +2806,13 @@ _TEXT_PREFIX = r"""
               </div>
               <div class="codex-usage-hud-settings-field">
                 <label>气泡运行环境</label>
-                <div data-desktop-overlay-dependency="true">${desktopOverlayDependencyHtml()}</div>
+                <div class="codex-usage-hud-overlay-runtime-row">
+                  <div data-desktop-overlay-dependency="true">${desktopOverlayDependencyHtml()}</div>
+                  <label class="codex-usage-hud-overlay-side-control" title="选择会话进度气泡显示在屏幕哪一侧">
+                    <span>位置</span>
+                    <select data-setting-key="work_overlay_side" aria-label="气泡位置">${overlaySideOptions}</select>
+                  </label>
+                </div>
               </div>
             </div>
             <div class="codex-usage-hud-provider-editor" data-provider-editor="true" data-active-provider="${escapeHtml(settingsProviderDraft?.activeProvider || "")}">
@@ -3822,6 +3836,7 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
             0,
             workOverlaySelectableMax(),
           ),
+          work_overlay_side: String(read("work_overlay_side") || settings.work_overlay_side || "right"),
           pricing_url: String(settings.pricing_url || "").trim(),
           provider_settings: providerSettings,
           provider_order: draft.order,
