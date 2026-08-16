@@ -797,6 +797,18 @@ class OverlayRenderingMixin:
         detail.setFixedWidth(WORK_OVERLAY_TEXT_WRAP_WIDTH)
         card_layout.addWidget(detail)
 
+        rest_hint = QLabel("", card)
+        rest_hint.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
+        rest_hint.setWordWrap(False)
+        rest_hint.setTextFormat(text_format.PlainText)
+        rest_hint.setAlignment(alignment.AlignTop | alignment.AlignLeft)
+        rest_hint.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        rest_hint.setFont(QFont("Microsoft YaHei UI", 7))
+        rest_hint.setFixedWidth(WORK_OVERLAY_TEXT_WRAP_WIDTH)
+        rest_hint.setFixedHeight(rest_hint.fontMetrics().height() + 4)
+        rest_hint.setVisible(False)
+        card_layout.addWidget(rest_hint)
+
         footer_container = QWidget(card)
         footer_container.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
         footer_layout = QHBoxLayout(footer_container)
@@ -846,6 +858,7 @@ class OverlayRenderingMixin:
             "card": card,
             "header": header,
             "detail": detail,
+            "rest_hint": rest_hint,
             "footer_container": footer_container,
             "status_label": status_label,
             "round_badge": round_badge,
@@ -940,17 +953,21 @@ class OverlayRenderingMixin:
         index_from_top: int,
         completed_count: int,
     ) -> QRect:
-        rect = _card_slot_rect(
-            index_from_top,
-            completed_count,
-            layout_width=self._layout_width,
-            side=self._side,
+        return self._card_geometry_for_slot(
+            _card_slot_rect(
+                index_from_top,
+                completed_count,
+                layout_width=self._layout_width,
+                side=self._side,
+            )
         )
+
+    def _card_geometry_for_slot(self, slot_rect: OverlayRect) -> QRect:
         return QRect(
-            int(round(rect[0])),
-            int(round(rect[1])),
-            max(1, int(round(rect[2]))),
-            max(1, int(round(rect[3]))),
+            int(round(slot_rect[0])),
+            int(round(slot_rect[1])),
+            WORK_OVERLAY_WIDTH,
+            WORK_OVERLAY_TRANSITION_CARD_HEIGHT,
         )
 
     def _qrect_from_rectf(self, rect: QRectF) -> QRect:
