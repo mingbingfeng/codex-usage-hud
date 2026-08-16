@@ -4797,6 +4797,8 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
             background: var(--surface-elevated, #20252d);
             color: var(--text-primary, #f2f4f7);
             box-shadow: 0 14px 34px rgba(0, 0, 0, .36);
+            pointer-events: auto;
+            -webkit-app-region: no-drag;
           }
           [data-codex-usage-hud-cli-menu-surface="true"] [role="menuitem"] {
             width: 100%;
@@ -4813,6 +4815,12 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
             font: inherit;
             text-align: left;
             cursor: pointer;
+            pointer-events: auto;
+            -webkit-app-region: no-drag;
+          }
+          [data-codex-usage-hud-cli-menu-toggle="true"] {
+            pointer-events: auto;
+            -webkit-app-region: no-drag;
           }
           [data-codex-usage-hud-cli-menu-surface="true"] [role="menuitem"]:hover,
           [data-codex-usage-hud-cli-menu-surface="true"] [role="menuitem"]:focus-visible {

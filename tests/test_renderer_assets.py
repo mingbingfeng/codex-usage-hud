@@ -237,6 +237,23 @@ def test_codex_cli_quick_launch_menu_is_idempotent_and_provider_scoped() -> None
     assert "MutationObserver" in SETTINGS_SHELL
 
 
+def test_codex_cli_quick_launch_menu_controls_exit_desktop_drag_region() -> None:
+    style_start = SETTINGS_SHELL.index('[data-codex-usage-hud-cli-menu-surface="true"] {')
+    style_end = SETTINGS_SHELL.index("@keyframes codexUsageHudCliQuickFade", style_start)
+    style = SETTINGS_SHELL[style_start:style_end]
+
+    selectors = (
+        '[data-codex-usage-hud-cli-menu-surface="true"] {',
+        '[data-codex-usage-hud-cli-menu-surface="true"] [role="menuitem"] {',
+        '[data-codex-usage-hud-cli-menu-toggle="true"] {',
+    )
+    for selector in selectors:
+        rule_start = style.index(selector)
+        rule = style[rule_start:style.index("}", rule_start)]
+        assert "pointer-events: auto;" in rule
+        assert "-webkit-app-region: no-drag;" in rule
+
+
 def test_codex_cli_quick_launch_auto_launch_requires_exact_saved_state() -> None:
     key_start = SETTINGS_SHELL.index("function codexCliLaunchStateKey(")
     key_end = SETTINGS_SHELL.index("function codexCliStoredLaunchStates()", key_start)
