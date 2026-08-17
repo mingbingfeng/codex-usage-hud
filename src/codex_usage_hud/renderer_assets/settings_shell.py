@@ -3173,7 +3173,10 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
           // surface case-insensitive so old inventories remain selectable.
           modelProvider: "all",
           sort: "recent",
-        }).filter((item) => String(item?.modelProvider || "").trim().toLowerCase() === source);
+        }).filter((item) => (
+          item?.transferable !== false
+          && String(item?.modelProvider || "").trim().toLowerCase() === source
+        ));
       }
 
       function sessionTransferView(data = sessionCleanupFromPayload()) {

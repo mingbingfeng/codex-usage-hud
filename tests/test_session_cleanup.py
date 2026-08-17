@@ -280,6 +280,7 @@ class SessionCleanupManagerTests(unittest.TestCase):
             "ROUTIN",
             "copy",
             fork=fork,
+            materialize=lambda *_args: None,
             verify=verify,
             request_id="transfer-copy",
         )
@@ -291,6 +292,15 @@ class SessionCleanupManagerTests(unittest.TestCase):
         self.assertEqual(calls, [(ROOT_ID, "routin", str(root / "project-a"))])
         self.assertEqual(verified, [(target_id, "routin")])
         self.assertTrue(_rollouts[ROOT_ID].exists())
+        index_rows = [
+            json.loads(line)
+            for line in _index.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        self.assertEqual(
+            next(row["thread_name"] for row in index_rows if row["id"] == target_id),
+            "Root",
+        )
 
     def test_session_transfer_copy_keeps_source_when_target_is_not_persistent(self) -> None:
         fixture = self._fixture()
@@ -306,6 +316,7 @@ class SessionCleanupManagerTests(unittest.TestCase):
             "routin",
             "copy",
             fork=lambda *_args: "10000000-0000-4000-8000-000000000009",
+            materialize=lambda *_args: None,
             verify=lambda *_args: False,
             request_id="transfer-copy-unverified",
         )
@@ -337,6 +348,7 @@ class SessionCleanupManagerTests(unittest.TestCase):
             "routin",
             "migrate",
             fork=fork,
+            materialize=lambda *_args: None,
             verify=lambda session_id, provider: bool(session_id and provider),
             request_id="transfer-migrate",
         )
@@ -399,6 +411,7 @@ class SessionCleanupManagerTests(unittest.TestCase):
                 "routin",
                 "migrate",
                 fork=fork,
+                materialize=lambda *_args: None,
                 verify=lambda session_id, provider: bool(session_id and provider),
                 request_id="transfer-batch",
             )
@@ -428,6 +441,7 @@ class SessionCleanupManagerTests(unittest.TestCase):
             "routin",
             "migrate",
             fork=lambda *_args: "10000000-0000-4000-8000-000000000008",
+            materialize=lambda *_args: None,
             verify=lambda *_args: False,
             request_id="transfer-unverified",
         )
@@ -437,6 +451,33 @@ class SessionCleanupManagerTests(unittest.TestCase):
         self.assertEqual(operation["copiedCount"], 1)
         self.assertEqual(operation["migratedCount"], 0)
         self.assertIn("持久化验证未通过", operation["results"][0]["error"])
+        self.assertTrue(rollouts[ROOT_ID].exists())
+        self.assertTrue(rollouts[CHILD_ID].exists())
+
+    def test_session_transfer_migrate_keeps_source_when_materialization_fails(self) -> None:
+        fixture = self._fixture()
+        temporary, _root, _state, _index, rollouts, manager = fixture
+        self.addCleanup(temporary.cleanup)
+
+        payload = manager.scan(request_id="transfer-scan")
+        root_row = next(row for row in payload["sessions"] if row["title"] == "Root")
+        result = manager.transfer(
+            [root_row["id"]],
+            payload["revision"],
+            "openai-custom",
+            "routin",
+            "migrate",
+            fork=lambda *_args: "10000000-0000-4000-8000-000000000010",
+            materialize=lambda *_args: (_ for _ in ()).throw(
+                SessionCleanupError("source rollout unavailable")
+            ),
+            verify=lambda *_args: True,
+            request_id="transfer-materialize-failed",
+        )
+
+        operation = result["operation"]
+        self.assertEqual(operation["state"], "partial")
+        self.assertEqual(operation["migratedCount"], 0)
         self.assertTrue(rollouts[ROOT_ID].exists())
         self.assertTrue(rollouts[CHILD_ID].exists())
 
@@ -456,6 +497,103 @@ class SessionCleanupManagerTests(unittest.TestCase):
         self.assertTrue(payload["sessions"])
         self.assertTrue(all(not row["selectable"] for row in payload["sessions"]))
         self.assertTrue(all(row["status"] == "unresolved" for row in payload["sessions"]))
+
+    def test_paginated_history_without_source_rollout_is_not_selectable(self) -> None:
+        fixture = self._fixture()
+        temporary, _root, _state, _index, rollouts, manager = fixture
+        self.addCleanup(temporary.cleanup)
+        rollouts[ROOT_ID].write_text(
+            json.dumps(
+                {
+                    "type": "session_meta",
+                    "payload": {
+                        "session_id": ROOT_ID,
+                        "history_mode": "paginated",
+                        "history_base": {
+                            "thread_id": "10000000-0000-4000-8000-000000000099",
+                            "end_ordinal_exclusive": 10,
+                        },
+                        "model_provider": "openai-custom",
+                        "originator": "Codex Desktop",
+                        "source": "vscode",
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        payload = manager.scan()
+        root_row = next(row for row in payload["sessions"] if row["title"] == "Root")
+
+        self.assertTrue(root_row["selectable"])
+        self.assertTrue(root_row["transferable"] is False)
+        self.assertEqual(root_row["status"], "idle")
+        self.assertIn("paginated history source rollout", root_row["transferBlockedReason"])
+
+    def test_paginated_history_root_without_base_remains_transferable(self) -> None:
+        fixture = self._fixture()
+        temporary, _root, _state, _index, rollouts, manager = fixture
+        self.addCleanup(temporary.cleanup)
+        rollouts[ROOT_ID].write_text(
+            json.dumps(
+                {
+                    "type": "session_meta",
+                    "payload": {
+                        "session_id": ROOT_ID,
+                        "history_mode": "paginated",
+                        "model_provider": "openai-custom",
+                        "originator": "Codex Desktop",
+                        "source": "vscode",
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        payload = manager.scan()
+        root_row = next(row for row in payload["sessions"] if row["title"] == "Root")
+
+        self.assertTrue(root_row["selectable"])
+        self.assertTrue(root_row["transferable"])
+
+    def test_transfer_rejects_session_with_unavailable_paginated_history_source(self) -> None:
+        fixture = self._fixture()
+        temporary, _root, _state, _index, rollouts, manager = fixture
+        self.addCleanup(temporary.cleanup)
+        rollouts[ROOT_ID].write_text(
+            json.dumps(
+                {
+                    "type": "session_meta",
+                    "payload": {
+                        "session_id": ROOT_ID,
+                        "history_mode": "paginated",
+                        "history_base": {
+                            "thread_id": "10000000-0000-4000-8000-000000000099",
+                            "end_ordinal_exclusive": 10,
+                        },
+                        "model_provider": "openai-custom",
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        payload = manager.scan()
+        root_row = next(row for row in payload["sessions"] if row["title"] == "Root")
+        with self.assertRaisesRegex(SessionCleanupError, "分页历史源无法验证"):
+            manager.transfer(
+                [root_row["id"]],
+                payload["revision"],
+                "openai-custom",
+                "routin",
+                "copy",
+                fork=lambda *_args: "10000000-0000-4000-8000-000000000011",
+                materialize=lambda *_args: None,
+                verify=lambda *_args: True,
+            )
 
     def test_preview_and_execute_delete_parent_cascade_in_one_local_transaction(self) -> None:
         fixture = self._fixture()

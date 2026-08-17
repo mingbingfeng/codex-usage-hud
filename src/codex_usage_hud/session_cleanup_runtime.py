@@ -228,24 +228,73 @@ class SessionCleanupWorker:
                             if sessions_root is not None
                             else None
                         )
-                        with CodexAppServerClient(codex_home=codex_home) as app_server:
+                        # ``thread/fork`` keeps the child rollout writer owned by
+                        # its App Server process.  On Windows that handle can
+                        # reject the materializer's atomic ``os.replace`` while
+                        # the same connection remains open.  Close the fork
+                        # connection before rewriting the target, then create a
+                        # fresh connection for the durable ``thread/read`` check.
+                        app_server_client: CodexAppServerClient | None = None
+                        app_server: object | None = None
+
+                        def open_app_server() -> object:
+                            nonlocal app_server_client, app_server
+                            app_server_client = CodexAppServerClient(
+                                codex_home=codex_home
+                            )
+                            app_server = app_server_client.__enter__()
+                            return app_server
+
+                        def close_app_server() -> None:
+                            nonlocal app_server_client, app_server
+                            client = app_server_client
+                            app_server_client = None
+                            app_server = None
+                            if client is not None:
+                                client.__exit__(None, None, None)
+
+                        def current_app_server() -> object:
+                            if app_server is None:
+                                raise SessionCleanupError(
+                                    "Codex App Server 连接当前不可用。"
+                                )
+                            return app_server
+
+                        def materialize_target(
+                            target_id: str,
+                            source_id: str,
+                        ) -> object:
+                            close_app_server()
+                            try:
+                                return self.manager.materialize_target_rollout(
+                                    target_id,
+                                    source_id,
+                                )
+                            finally:
+                                open_app_server()
+
+                        open_app_server()
+                        try:
                             snapshot = self.manager.transfer(
                                 item_ids,
                                 revision,
                                 source_provider,
                                 target_provider,
                                 mode,
-                                fork=lambda session_id, provider, cwd: app_server.fork(
+                                fork=lambda session_id, provider, cwd: current_app_server().fork(
                                     session_id,
                                     provider,
                                     cwd=cwd,
                                 ),
-                                verify=lambda session_id, provider: app_server.verify_persistent_thread(
+                                materialize=materialize_target,
+                                verify=lambda session_id, provider: current_app_server().verify_persistent_thread(
                                     session_id,
                                     provider,
                                 ),
                                 request_id=request_id,
                             )
+                        finally:
+                            close_app_server()
                     finally:
                         self.manager.progress_publisher = previous_publisher
                     transfer_operation = snapshot.get("operation")

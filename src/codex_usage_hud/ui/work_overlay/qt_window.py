@@ -16,6 +16,10 @@ from PySide6.QtWidgets import QApplication, QGraphicsOpacityEffect, QInputDialog
 from ... import overlay_ipc
 from ...config import normalize_work_overlay_max_items, normalize_work_overlay_side
 from .constants import *  # noqa: F401,F403
+from .dismissal_store import (
+    WORK_OVERLAY_DISMISSAL_FILENAME,
+    WorkOverlayDismissalStore,
+)
 from .geometry import *  # noqa: F401,F403
 from .model import *  # noqa: F401,F403
 from .qt_hotspots import ClickHotspotWindow, CloseButtonWindow, WorkdirLinkWindow
@@ -166,7 +170,9 @@ class OverlayWindow(OverlayTransitionsMixin, OverlayRenderingMixin, QWidget):
             self._overlay_alpha = float(overlay_alpha)
             self._hover_alpha = float(hover_alpha)
             self._heartbeat_path = heartbeat_path
-            self._dismissed_instances: dict[str, str] = {}
+            self._dismissed_instances = WorkOverlayDismissalStore(
+                path.parent / WORK_OVERLAY_DISMISSAL_FILENAME
+            )
             self._last_payload_signature = ""
             self._last_structure_signature = ""
             self._raw_items: list[Mapping[str, object]] = []

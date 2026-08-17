@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping, MutableMapping, Sequence
 from datetime import datetime
 from typing import Any
 
@@ -545,7 +545,7 @@ def _item_dismiss_key(item: Mapping[str, object]) -> str:
     )
 
 def _mark_item_dismissed(
-    dismissed_instances: dict[str, str],
+    dismissed_instances: MutableMapping[str, str],
     item: Mapping[str, object],
 ) -> None:
     item_id = _item_id(item)
@@ -554,7 +554,7 @@ def _mark_item_dismissed(
 
 def _visible_overlay_items(
     items: Sequence[Mapping[str, object]],
-    dismissed_instances: dict[str, str],
+    dismissed_instances: MutableMapping[str, str],
     *,
     item_limit: int,
 ) -> list[Mapping[str, object]]:

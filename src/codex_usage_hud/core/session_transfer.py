@@ -372,7 +372,7 @@ class CodexAppServerClient:
             raise SessionTransferError("目标 Provider 标识无效。")
         result = self.request(
             "thread/read",
-            {"threadId": thread_id, "includeTurns": False},
+            {"threadId": thread_id, "includeTurns": True},
         )
         if not isinstance(result, Mapping):
             raise SessionTransferError("Codex 目标会话读取返回了无效结果。")

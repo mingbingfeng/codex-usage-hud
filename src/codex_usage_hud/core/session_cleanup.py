@@ -6,7 +6,7 @@ from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import closing
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path, PureWindowsPath
@@ -17,6 +17,10 @@ import time
 import uuid
 
 from .parser import classify_session_client
+from .session_materializer import (
+    SessionMaterializationError,
+    materialize_forked_rollout,
+)
 
 
 DEFAULT_CONFIRMATION_TTL_SECONDS = 300.0
@@ -68,6 +72,8 @@ class SessionCleanupItem:
     descendant_count: int
     selectable: bool
     blocked_reason: str
+    transferable: bool = True
+    transfer_blocked_reason: str = ""
     model_provider: str = "unknown"
     client_kind: str = "unknown"
     _session_id: str = field(default="", repr=False, compare=False)
@@ -87,6 +93,8 @@ class SessionCleanupItem:
             "descendantCount": max(0, int(self.descendant_count)),
             "selectable": bool(self.selectable),
             "blockedReason": self.blocked_reason,
+            "transferable": bool(self.transferable),
+            "transferBlockedReason": self.transfer_blocked_reason,
             "modelProvider": self.model_provider,
             "clientKind": self.client_kind,
         }
@@ -201,6 +209,48 @@ def _session_metadata(path: Path | None) -> _SessionMetadata:
     except (OSError, UnicodeError):
         pass
     return _SessionMetadata()
+
+
+def _missing_paginated_history_source(
+    path: Path | None,
+    session_id: str,
+    records: Mapping[str, _ThreadRecord],
+    allowed_roots: Sequence[Path],
+) -> bool:
+    """Return whether a paginated rollout points at an unavailable source."""
+    if path is None:
+        return False
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            first_line = handle.readline()
+        record = json.loads(first_line)
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    if not isinstance(record, Mapping):
+        return False
+    payload = record.get("payload")
+    if not isinstance(payload, Mapping):
+        return False
+    if str(payload.get("history_mode") or "").strip().casefold() != "paginated":
+        return False
+    history_base = payload.get("history_base")
+    # A paginated root starts a new history and legitimately has no base.
+    if history_base is None:
+        return False
+    base_id = (
+        _canonical_uuid(history_base.get("thread_id"))
+        if isinstance(history_base, Mapping)
+        else ""
+    )
+    if not base_id or base_id == session_id:
+        return True
+    source = records.get(base_id)
+    source_path = source.rollout_path if source is not None else None
+    return (
+        source_path is None
+        or not _path_under(source_path, allowed_roots)
+        or not source_path.is_file()
+    )
 
 
 class SessionCleanupManager:
@@ -414,6 +464,15 @@ class SessionCleanupManager:
                 or not record.rollout_path.is_file()
                 for record in family_records
             )
+            missing_history_source = any(
+                _missing_paginated_history_source(
+                    record.rollout_path,
+                    record.session_id,
+                    records,
+                    allowed_roots,
+                )
+                for record in family_records
+            )
             current = bool(set(family) & current_ids)
             active = bool(set(family) & active_ids) or any(
                 edge_states.get(session_id, "").casefold() in _ACTIVE_EDGE_STATES
@@ -458,6 +517,12 @@ class SessionCleanupManager:
                     descendant_count=len(descendants),
                     selectable=not blocked_reason,
                     blocked_reason=blocked_reason,
+                    transferable=not missing_history_source,
+                    transfer_blocked_reason=(
+                        "The paginated history source rollout could not be verified."
+                        if missing_history_source
+                        else ""
+                    ),
                     model_provider=metadata.model_provider,
                     client_kind=metadata.client_kind,
                     _session_id=root_id,
@@ -598,6 +663,85 @@ class SessionCleanupManager:
             actualBytes=actual_bytes,
         )
 
+    def materialize_target_rollout(self, target_id: str, source_id: str) -> None:
+        """Flatten a forked target before any optional source deletion."""
+        canonical_target = _canonical_uuid(target_id)
+        canonical_source = _canonical_uuid(source_id)
+        if not canonical_target or not canonical_source:
+            raise SessionCleanupError("目标或源会话标识无效。")
+        records, _parents, _edge_states, _unsafe_ids, _unresolved = self._load_state()
+        target = records.get(canonical_target)
+        allowed_roots = self._allowed_rollout_roots()
+        if (
+            target is None
+            or target.rollout_path is None
+            or not _path_under(target.rollout_path, allowed_roots)
+            or not target.rollout_path.is_file()
+        ):
+            raise SessionCleanupError("Codex 目标会话 rollout 尚不可用。")
+        rollout_paths = {
+            session_id: record.rollout_path
+            for session_id, record in records.items()
+            if (
+                record.rollout_path is not None
+                and _path_under(record.rollout_path, allowed_roots)
+                and record.rollout_path.is_file()
+            )
+        }
+        try:
+            materialize_forked_rollout(
+                target_id=canonical_target,
+                source_id=canonical_source,
+                target_path=target.rollout_path,
+                rollout_paths=rollout_paths,
+            )
+        except SessionMaterializationError as exc:
+            raise SessionCleanupError(str(exc)) from exc
+
+    def _register_session_index(self, session_id: str, title: str) -> None:
+        """Make a newly forked thread discoverable by ``codex resume``."""
+        canonical = _canonical_uuid(session_id)
+        if not canonical:
+            raise SessionCleanupError("目标会话标识无效，无法更新 CLI 会话索引。")
+        existing_ids: set[str] = set()
+        if self.session_index_path.is_file():
+            try:
+                with self.session_index_path.open("r", encoding="utf-8") as handle:
+                    for line in handle:
+                        try:
+                            payload = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if isinstance(payload, Mapping):
+                            existing = _canonical_uuid(payload.get("id"))
+                            if existing:
+                                existing_ids.add(existing)
+            except (OSError, UnicodeError) as exc:
+                raise SessionCleanupError(
+                    "Codex CLI 会话索引无法读取。"
+                ) from exc
+        if canonical in existing_ids:
+            return
+        payload = {
+            "id": canonical,
+            "thread_name": str(title or "Untitled session").strip()
+            or "Untitled session",
+            "updated_at": datetime.now(timezone.utc)
+            .isoformat(timespec="microseconds")
+            .replace("+00:00", "Z"),
+        }
+        try:
+            self.session_index_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.session_index_path.open("a", encoding="utf-8", newline="\n") as handle:
+                handle.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+        except (OSError, UnicodeError) as exc:
+            raise SessionCleanupError(
+                "Codex CLI 会话索引无法更新。"
+            ) from exc
+
     def transfer(
         self,
         item_ids: Sequence[str],
@@ -607,6 +751,7 @@ class SessionCleanupManager:
         mode: str,
         *,
         fork: Callable[[str, str, str], str],
+        materialize: Callable[[str, str], object] | None = None,
         verify: Callable[[str, str], bool] | None = None,
         request_id: str = "",
     ) -> dict[str, object]:
@@ -627,6 +772,8 @@ class SessionCleanupManager:
             raise SessionCleanupError("不支持的会话迁移模式。")
         if not callable(fork):
             raise SessionCleanupError("Codex fork 服务当前不可用。")
+        if not callable(materialize):
+            raise SessionCleanupError("Codex 目标会话物化服务当前不可用。")
         if not callable(verify):
             raise SessionCleanupError("Codex 目标会话持久化验证当前不可用。")
         items = self._selected_items(item_ids, revision)
@@ -636,6 +783,10 @@ class SessionCleanupManager:
         ):
             raise SessionCleanupError(
                 "所选会话已不属于当前源 Provider，请重新扫描后再试。"
+            )
+        if any(not item.transferable for item in items):
+            raise SessionCleanupError(
+                "所选会话的分页历史源无法验证，不能复制或迁移。"
             )
         results: list[dict[str, object]] = []
         forked_items: list[SessionCleanupItem] = []
@@ -674,6 +825,7 @@ class SessionCleanupManager:
 
         for item in items:
             forked = False
+            target_ready = False
             new_session_id = ""
             try:
                 new_session_id = str(
@@ -684,10 +836,15 @@ class SessionCleanupManager:
                         "Codex fork 未返回新的目标会话。"
                 )
                 forked = True
+                materialized = materialize(new_session_id, item._session_id)
+                if materialized is False:
+                    raise SessionCleanupError("Codex 目标会话历史物化未完成。")
                 if verify(new_session_id, normalized_target) is not True:
                     raise SessionCleanupError(
                         "目标会话已创建，但持久化验证未通过。"
                     )
+                self._register_session_index(new_session_id, item.title)
+                target_ready = True
                 copied_count += 1
                 if normalized_mode == "migrate":
                     forked_items.append(item)
@@ -711,7 +868,9 @@ class SessionCleanupManager:
                             "id": item.id,
                             "title": item.title,
                             "targetSessionId": new_session_id,
-                            "state": "copied" if normalized_mode == "migrate" else "failed",
+                            "state": "copied"
+                            if normalized_mode == "migrate" and target_ready
+                            else "failed",
                             "forked": True,
                             "sourceDeleted": False,
                             "error": error_text,

@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import time
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
 import pytest
 
@@ -78,7 +78,7 @@ def test_app_server_verifies_persistent_thread_before_source_deletion(
     assert client.verify_persistent_thread(TARGET_ID, "ROUTIN") is True
     client.request.assert_called_once_with(
         "thread/read",
-        {"threadId": TARGET_ID, "includeTurns": False},
+        {"threadId": TARGET_ID, "includeTurns": True},
     )
 
 
@@ -97,7 +97,7 @@ def test_worker_routes_session_transfer_to_app_server_and_configured_target() ->
             },
         },
     }
-    manager.transfer.return_value = {
+    transfer_result = {
         "revision": "revision-2",
         "operation": {
             "requestId": "transfer-1",
@@ -107,10 +107,24 @@ def test_worker_routes_session_transfer_to_app_server_and_configured_target() ->
             "migratedCount": 0,
         },
     }
-    app_server = MagicMock()
-    app_server.fork.return_value = TARGET_ID
-    client_factory = MagicMock()
-    client_factory.return_value.__enter__.return_value = app_server
+    first_app_server = MagicMock()
+    first_app_server.fork.return_value = TARGET_ID
+    second_app_server = MagicMock()
+    second_app_server.verify_persistent_thread.return_value = True
+    first_client = MagicMock()
+    first_client.__enter__.return_value = first_app_server
+    second_client = MagicMock()
+    second_client.__enter__.return_value = second_app_server
+    client_factory = MagicMock(side_effect=[first_client, second_client])
+    manager.materialize_target_rollout.return_value = None
+
+    def transfer(*_args, **kwargs):
+        assert kwargs["fork"](SOURCE_ID, "routin", "E:/project") == TARGET_ID
+        assert kwargs["materialize"](TARGET_ID, SOURCE_ID) is None
+        assert kwargs["verify"](TARGET_ID, "routin") is True
+        return transfer_result
+
+    manager.transfer.side_effect = transfer
     context = SimpleNamespace(
         app_provider="codex",
         sessions_root=Path("E:/AppData/Codex/sessions"),
@@ -153,15 +167,21 @@ def test_worker_routes_session_transfer_to_app_server_and_configured_target() ->
             "routin",
             "copy",
         )
-        fork = call.kwargs["fork"]
-        verify = call.kwargs["verify"]
-        assert fork(SOURCE_ID, "routin", "E:/project") == TARGET_ID
-        app_server.verify_persistent_thread.return_value = True
-        assert verify(TARGET_ID, "routin") is True
-        app_server.fork.assert_called_once_with(SOURCE_ID, "routin", cwd="E:/project")
-        app_server.verify_persistent_thread.assert_called_once_with(TARGET_ID, "routin")
-        client_factory.assert_called_once_with(
-            codex_home=Path("E:/AppData/Codex")
+        first_app_server.fork.assert_called_once_with(
+            SOURCE_ID,
+            "routin",
+            cwd="E:/project",
         )
+        manager.materialize_target_rollout.assert_called_once_with(TARGET_ID, SOURCE_ID)
+        second_app_server.verify_persistent_thread.assert_called_once_with(
+            TARGET_ID,
+            "routin",
+        )
+        first_client.__exit__.assert_called_once_with(None, None, None)
+        second_client.__exit__.assert_called_once_with(None, None, None)
+        assert client_factory.call_args_list == [
+            call(codex_home=Path("E:/AppData/Codex")),
+            call(codex_home=Path("E:/AppData/Codex")),
+        ]
     finally:
         assert worker.close()

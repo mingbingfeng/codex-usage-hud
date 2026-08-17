@@ -372,7 +372,7 @@ def order_payload_items(
 
 def visible_payload_items(
     items: Sequence[Mapping[str, object]],
-    dismissed_instances: dict[str, str],
+    dismissed_instances: MutableMapping[str, str],
     *,
     item_limit: int,
     dismiss_key: Callable[[Mapping[str, object]], str],
@@ -402,11 +402,8 @@ def visible_payload_items(
         selected_indexes.update(completed_indexes[-remaining:])
 
     visible: list[Mapping[str, object]] = []
-    live_ids: set[str] = set()
     for index, item in enumerate(items):
         item_id = str(item.get("id") or "")
-        if item_id:
-            live_ids.add(item_id)
         if index not in selected_indexes:
             continue
         key = dismiss_key(item)
@@ -415,9 +412,6 @@ def visible_payload_items(
         if item_id and item_id in dismissed_instances:
             dismissed_instances.pop(item_id, None)
         visible.append(item)
-    for item_id in list(dismissed_instances):
-        if item_id not in live_ids:
-            dismissed_instances.pop(item_id, None)
     return visible
 
 
