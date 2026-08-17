@@ -137,6 +137,27 @@ TEXT = r"""
     rootScope.listen(window, "resize", () => {
       syncSettingsProviderTabNavigation();
     }, { passive: true });
+    const sessionTransferModeInputFromEvent = (event) => {
+      const direct = event.target?.closest?.('[data-session-transfer-mode]');
+      if (direct) return direct;
+      return event.target?.closest?.('.codex-usage-hud-session-transfer-mode label')
+        ?.querySelector?.('[data-session-transfer-mode]') || null;
+    };
+    const syncSessionTransferModeFromEvent = (event) => {
+      const input = sessionTransferModeInputFromEvent(event);
+      if (!input || !document.contains(input)) return false;
+      sessionTransferState.mode = sessionTransferModeValue(input);
+      syncSessionTransferSubmitButton(sessionTransferState.mode);
+      return true;
+    };
+    // The settings dialog may be mounted outside the HUD event root. Keep the
+    // primary action label live for mouse, keyboard, and native radio changes.
+    rootScope.listen(document, "click", (event) => {
+      syncSessionTransferModeFromEvent(event);
+    }, true);
+    rootScope.listen(document, "change", (event) => {
+      syncSessionTransferModeFromEvent(event);
+    }, true);
     const commitSessionCleanupSearch = (sessionSearch) => {
       if (!sessionSearch || !root.contains(sessionSearch)) return false;
       const search = String(sessionSearch.value || "");

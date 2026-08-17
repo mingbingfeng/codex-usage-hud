@@ -181,6 +181,13 @@ def test_session_transfer_reuses_session_management_scan_state_and_controls() ->
     assert "function syncSessionTransferSelectAll" in script
     assert "sessionCleanupPayloadWithInventory" in script
     assert "function syncSessionTransferSubmitButton" in script
+    assert "function bindSessionTransferModeControls" in script
+    assert 'input.addEventListener("change", apply);' in script
+    assert "function syncSessionTransferModeFromDialog" in script
+    assert "syncSessionTransferModeFromDialog();" in script
+    assert "const syncSessionTransferModeFromEvent = (event) =>" in script
+    assert 'rootScope.listen(document, "click"' in script
+    assert 'rootScope.listen(document, "change"' in script
     assert "sessionTransferState.mode = sessionTransferModeValue(sessionTransferMode);" in script
     assert 'action.dataset.action === "session-transfer-restart-codex"' in script
     assert "for (const id of sessionTransferSelectableIds())" in script

@@ -3268,10 +3268,30 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
           : "copy";
       }
 
+      function syncSessionTransferModeFromDialog() {
+        const checked = sessionTransferDialogLayer()?.querySelector?.('[data-session-transfer-mode]:checked');
+        if (checked) sessionTransferState.mode = sessionTransferModeValue(checked);
+        return sessionTransferState.mode;
+      }
+
       function syncSessionTransferSubmitButton(mode = sessionTransferState.mode) {
         const submit = sessionTransferDialogLayer()?.querySelector?.('[data-session-transfer-submit-button="true"]');
         if (!submit) return false;
         submit.textContent = String(mode || "copy").toLowerCase() === "migrate" ? "开始迁移" : "开始复制";
+        return true;
+      }
+
+      function bindSessionTransferModeControls(layer) {
+        if (!layer) return false;
+        layer.querySelectorAll?.('[data-session-transfer-mode]').forEach((input) => {
+          const apply = () => {
+            sessionTransferState.mode = sessionTransferModeValue(input);
+            syncSessionTransferSubmitButton(sessionTransferState.mode);
+          };
+          input.addEventListener("input", apply);
+          input.addEventListener("change", apply);
+          input.addEventListener("click", apply);
+        });
         return true;
       }
 
@@ -3341,6 +3361,7 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
       function syncSessionTransferDialogControls(data = sessionCleanupFromPayload(), viewOverride = null) {
         const layer = sessionTransferDialogLayer();
         if (!layer || !sessionTransferState.open) return false;
+        syncSessionTransferModeFromDialog();
         const dataValue = data && typeof data === "object" ? data : {};
         const view = viewOverride || sessionTransferView(dataValue);
         const operation = sessionTransferOperation();
@@ -3490,7 +3511,11 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
       function renderSessionTransferDialog(dataOverride = null) {
         const layer = sessionTransferDialogLayer();
         if (!layer || !sessionTransferState.open) return;
+        // Preserve the user's last mode when a list/scan update replaces the
+        // dialog DOM. The native radio state is authoritative between renders.
+        syncSessionTransferModeFromDialog();
         layer.innerHTML = sessionTransferDialogHtml(dataOverride);
+        bindSessionTransferModeControls(layer);
         syncSessionTransferDialogControls(dataOverride || sessionCleanupFromPayload());
       }
 
