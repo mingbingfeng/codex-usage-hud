@@ -1883,13 +1883,11 @@ _TEXT_PREFIX = r"""
       function revealSettingsProviderTab(tab) {
         const tabs = tab?.closest?.('[data-provider-tabs="true"]');
         if (!tab || !tabs) return;
-        const left = tab.offsetLeft;
-        const right = left + tab.offsetWidth;
-        if (left < tabs.scrollLeft) {
-          tabs.scrollLeft = left;
-        } else if (right > tabs.scrollLeft + tabs.clientWidth) {
-          tabs.scrollLeft = right - tabs.clientWidth;
-        }
+        const tabRect = tab.getBoundingClientRect();
+        const railRect = tabs.getBoundingClientRect();
+        const tabCenter = tabs.scrollLeft + (tabRect.left - railRect.left) + (tabRect.width / 2);
+        const nextLeft = tabCenter - (tabs.clientWidth / 2);
+        tabs.scrollLeft = Math.max(0, Math.min(nextLeft, tabs.scrollWidth - tabs.clientWidth));
       }
 
       function settingsProviderNavigationRoot(node = null) {
@@ -1960,6 +1958,7 @@ _TEXT_PREFIX = r"""
         if (!navigation || !settingsProviderDraft) return;
         navigation.outerHTML = settingsProviderTabsHtml(hudSettingsFromPayload());
         const nextNavigation = document.querySelector(`#${settingsModalId} [data-provider-navigation="true"]`);
+        syncSettingsProviderTabNavigation(nextNavigation);
         revealSettingsProviderTab(nextNavigation?.querySelector('[aria-selected="true"]'));
         syncSettingsProviderTabNavigation(nextNavigation);
       }
@@ -2045,6 +2044,7 @@ _TEXT_PREFIX = r"""
         editor.dataset.activeProvider = settingsProviderDraft.activeProvider;
         editor.innerHTML = settingsProviderEditorHtml(hudSettingsFromPayload());
         const activeTab = editor.querySelector('[data-provider-tab="true"][aria-selected="true"]');
+        syncSettingsProviderTabNavigation(editor);
         revealSettingsProviderTab(activeTab);
         syncSettingsProviderTabNavigation(editor);
         if (focusTab) activeTab?.focus?.();
@@ -2058,7 +2058,13 @@ _TEXT_PREFIX = r"""
         settingsProviderDraft.activeProvider = nextProvider;
         window[settingsProviderName] = nextProvider;
         renderSettingsProviderEditor({ focusTab });
-        if (railDirection) scrollSettingsProviderRail(railDirection);
+        if (railDirection) {
+          const activeTab = document.querySelector(
+            `#${settingsModalId} [data-provider-tab="true"][aria-selected="true"]`,
+          );
+          revealSettingsProviderTab(activeTab);
+          syncSettingsProviderTabNavigation(activeTab);
+        }
       }
 
       function activateSettingsProviderTab(tab) {
@@ -2066,7 +2072,10 @@ _TEXT_PREFIX = r"""
         if (!provider) return;
         const railDirection = settingsProviderRailDirectionForTab(tab);
         if (provider === settingsProviderDraft?.activeProvider) {
-          if (railDirection) scrollSettingsProviderRail(railDirection);
+          if (railDirection) {
+            revealSettingsProviderTab(tab);
+            syncSettingsProviderTabNavigation(tab);
+          }
           return;
         }
         switchSettingsProvider(provider, { railDirection });
@@ -2720,7 +2729,11 @@ _TEXT_PREFIX = r"""
           for (const layer of preservedSecondaryLayers) nextDialog.appendChild(layer);
         }
         modal.hidden = false;
-        if (activeTab === "settings") syncSettingsProviderTabNavigation(nextDialog);
+        if (activeTab === "settings") {
+          syncSettingsProviderTabNavigation(nextDialog);
+          revealSettingsProviderTab(nextDialog?.querySelector('[data-provider-tab="true"][aria-selected="true"]'));
+          syncSettingsProviderTabNavigation(nextDialog);
+        }
         ensureRestReminderCountdownTicker();
         ensureSessionCleanupElapsedTicker();
         updateAboutActionButtons(currentUpdateState());

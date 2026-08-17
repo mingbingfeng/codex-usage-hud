@@ -25,6 +25,13 @@ manual tracing. Skip this for non-project tasks. The index is navigation only:
 verify paths, lines, and behavior in the current workspace. Do not automatically
 reindex.
 
+## Test scope
+
+Unless the user explicitly requests full validation, do not run repository-wide,
+exhaustive, long-running, integration, end-to-end, packaging, or cross-platform
+test suites. Run only the smallest focused test set needed to validate behavior
+affected by the current task.
+
 ## Verbose build output
 
 When running verbose build or packaging commands (for example `python tools/build_exe.py`, `python tools/build_installer.py`, PyInstaller, or Inno Setup), redirect full stdout/stderr to a log file and only surface a concise summary or log tail in the conversation. Do not stream full build logs into agent context unless explicitly requested.

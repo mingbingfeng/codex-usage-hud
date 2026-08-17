@@ -90,6 +90,47 @@ class UserConfigStoreTests(unittest.TestCase):
         )
         self.assertEqual(persisted["future"], {"keep": True})
 
+    def test_legacy_migration_preserves_existing_local_budget_and_scope(self) -> None:
+        """New code defaults must not overwrite a persisted local HUD setup."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "hud_settings.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "user": {
+                            "daily_budget_usd": 17.25,
+                            "weekly_budget_usd": 125.5,
+                            "provider_scope_mode": "custom",
+                            "selected_providers": ["local-provider"],
+                            "model_prices": {
+                                "custom": {"input": 1, "output": 2}
+                            },
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            store = UserConfigStore(path)
+            changed_code_defaults = UserConfig(
+                daily_budget_usd=999.0,
+                weekly_budget_usd=1999.0,
+            )
+
+            with patch.object(
+                UserConfig, "defaults", return_value=changed_code_defaults
+            ):
+                config = store.load()
+            persisted = json.loads(path.read_text(encoding="utf-8"))["user"]
+
+        self.assertEqual(config.daily_budget_usd, 17.25)
+        self.assertEqual(config.weekly_budget_usd, 125.5)
+        self.assertEqual(config.provider_scope_mode, "custom")
+        self.assertEqual(config.selected_providers, ["local-provider"])
+        self.assertEqual(persisted["daily_budget_usd"], 17.25)
+        self.assertEqual(persisted["weekly_budget_usd"], 125.5)
+        self.assertEqual(persisted["provider_scope_mode"], "custom")
+        self.assertEqual(persisted["selected_providers"], ["local-provider"])
+
     def test_price_fetch_allows_only_bounded_http_responses(self) -> None:
         with self.assertRaisesRegex(ValueError, "HTTP"):
             fetch_model_prices("file:///tmp/prices.json")
