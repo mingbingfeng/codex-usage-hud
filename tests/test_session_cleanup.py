@@ -15,6 +15,10 @@ from codex_usage_hud.core.session_cleanup import (
     SessionCleanupManager,
 )
 from codex_usage_hud.core.deleted_usage import DeletedUsageLedger
+from codex_usage_hud.platforms.codex_persisted_atoms import (
+    CodexDesktopBindingCleanupError,
+    DesktopBindingCleanupReport,
+)
 
 
 ROOT_ID = "10000000-0000-4000-8000-000000000001"
@@ -90,9 +94,30 @@ class SessionCleanupManagerTests(unittest.TestCase):
         _create_state(
             state_db,
             [
-                (ROOT_ID, str(rollouts[ROOT_ID]), "Root", str(root / "project-a"), 0, 1_700_000_000_000),
-                (CHILD_ID, str(rollouts[CHILD_ID]), "Child", str(root / "project-a"), 0, 1_700_000_100_000),
-                (SECOND_ID, str(rollouts[SECOND_ID]), "Archived", str(root / "project-b"), 1, 1_600_000_000_000),
+                (
+                    ROOT_ID,
+                    str(rollouts[ROOT_ID]),
+                    "Root",
+                    str(root / "project-a"),
+                    0,
+                    1_700_000_000_000,
+                ),
+                (
+                    CHILD_ID,
+                    str(rollouts[CHILD_ID]),
+                    "Child",
+                    str(root / "project-a"),
+                    0,
+                    1_700_000_100_000,
+                ),
+                (
+                    SECOND_ID,
+                    str(rollouts[SECOND_ID]),
+                    "Archived",
+                    str(root / "project-b"),
+                    1,
+                    1_600_000_000_000,
+                ),
             ],
         )
         with closing(sqlite3.connect(state_db)) as connection, connection:
@@ -162,9 +187,7 @@ class SessionCleanupManagerTests(unittest.TestCase):
                 "UPDATE threads SET cwd = ? WHERE id = ?",
                 ("relative-workdir", ROOT_ID),
             )
-        self.assertIsNone(
-            manager.workdir_for_item(root_row["id"], payload["revision"])
-        )
+        self.assertIsNone(manager.workdir_for_item(root_row["id"], payload["revision"]))
 
     def test_scan_reports_the_protection_phase_and_progress(self) -> None:
         fixture = self._fixture()
@@ -182,9 +205,7 @@ class SessionCleanupManagerTests(unittest.TestCase):
         manager.scan(request_id="scan-progress")
 
         phase_three = [
-            operation
-            for operation in operations
-            if operation.get("phaseIndex") == 3
+            operation for operation in operations if operation.get("phaseIndex") == 3
         ]
         self.assertTrue(phase_three)
         self.assertEqual(phase_three[0]["phaseLabel"], "Checking deletion protection")
@@ -229,11 +250,12 @@ class SessionCleanupManagerTests(unittest.TestCase):
         temporary, _root, state, _index, rollouts, manager = fixture
         self.addCleanup(temporary.cleanup)
         expected_bytes = sum(
-            rollouts[session_id].stat().st_size
-            for session_id in (ROOT_ID, CHILD_ID)
+            rollouts[session_id].stat().st_size for session_id in (ROOT_ID, CHILD_ID)
         )
 
-        result = manager.delete_provider_history("OPENAI-CUSTOM", request_id="provider-1")
+        result = manager.delete_provider_history(
+            "OPENAI-CUSTOM", request_id="provider-1"
+        )
 
         self.assertEqual(result["operation"]["state"], "completed")
         self.assertEqual(result["operation"]["provider"], "openai-custom")
@@ -244,7 +266,9 @@ class SessionCleanupManagerTests(unittest.TestCase):
         self.assertFalse(rollouts[CHILD_ID].exists())
         self.assertFalse((state.parent / ".hud-session-delete-staging").exists())
         with closing(sqlite3.connect(state)) as connection:
-            self.assertEqual(connection.execute("SELECT count(*) FROM threads").fetchone()[0], 1)
+            self.assertEqual(
+                connection.execute("SELECT count(*) FROM threads").fetchone()[0], 1
+            )
 
     def test_provider_history_delete_refuses_protected_matching_tree(self) -> None:
         fixture = self._fixture(child_status="running")
@@ -254,7 +278,9 @@ class SessionCleanupManagerTests(unittest.TestCase):
         with self.assertRaisesRegex(SessionCleanupError, "受保护会话"):
             manager.delete_provider_history("openai-custom")
 
-    def test_session_transfer_copy_keeps_source_and_uses_private_session_context(self) -> None:
+    def test_session_transfer_copy_keeps_source_and_uses_private_session_context(
+        self,
+    ) -> None:
         fixture = self._fixture()
         temporary, root, _state, _index, _rollouts, manager = fixture
         self.addCleanup(temporary.cleanup)
@@ -302,7 +328,9 @@ class SessionCleanupManagerTests(unittest.TestCase):
             "Root",
         )
 
-    def test_session_transfer_copy_keeps_source_when_target_is_not_persistent(self) -> None:
+    def test_session_transfer_copy_keeps_source_when_target_is_not_persistent(
+        self,
+    ) -> None:
         fixture = self._fixture()
         temporary, _root, _state, _index, rollouts, manager = fixture
         self.addCleanup(temporary.cleanup)
@@ -361,9 +389,223 @@ class SessionCleanupManagerTests(unittest.TestCase):
         self.assertFalse(rollouts[ROOT_ID].exists())
         self.assertFalse(rollouts[CHILD_ID].exists())
         with closing(sqlite3.connect(state)) as connection:
-            self.assertEqual(connection.execute("SELECT count(*) FROM threads").fetchone()[0], 1)
+            self.assertEqual(
+                connection.execute("SELECT count(*) FROM threads").fetchone()[0], 1
+            )
 
-    def test_session_transfer_migrate_batches_source_deletion_after_all_forks(self) -> None:
+    def test_session_transfer_migrate_cleans_exact_desktop_binding_after_delete(
+        self,
+    ) -> None:
+        fixture = self._fixture()
+        temporary, root, _state, _index, rollouts, manager = fixture
+        self.addCleanup(temporary.cleanup)
+        global_state_path = root / ".codex-global-state.json"
+        global_state_path.write_text(
+            json.dumps(
+                {
+                    "electron-persisted-atom-state": {
+                        "client-thread-bindings-v1": {
+                            "client-root": ROOT_ID,
+                            "client-child": CHILD_ID.upper(),
+                            "client-other": SECOND_ID,
+                        },
+                        "prompt-history": {"global": [ROOT_ID]},
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        payload = manager.scan(request_id="transfer-scan")
+        root_row = next(row for row in payload["sessions"] if row["title"] == "Root")
+        plan = MagicMock()
+        plan.commit.return_value = DesktopBindingCleanupReport(
+            ("client-root", "client-child"), ()
+        )
+        prepare = MagicMock(return_value=plan)
+
+        result = manager.transfer(
+            [root_row["id"]],
+            payload["revision"],
+            "openai-custom",
+            "routin",
+            "migrate",
+            fork=lambda *_args: "10000000-0000-4000-8000-000000000015",
+            materialize=lambda *_args: None,
+            verify=lambda *_args: True,
+            prepare_desktop_binding_cleanup=prepare,
+            request_id="transfer-desktop-binding",
+        )
+
+        operation = result["operation"]
+        row = operation["results"][0]
+        self.assertEqual(operation["state"], "completed")
+        self.assertEqual(operation["desktopBindingCleanupFailedCount"], 0)
+        self.assertTrue(row["sourceDeleted"])
+        self.assertTrue(row["desktopBindingCleaned"])
+        self.assertEqual(row["desktopBindingRemovedCount"], 2)
+        prepare.assert_called_once_with((ROOT_ID, CHILD_ID))
+        plan.commit.assert_called_once_with()
+        self.assertFalse(rollouts[ROOT_ID].exists())
+        self.assertFalse(rollouts[CHILD_ID].exists())
+
+    def test_session_transfer_migrate_retains_source_without_desktop_cleanup_channel(
+        self,
+    ) -> None:
+        fixture = self._fixture()
+        temporary, root, _state, _index, rollouts, manager = fixture
+        self.addCleanup(temporary.cleanup)
+        (root / ".codex-global-state.json").write_text(
+            json.dumps(
+                {
+                    "electron-persisted-atom-state": {
+                        "client-thread-bindings-v1": {"client-root": ROOT_ID}
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        payload = manager.scan(request_id="transfer-scan")
+        root_row = next(row for row in payload["sessions"] if row["title"] == "Root")
+
+        result = manager.transfer(
+            [root_row["id"]],
+            payload["revision"],
+            "openai-custom",
+            "routin",
+            "migrate",
+            fork=lambda *_args: "10000000-0000-4000-8000-000000000016",
+            materialize=lambda *_args: None,
+            verify=lambda *_args: True,
+            request_id="transfer-desktop-binding-unavailable",
+        )
+
+        operation = result["operation"]
+        row = operation["results"][0]
+        self.assertEqual(operation["state"], "partial")
+        self.assertEqual(operation["migratedCount"], 0)
+        self.assertTrue(row["sourceRetained"])
+        self.assertIn("侧栏绑定仍存在", row["error"])
+        self.assertTrue(rollouts[ROOT_ID].exists())
+        self.assertTrue(rollouts[CHILD_ID].exists())
+
+    def test_session_transfer_copy_never_requires_desktop_binding_cleanup(self) -> None:
+        fixture = self._fixture()
+        temporary, root, _state, _index, rollouts, manager = fixture
+        self.addCleanup(temporary.cleanup)
+        (root / ".codex-global-state.json").write_text(
+            json.dumps(
+                {
+                    "electron-persisted-atom-state": {
+                        "client-thread-bindings-v1": {"client-root": ROOT_ID}
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        payload = manager.scan(request_id="transfer-scan")
+        root_row = next(row for row in payload["sessions"] if row["title"] == "Root")
+        prepare = MagicMock()
+
+        result = manager.transfer(
+            [root_row["id"]],
+            payload["revision"],
+            "openai-custom",
+            "routin",
+            "copy",
+            fork=lambda *_args: "10000000-0000-4000-8000-000000000017",
+            verify=lambda *_args: True,
+            prepare_desktop_binding_cleanup=prepare,
+            request_id="transfer-copy-desktop-binding",
+        )
+
+        self.assertEqual(result["operation"]["state"], "completed")
+        prepare.assert_not_called()
+        self.assertTrue(rollouts[ROOT_ID].exists())
+
+    def test_session_transfer_migrate_blocks_an_unflushed_live_desktop_binding(
+        self,
+    ) -> None:
+        fixture = self._fixture()
+        temporary, _root, _state, _index, rollouts, manager = fixture
+        self.addCleanup(temporary.cleanup)
+        payload = manager.scan(request_id="transfer-scan")
+        root_row = next(row for row in payload["sessions"] if row["title"] == "Root")
+
+        result = manager.transfer(
+            [root_row["id"]],
+            payload["revision"],
+            "openai-custom",
+            "routin",
+            "migrate",
+            fork=lambda *_args: "10000000-0000-4000-8000-000000000018",
+            materialize=lambda *_args: None,
+            verify=lambda *_args: True,
+            prepare_desktop_binding_cleanup=lambda _ids: (_ for _ in ()).throw(
+                CodexDesktopBindingCleanupError(
+                    "Desktop binding is not writable.",
+                    source_binding_detected=True,
+                )
+            ),
+            request_id="transfer-live-desktop-binding",
+        )
+
+        operation = result["operation"]
+        self.assertEqual(operation["state"], "partial")
+        self.assertEqual(operation["migratedCount"], 0)
+        self.assertIn(
+            "Desktop binding is not writable", operation["results"][0]["error"]
+        )
+        self.assertTrue(rollouts[ROOT_ID].exists())
+
+    def test_session_transfer_reports_desktop_binding_cleanup_failure_after_delete(
+        self,
+    ) -> None:
+        fixture = self._fixture()
+        temporary, root, _state, _index, rollouts, manager = fixture
+        self.addCleanup(temporary.cleanup)
+        (root / ".codex-global-state.json").write_text(
+            json.dumps(
+                {
+                    "electron-persisted-atom-state": {
+                        "client-thread-bindings-v1": {"client-root": ROOT_ID}
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        payload = manager.scan(request_id="transfer-scan")
+        root_row = next(row for row in payload["sessions"] if row["title"] == "Root")
+        plan = MagicMock()
+        plan.commit.side_effect = CodexDesktopBindingCleanupError("commit failed")
+
+        result = manager.transfer(
+            [root_row["id"]],
+            payload["revision"],
+            "openai-custom",
+            "routin",
+            "migrate",
+            fork=lambda *_args: "10000000-0000-4000-8000-000000000019",
+            materialize=lambda *_args: None,
+            verify=lambda *_args: True,
+            prepare_desktop_binding_cleanup=MagicMock(return_value=plan),
+            request_id="transfer-desktop-binding-commit-failed",
+        )
+
+        operation = result["operation"]
+        row = operation["results"][0]
+        self.assertEqual(operation["state"], "partial")
+        self.assertEqual(operation["migratedCount"], 1)
+        self.assertEqual(operation["desktopBindingCleanupFailedCount"], 1)
+        self.assertEqual(operation["failedCount"], 1)
+        self.assertTrue(row["sourceDeleted"])
+        self.assertFalse(row["desktopBindingCleaned"])
+        self.assertIn("侧栏绑定清理失败", row["error"])
+        self.assertFalse(rollouts[ROOT_ID].exists())
+        self.assertFalse(rollouts[CHILD_ID].exists())
+
+    def test_session_transfer_migrate_batches_source_deletion_after_all_forks(
+        self,
+    ) -> None:
         fixture = self._fixture()
         temporary, _root, _state, _index, rollouts, manager = fixture
         self.addCleanup(temporary.cleanup)
@@ -401,9 +643,10 @@ class SessionCleanupManagerTests(unittest.TestCase):
 
         progress: list[dict[str, object]] = []
         manager.progress_publisher = progress.append
-        with patch.object(manager, "preview", wraps=manager.preview) as preview, patch.object(
-            manager, "execute", wraps=manager.execute
-        ) as execute:
+        with (
+            patch.object(manager, "preview", wraps=manager.preview) as preview,
+            patch.object(manager, "execute", wraps=manager.execute) as execute,
+        ):
             result = manager.transfer(
                 selected,
                 payload["revision"],
@@ -427,7 +670,9 @@ class SessionCleanupManagerTests(unittest.TestCase):
         self.assertTrue(all("results" not in row["operation"] for row in progress))
         self.assertTrue(all("sessions" not in row for row in progress))
 
-    def test_session_transfer_migrate_keeps_source_when_target_is_not_persistent(self) -> None:
+    def test_session_transfer_migrate_keeps_source_when_target_is_not_persistent(
+        self,
+    ) -> None:
         fixture = self._fixture()
         temporary, _root, _state, _index, rollouts, manager = fixture
         self.addCleanup(temporary.cleanup)
@@ -454,7 +699,9 @@ class SessionCleanupManagerTests(unittest.TestCase):
         self.assertTrue(rollouts[ROOT_ID].exists())
         self.assertTrue(rollouts[CHILD_ID].exists())
 
-    def test_session_transfer_migrate_keeps_source_when_materialization_fails(self) -> None:
+    def test_session_transfer_migrate_keeps_source_when_materialization_fails(
+        self,
+    ) -> None:
         fixture = self._fixture()
         temporary, _root, _state, _index, rollouts, manager = fixture
         self.addCleanup(temporary.cleanup)
@@ -510,7 +757,9 @@ class SessionCleanupManagerTests(unittest.TestCase):
         verify.assert_not_called()
         self.assertTrue(rollouts[ROOT_ID].exists())
 
-    def test_session_transfer_rejects_case_variant_duplicate_target_in_batch(self) -> None:
+    def test_session_transfer_rejects_case_variant_duplicate_target_in_batch(
+        self,
+    ) -> None:
         fixture = self._fixture()
         temporary, _root, _state, _index, rollouts, manager = fixture
         self.addCleanup(temporary.cleanup)
@@ -557,13 +806,16 @@ class SessionCleanupManagerTests(unittest.TestCase):
             any("目标会话冲突" in row["error"] for row in operation["results"])
         )
 
-    def test_session_transfer_reports_source_delete_error_and_retains_source(self) -> None:
+    def test_session_transfer_reports_source_delete_error_and_retains_source(
+        self,
+    ) -> None:
         fixture = self._fixture()
         temporary, _root, _state, _index, rollouts, manager = fixture
         self.addCleanup(temporary.cleanup)
 
         payload = manager.scan(request_id="transfer-scan")
         root_row = next(row for row in payload["sessions"] if row["title"] == "Root")
+
         def execute_with_error(item_ids, _revision, _token, *, request_id=""):
             return {
                 "operation": {
@@ -578,11 +830,14 @@ class SessionCleanupManagerTests(unittest.TestCase):
                 }
             }
 
-        with patch.object(
-            manager,
-            "preview",
-            return_value={"operation": {"confirmationToken": "token"}},
-        ), patch.object(manager, "execute", side_effect=execute_with_error):
+        with (
+            patch.object(
+                manager,
+                "preview",
+                return_value={"operation": {"confirmationToken": "token"}},
+            ),
+            patch.object(manager, "execute", side_effect=execute_with_error),
+        ):
             result = manager.transfer(
                 [root_row["id"]],
                 payload["revision"],
@@ -608,7 +863,9 @@ class SessionCleanupManagerTests(unittest.TestCase):
         self.assertIn("源会话文件被占用", row["error"])
         self.assertTrue(rollouts[ROOT_ID].exists())
 
-    def test_session_transfer_keeps_source_if_fork_is_registered_as_a_child(self) -> None:
+    def test_session_transfer_keeps_source_if_fork_is_registered_as_a_child(
+        self,
+    ) -> None:
         fixture = self._fixture()
         temporary, root, state, _index, rollouts, manager = fixture
         self.addCleanup(temporary.cleanup)
@@ -685,7 +942,9 @@ class SessionCleanupManagerTests(unittest.TestCase):
         self.assertGreaterEqual(payload["totals"]["unresolved"], 1)
         self.assertTrue(payload["sessions"])
         self.assertTrue(all(not row["selectable"] for row in payload["sessions"]))
-        self.assertTrue(all(row["status"] == "unresolved" for row in payload["sessions"]))
+        self.assertTrue(
+            all(row["status"] == "unresolved" for row in payload["sessions"])
+        )
 
     def test_paginated_history_without_source_rollout_is_not_selectable(self) -> None:
         fixture = self._fixture()
@@ -718,7 +977,9 @@ class SessionCleanupManagerTests(unittest.TestCase):
         self.assertTrue(root_row["selectable"])
         self.assertTrue(root_row["transferable"] is False)
         self.assertEqual(root_row["status"], "idle")
-        self.assertIn("paginated history source rollout", root_row["transferBlockedReason"])
+        self.assertIn(
+            "paginated history source rollout", root_row["transferBlockedReason"]
+        )
 
     def test_paginated_history_root_without_base_remains_transferable(self) -> None:
         fixture = self._fixture()
@@ -747,7 +1008,9 @@ class SessionCleanupManagerTests(unittest.TestCase):
         self.assertTrue(root_row["selectable"])
         self.assertTrue(root_row["transferable"])
 
-    def test_transfer_rejects_session_with_unavailable_paginated_history_source(self) -> None:
+    def test_transfer_rejects_session_with_unavailable_paginated_history_source(
+        self,
+    ) -> None:
         fixture = self._fixture()
         temporary, _root, _state, _index, rollouts, manager = fixture
         self.addCleanup(temporary.cleanup)
@@ -784,7 +1047,9 @@ class SessionCleanupManagerTests(unittest.TestCase):
                 verify=lambda *_args: True,
             )
 
-    def test_preview_and_execute_delete_parent_cascade_in_one_local_transaction(self) -> None:
+    def test_preview_and_execute_delete_parent_cascade_in_one_local_transaction(
+        self,
+    ) -> None:
         fixture = self._fixture()
         temporary, _root, state, _index, rollouts, manager = fixture
         self.addCleanup(temporary.cleanup)
@@ -807,12 +1072,16 @@ class SessionCleanupManagerTests(unittest.TestCase):
             ["Archived"],
         )
         with closing(sqlite3.connect(state)) as connection:
-            self.assertEqual(connection.execute("SELECT count(*) FROM threads").fetchone()[0], 1)
+            self.assertEqual(
+                connection.execute("SELECT count(*) FROM threads").fetchone()[0], 1
+            )
         self.assertFalse(rollouts[ROOT_ID].exists())
         self.assertFalse(rollouts[CHILD_ID].exists())
         self.assertFalse((_root / ".hud-session-delete-staging").exists())
 
-    def test_delete_commits_prepared_usage_only_after_cascade_verification(self) -> None:
+    def test_delete_commits_prepared_usage_only_after_cascade_verification(
+        self,
+    ) -> None:
         fixture = self._fixture()
         temporary, _root, _state, _index, rollouts, manager = fixture
         self.addCleanup(temporary.cleanup)
@@ -849,7 +1118,9 @@ class SessionCleanupManagerTests(unittest.TestCase):
             [("prepare", ROOT_ID), ("commit", "usage-receipt")],
         )
 
-    def test_delete_commit_is_idempotent_after_usage_refresh_recovers_snapshot(self) -> None:
+    def test_delete_commit_is_idempotent_after_usage_refresh_recovers_snapshot(
+        self,
+    ) -> None:
         fixture = self._fixture()
         temporary, root, _state, _index, _rollouts, manager = fixture
         self.addCleanup(temporary.cleanup)
@@ -1006,6 +1277,7 @@ class SessionCleanupManagerTests(unittest.TestCase):
         self.assertFalse(payload["capability"]["available"])
         self.assertEqual(payload["totals"]["selectable"], 0)
         self.assertTrue(all(not row["selectable"] for row in payload["sessions"]))
+
     def test_batch_delete_fails_as_a_whole_before_any_local_mutation(self) -> None:
         fixture = self._fixture()
         temporary, _root, _state, _index, _rollouts, manager = fixture
@@ -1029,7 +1301,9 @@ class SessionCleanupManagerTests(unittest.TestCase):
         self.assertEqual(result["operation"]["deletedCount"], 0)
         self.assertEqual(result["operation"]["failedCount"], 2)
 
-    def test_batch_delete_probes_capability_once_before_revalidating_items(self) -> None:
+    def test_batch_delete_probes_capability_once_before_revalidating_items(
+        self,
+    ) -> None:
         fixture = self._fixture()
         temporary, _root, _state, _index, _rollouts, manager = fixture
         self.addCleanup(temporary.cleanup)
@@ -1037,7 +1311,9 @@ class SessionCleanupManagerTests(unittest.TestCase):
         selected = [row["id"] for row in scan["sessions"]]
         preview = manager.preview(selected, scan["revision"])
 
-        with patch.object(manager, "probe_capability", wraps=manager.probe_capability) as probe:
+        with patch.object(
+            manager, "probe_capability", wraps=manager.probe_capability
+        ) as probe:
             result = manager.execute(
                 selected,
                 scan["revision"],
@@ -1055,7 +1331,9 @@ class SessionCleanupManagerTests(unittest.TestCase):
         selected = [row["id"] for row in scan["sessions"]]
         preview = manager.preview(selected, scan["revision"])
 
-        with patch.object(manager, "_load_state", wraps=manager._load_state) as load_state:
+        with patch.object(
+            manager, "_load_state", wraps=manager._load_state
+        ) as load_state:
             result = manager.execute(
                 selected,
                 scan["revision"],
@@ -1071,7 +1349,9 @@ class SessionCleanupManagerTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         scan = manager.scan()
         root_row = next(row for row in scan["sessions"] if row["title"] == "Root")
-        archived_row = next(row for row in scan["sessions"] if row["title"] == "Archived")
+        archived_row = next(
+            row for row in scan["sessions"] if row["title"] == "Archived"
+        )
         preview = manager.preview(
             [root_row["id"], archived_row["id"]],
             scan["revision"],
@@ -1114,11 +1394,15 @@ class SessionCleanupManagerTests(unittest.TestCase):
                     f"OR child_thread_id IN ({placeholders})",
                     (*family, *family),
                 )
-                connection.execute(f"DELETE FROM threads WHERE id IN ({placeholders})", family)
+                connection.execute(
+                    f"DELETE FROM threads WHERE id IN ({placeholders})", family
+                )
             for path in items[0]._rollout_paths:
                 path.unlink()
 
-        with patch.object(manager, "_delete_local_batch", side_effect=delete_without_index):
+        with patch.object(
+            manager, "_delete_local_batch", side_effect=delete_without_index
+        ):
             result = manager.execute(
                 [root_row["id"]],
                 scan["revision"],

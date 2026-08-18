@@ -16,6 +16,7 @@ from .core.session_cleanup import (
 )
 from .core.session_transfer import CodexAppServerClient
 from .core.deleted_usage import DeletedUsageLedger, DeletedUsageLedgerError
+from .platforms.codex_persisted_atoms import CodexDesktopBindingCleaner
 
 
 _LOGGER = logging.getLogger("codex_usage_hud.session_cleanup_runtime")
@@ -91,6 +92,10 @@ class SessionCleanupWorker:
         self._context = context
         self.manager = manager
         self._on_deleted = on_deleted
+        # Constructing this adapter only captures the configured local CDP
+        # endpoint.  It does not attach to Desktop until a migration actually
+        # finds an exact persisted source binding that needs cleanup.
+        self._desktop_binding_cleaner = CodexDesktopBindingCleaner()
         self._queue: queue.Queue[dict[str, object] | None] = queue.Queue()
         self._closed = Event()
         self._worker = Thread(
@@ -145,7 +150,9 @@ class SessionCleanupWorker:
             refresh_after_delete = False
             try:
                 if action == "sessionCleanupScan":
-                    previous_publisher = getattr(self.manager, "progress_publisher", None)
+                    previous_publisher = getattr(
+                        self.manager, "progress_publisher", None
+                    )
                     self.manager.progress_publisher = self._publish
                     try:
                         snapshot = self.manager.scan(request_id=request_id)
@@ -153,19 +160,25 @@ class SessionCleanupWorker:
                         self.manager.progress_publisher = previous_publisher
                 elif action == "sessionCleanupPreview":
                     snapshot = self.manager.preview(
-                        cleanup_string_list(command.get("itemIds") or command.get("sessionIds")),
+                        cleanup_string_list(
+                            command.get("itemIds") or command.get("sessionIds")
+                        ),
                         str(command.get("inventoryRevision") or ""),
                         request_id=request_id,
                     )
                 elif action == "providerDelete":
                     # config.toml / 单价删除已在 dispatch 同步请求阶段完成；此处只负责
                     # 后台清理该供应商的会话历史，避免历史较多时阻塞前端删除反馈。
-                    provider_id = str(
-                        command.get("provider") or command.get("providerId") or ""
-                    ).strip().casefold()
-                    app_provider = str(
-                        getattr(self._context, "app_provider", "") or ""
-                    ).strip().casefold()
+                    provider_id = (
+                        str(command.get("provider") or command.get("providerId") or "")
+                        .strip()
+                        .casefold()
+                    )
+                    app_provider = (
+                        str(getattr(self._context, "app_provider", "") or "")
+                        .strip()
+                        .casefold()
+                    )
                     if provider_id and provider_id == app_provider:
                         raise SessionCleanupError(
                             "默认 Codex App Provider 不支持删除供应商配置。"
@@ -204,12 +217,24 @@ class SessionCleanupWorker:
                     )
                     refresh_after_delete = history_deleted > 0
                 elif action == "sessionTransfer":
-                    source_provider = str(
-                        command.get("sourceProvider") or command.get("source_provider") or ""
-                    ).strip().casefold()
-                    target_provider = str(
-                        command.get("targetProvider") or command.get("target_provider") or ""
-                    ).strip().casefold()
+                    source_provider = (
+                        str(
+                            command.get("sourceProvider")
+                            or command.get("source_provider")
+                            or ""
+                        )
+                        .strip()
+                        .casefold()
+                    )
+                    target_provider = (
+                        str(
+                            command.get("targetProvider")
+                            or command.get("target_provider")
+                            or ""
+                        )
+                        .strip()
+                        .casefold()
+                    )
                     mode = str(command.get("mode") or "copy").strip().casefold()
                     self._validate_transfer_provider(
                         source_provider,
@@ -219,7 +244,9 @@ class SessionCleanupWorker:
                         command.get("itemIds") or command.get("sessionIds")
                     )
                     revision = str(command.get("inventoryRevision") or "")
-                    previous_publisher = getattr(self.manager, "progress_publisher", None)
+                    previous_publisher = getattr(
+                        self.manager, "progress_publisher", None
+                    )
                     self.manager.progress_publisher = self._publish
                     try:
                         sessions_root = getattr(self._context, "sessions_root", None)
@@ -281,16 +308,21 @@ class SessionCleanupWorker:
                                 source_provider,
                                 target_provider,
                                 mode,
-                                fork=lambda session_id, provider, cwd: current_app_server().fork(
-                                    session_id,
-                                    provider,
-                                    cwd=cwd,
+                                fork=lambda session_id, provider, cwd: (
+                                    current_app_server().fork(
+                                        session_id,
+                                        provider,
+                                        cwd=cwd,
+                                    )
                                 ),
                                 materialize=materialize_target,
-                                verify=lambda session_id, provider: current_app_server().verify_persistent_thread(
-                                    session_id,
-                                    provider,
+                                verify=lambda session_id, provider: (
+                                    current_app_server().verify_persistent_thread(
+                                        session_id,
+                                        provider,
+                                    )
                                 ),
+                                prepare_desktop_binding_cleanup=self._desktop_binding_cleaner.prepare_source_binding_cleanup,
                                 request_id=request_id,
                             )
                         finally:
@@ -304,22 +336,27 @@ class SessionCleanupWorker:
                     )
                 else:
                     snapshot = self.manager.execute(
-                        cleanup_string_list(command.get("itemIds") or command.get("sessionIds")),
+                        cleanup_string_list(
+                            command.get("itemIds") or command.get("sessionIds")
+                        ),
                         str(command.get("inventoryRevision") or ""),
                         str(command.get("confirmationToken") or ""),
                         request_id=request_id,
                     )
                     operation = snapshot.get("operation")
-                    if isinstance(operation, Mapping) and int(
-                        operation.get("deletedCount") or 0
-                    ) > 0:
+                    if (
+                        isinstance(operation, Mapping)
+                        and int(operation.get("deletedCount") or 0) > 0
+                    ):
                         refresh_after_delete = True
             except Exception as exc:
                 failure_values: dict[str, object] = {}
                 if action == "providerDelete":
-                    failure_values["provider"] = str(
-                        command.get("provider") or command.get("providerId") or ""
-                    ).strip().lower()
+                    failure_values["provider"] = (
+                        str(command.get("provider") or command.get("providerId") or "")
+                        .strip()
+                        .lower()
+                    )
                 snapshot = self.manager.mark_operation(
                     request_id=request_id,
                     action=action,
@@ -345,9 +382,9 @@ class SessionCleanupWorker:
         registry = getattr(self._context, "provider_registry", None)
         entries = getattr(registry, "entries", {})
         target_entry = entries.get(target) if isinstance(entries, Mapping) else None
-        app_provider = str(
-            getattr(self._context, "app_provider", "") or ""
-        ).strip().casefold()
+        app_provider = (
+            str(getattr(self._context, "app_provider", "") or "").strip().casefold()
+        )
         if target != app_provider and target_entry is None:
             raise SessionCleanupError("目标 Provider 不在当前 Codex 配置中。")
         if target != app_provider and target_entry is not None:
@@ -392,7 +429,9 @@ class SessionCleanupWorker:
 
 def _session_cleanup_current_ids(context: object) -> tuple[str, ...]:
     values: list[str] = []
-    values.append(str(getattr(context, "session_management_current_session_id", "") or ""))
+    values.append(
+        str(getattr(context, "session_management_current_session_id", "") or "")
+    )
     resolver = getattr(context, "session_resolver", None)
     values.append(str(getattr(resolver, "session_id", "") or ""))
     tracker = getattr(context, "active_session_tracker", None)
@@ -405,9 +444,7 @@ def _session_cleanup_active_ids(context: object) -> tuple[str, ...]:
     return tuple(str(value) for value in values)
 
 
-def _prepare_session_cleanup_usage(
-    context: object, item: SessionCleanupItem
-) -> object:
+def _prepare_session_cleanup_usage(context: object, item: SessionCleanupItem) -> object:
     try:
         return getattr(context, "usage_cache").prepare_deleted_session_usage(item)
     except DeletedUsageLedgerError as exc:

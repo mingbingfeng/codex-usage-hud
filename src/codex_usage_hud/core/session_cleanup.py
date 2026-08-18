@@ -114,6 +114,11 @@ class _Confirmation:
 UsageSnapshotPrepare = Callable[[SessionCleanupItem], object]
 UsageSnapshotCommit = Callable[[object], None]
 UsageSnapshotDiscard = Callable[[object], None]
+DesktopBindingCleanupPrepare = Callable[[Sequence[str]], object]
+
+
+_DESKTOP_PERSISTED_ATOM_STATE_KEY = "electron-persisted-atom-state"
+_DESKTOP_THREAD_BINDINGS_KEY = "client-thread-bindings-v1"
 
 
 def _canonical_uuid(value: object) -> str:
@@ -147,7 +152,9 @@ def _read_only_connection(path: Path) -> sqlite3.Connection:
 
 
 def _read_write_connection(path: Path) -> sqlite3.Connection:
-    connection = sqlite3.connect(f"file:{path.as_posix()}?mode=rw", uri=True, timeout=5.0)
+    connection = sqlite3.connect(
+        f"file:{path.as_posix()}?mode=rw", uri=True, timeout=5.0
+    )
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA busy_timeout = 5000")
     return connection
@@ -192,8 +199,10 @@ def _updated_at_iso(value: int) -> str:
     if value <= 0:
         return ""
     try:
-        return datetime.fromtimestamp(value / 1000.0).astimezone().isoformat(
-            timespec="seconds"
+        return (
+            datetime.fromtimestamp(value / 1000.0)
+            .astimezone()
+            .isoformat(timespec="seconds")
         )
     except (OSError, OverflowError, ValueError):
         return ""
@@ -210,7 +219,10 @@ def _session_metadata(path: Path | None) -> _SessionMetadata:
                     record = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if not isinstance(record, Mapping) or record.get("type") != "session_meta":
+                if (
+                    not isinstance(record, Mapping)
+                    or record.get("type") != "session_meta"
+                ):
                     continue
                 payload = record.get("payload")
                 if not isinstance(payload, Mapping):
@@ -286,15 +298,23 @@ class SessionCleanupManager:
         usage_snapshot_prepare: UsageSnapshotPrepare | None = None,
         usage_snapshot_commit: UsageSnapshotCommit | None = None,
         usage_snapshot_discard: UsageSnapshotDiscard | None = None,
+        desktop_global_state_path: Path | None = None,
         clock: Callable[[], float] = time.time,
         token_factory: Callable[[], str] | None = None,
         confirmation_ttl_seconds: float = DEFAULT_CONFIRMATION_TTL_SECONDS,
-        transfer_ready_retry_delays: Sequence[float] = _TRANSFER_READY_RETRY_DELAYS_SECONDS,
+        transfer_ready_retry_delays: Sequence[
+            float
+        ] = _TRANSFER_READY_RETRY_DELAYS_SECONDS,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self.state_db_path = Path(state_db_path)
         self.sessions_root = Path(sessions_root)
         self.session_index_path = Path(session_index_path)
+        self.desktop_global_state_path = Path(
+            desktop_global_state_path
+            if desktop_global_state_path is not None
+            else self.state_db_path.parent / ".codex-global-state.json"
+        )
         self.current_session_ids = current_session_ids or (lambda: ())
         self.active_session_ids = active_session_ids or (lambda: ())
         self.usage_snapshot_prepare = usage_snapshot_prepare
@@ -356,7 +376,11 @@ class SessionCleanupManager:
         """Resolve one current inventory item without exposing its path in the payload."""
         normalized_id = str(item_id or "").strip()
         normalized_revision = str(revision or "").strip()
-        if not normalized_id or not normalized_revision or normalized_revision != self._revision:
+        if (
+            not normalized_id
+            or not normalized_revision
+            or normalized_revision != self._revision
+        ):
             return None
         item = self._items.get(normalized_id)
         if item is None or not item._session_id:
@@ -400,7 +424,8 @@ class SessionCleanupManager:
             or record.rollout_path is None
             or not _path_under(record.rollout_path, self._allowed_rollout_roots())
             or not record.rollout_path.is_file()
-            or _session_metadata(record.rollout_path).model_provider.casefold() != provider
+            or _session_metadata(record.rollout_path).model_provider.casefold()
+            != provider
         ):
             return None
         raw_path = str(record.cwd or "").strip()
@@ -476,7 +501,10 @@ class SessionCleanupManager:
     def scan(self, *, request_id: str = "") -> dict[str, object]:
         request = str(request_id or "")
         publisher = getattr(self, "progress_publisher", None)
-        def report(phase: str, phase_label: str, phase_index: int, progress: int) -> None:
+
+        def report(
+            phase: str, phase_label: str, phase_index: int, progress: int
+        ) -> None:
             self.mark_operation(
                 request_id=request,
                 action="scan",
@@ -565,7 +593,9 @@ class SessionCleanupManager:
             items.append(
                 SessionCleanupItem(
                     id=f"session-{self.token_factory()}",
-                    title=(root.title or titles.get(root_id) or "Untitled session").strip(),
+                    title=(
+                        root.title or titles.get(root_id) or "Untitled session"
+                    ).strip(),
                     workdir_name=_workdir_leaf(root.cwd),
                     updated_at=_updated_at_iso(
                         max(record.updated_at_ms for record in family_records)
@@ -691,14 +721,10 @@ class SessionCleanupManager:
         )
         executed = result.get("operation") if isinstance(result, Mapping) else {}
         deleted_count = int(
-            executed.get("deletedCount") or 0
-            if isinstance(executed, Mapping)
-            else 0
+            executed.get("deletedCount") or 0 if isinstance(executed, Mapping) else 0
         )
         actual_bytes = int(
-            executed.get("actualBytes") or 0
-            if isinstance(executed, Mapping)
-            else 0
+            executed.get("actualBytes") or 0 if isinstance(executed, Mapping) else 0
         )
         if (
             not isinstance(executed, Mapping)
@@ -733,7 +759,9 @@ class SessionCleanupManager:
             if index and delay:
                 self._sleep(delay)
             try:
-                records, _parents, _edge_states, _unsafe_ids, _unresolved = self._load_state()
+                records, _parents, _edge_states, _unsafe_ids, _unresolved = (
+                    self._load_state()
+                )
                 target = records.get(canonical_target)
                 allowed_roots = self._allowed_rollout_roots()
                 if (
@@ -785,9 +813,7 @@ class SessionCleanupManager:
                             if existing:
                                 existing_ids.add(existing)
             except (OSError, UnicodeError) as exc:
-                raise SessionCleanupError(
-                    "Codex CLI 会话索引无法读取。"
-                ) from exc
+                raise SessionCleanupError("Codex CLI 会话索引无法读取。") from exc
         if canonical in existing_ids:
             return
         payload = {
@@ -800,15 +826,17 @@ class SessionCleanupManager:
         }
         try:
             self.session_index_path.parent.mkdir(parents=True, exist_ok=True)
-            with self.session_index_path.open("a", encoding="utf-8", newline="\n") as handle:
-                handle.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+            with self.session_index_path.open(
+                "a", encoding="utf-8", newline="\n"
+            ) as handle:
+                handle.write(
+                    json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+                )
                 handle.write("\n")
                 handle.flush()
                 os.fsync(handle.fileno())
         except (OSError, UnicodeError) as exc:
-            raise SessionCleanupError(
-                "Codex CLI 会话索引无法更新。"
-            ) from exc
+            raise SessionCleanupError("Codex CLI 会话索引无法更新。") from exc
 
     def transfer(
         self,
@@ -821,6 +849,7 @@ class SessionCleanupManager:
         fork: Callable[[str, str, str], str],
         materialize: Callable[[str, str], object] | None = None,
         verify: Callable[[str, str], bool] | None = None,
+        prepare_desktop_binding_cleanup: DesktopBindingCleanupPrepare | None = None,
         request_id: str = "",
     ) -> dict[str, object]:
         """Fork selected sessions to another Provider, optionally removing sources.
@@ -845,17 +874,12 @@ class SessionCleanupManager:
         if not callable(verify):
             raise SessionCleanupError("Codex 目标会话持久化验证当前不可用。")
         items = self._selected_items(item_ids, revision)
-        if any(
-            item.model_provider.casefold() != normalized_source
-            for item in items
-        ):
+        if any(item.model_provider.casefold() != normalized_source for item in items):
             raise SessionCleanupError(
                 "所选会话已不属于当前源 Provider，请重新扫描后再试。"
             )
         if any(not item.transferable for item in items):
-            raise SessionCleanupError(
-                "所选会话的分页历史源无法验证，不能复制或迁移。"
-            )
+            raise SessionCleanupError("所选会话的分页历史源无法验证，不能复制或迁移。")
         results: list[dict[str, object]] = []
         migration_candidates: list[tuple[SessionCleanupItem, dict[str, object]]] = []
         existing_session_ids = set(self._load_state()[0])
@@ -870,7 +894,11 @@ class SessionCleanupManager:
             # App-server notifications and renderer payloads are relatively
             # expensive for large selections. Keep progress responsive while
             # coalescing bursts from fast local forks.
-            if not force and last_progress_publish and now - last_progress_publish < 0.075:
+            if (
+                not force
+                and last_progress_publish
+                and now - last_progress_publish < 0.075
+            ):
                 return
             target_ready_count = sum(
                 bool(result.get("targetVisible"))
@@ -878,7 +906,9 @@ class SessionCleanupManager:
                 for result in results
             )
             target_failed_count = len(results) - target_ready_count
-            migrated_count = sum(bool(result.get("sourceDeleted")) for result in results)
+            migrated_count = sum(
+                bool(result.get("sourceDeleted")) for result in results
+            )
             self.mark_operation(
                 request_id=request_id,
                 action="sessionTransfer",
@@ -897,9 +927,7 @@ class SessionCleanupManager:
                 ),
                 targetFailedCount=target_failed_count,
                 unmigratedCount=(
-                    len(results) - migrated_count
-                    if normalized_mode == "migrate"
-                    else 0
+                    len(results) - migrated_count if normalized_mode == "migrate" else 0
                 ),
                 # A migration is not terminal until its shared safe-delete
                 # transaction finishes; do not label ready targets as failed
@@ -922,9 +950,7 @@ class SessionCleanupManager:
                     fork(item._session_id, normalized_target, item._cwd)
                 )
                 if not new_session_id or new_session_id == item._session_id:
-                    raise SessionCleanupError(
-                        "Codex fork 未返回新的目标会话。"
-                    )
+                    raise SessionCleanupError("Codex fork 未返回新的目标会话。")
                 if (
                     new_session_id in existing_session_ids
                     or new_session_id in created_target_ids
@@ -973,6 +999,8 @@ class SessionCleanupManager:
                     "historyMaterialized": history_materialized,
                     "sourceDeleted": False,
                     "sourceRetained": normalized_mode == "migrate",
+                    "desktopBindingCleaned": normalized_mode != "migrate",
+                    "desktopBindingRemovedCount": 0,
                     "indexWarning": index_warning,
                     "error": "",
                 }
@@ -986,9 +1014,9 @@ class SessionCleanupManager:
                         "id": item.id,
                         "title": item.title,
                         "targetSessionId": new_session_id,
-                        "state": "copied" if target_ready else (
-                            "targetCreated" if forked else "failed"
-                        ),
+                        "state": "copied"
+                        if target_ready
+                        else ("targetCreated" if forked else "failed"),
                         "forked": forked,
                         "targetCreated": forked,
                         "targetVisible": target_ready,
@@ -996,6 +1024,8 @@ class SessionCleanupManager:
                         "historyMaterialized": history_materialized,
                         "sourceDeleted": False,
                         "sourceRetained": normalized_mode == "migrate",
+                        "desktopBindingCleaned": False,
+                        "desktopBindingRemovedCount": 0,
                         "indexWarning": index_warning,
                         "error": error_text,
                     }
@@ -1013,7 +1043,9 @@ class SessionCleanupManager:
                             "源会话已保留：至少一个目标会话尚未通过迁移就绪验证。"
                         )
             elif migration_candidates:
-                fresh_candidates: list[tuple[SessionCleanupItem, dict[str, object]]] = []
+                fresh_candidates: list[
+                    tuple[SessionCleanupItem, dict[str, object]]
+                ] = []
                 blockers: dict[str, str] = {}
                 target_session_ids = {
                     _canonical_uuid(result.get("targetSessionId"))
@@ -1046,8 +1078,7 @@ class SessionCleanupManager:
                             blockers[original.id] = "源会话的 Provider 在删除前已改变。"
                         elif not current.selectable:
                             blockers[original.id] = (
-                                current.blocked_reason
-                                or "源会话当前不允许安全删除。"
+                                current.blocked_reason or "源会话当前不允许安全删除。"
                             )
                         elif not current.transferable:
                             blockers[original.id] = (
@@ -1078,6 +1109,9 @@ class SessionCleanupManager:
                     ]
                     deletion_error = ""
                     deleted_rows_by_id: dict[str, Mapping[str, object]] = {}
+                    desktop_binding_errors: dict[str, str] = {}
+                    desktop_binding_removed_counts: dict[str, int] = {}
+                    desktop_binding_plans: dict[str, object] = {}
                     try:
                         preview = self.preview(
                             successful_ids,
@@ -1092,6 +1126,51 @@ class SessionCleanupManager:
                         )
                         if not confirmation_token:
                             raise SessionCleanupError("源会话删除确认令牌生成失败。")
+                        for candidate, _result in fresh_candidates:
+                            source_family_ids = tuple(
+                                dict.fromkeys(
+                                    (
+                                        candidate._session_id,
+                                        *candidate._descendant_ids,
+                                    )
+                                )
+                            )
+                            persisted_binding_keys = self._desktop_source_binding_keys(
+                                source_family_ids
+                            )
+                            if not callable(prepare_desktop_binding_cleanup):
+                                if not persisted_binding_keys:
+                                    continue
+                                raise SessionCleanupError(
+                                    "Codex Desktop 源会话侧栏绑定仍存在，"
+                                    "但清理通道当前不可用；为保护源会话，已取消删除。"
+                                )
+                            try:
+                                desktop_binding_plan = prepare_desktop_binding_cleanup(
+                                    source_family_ids
+                                )
+                            except Exception as exc:
+                                # A live preflight can discover an unflushed
+                                # binding that the state-file safety gate has
+                                # not observed yet. The Desktop adapter marks
+                                # that case explicitly; do not delete its
+                                # source merely because the file was stale.
+                                live_binding_detected = bool(
+                                    getattr(exc, "source_binding_detected", False)
+                                )
+                                if persisted_binding_keys or live_binding_detected:
+                                    raise
+                                # With no on-disk or live source binding proof,
+                                # Desktop being closed/unreachable must not
+                                # block a CLI-only migration.
+                                continue
+                            if not callable(
+                                getattr(desktop_binding_plan, "commit", None)
+                            ):
+                                raise SessionCleanupError(
+                                    "Codex Desktop 源会话侧栏绑定预检返回无效结果。"
+                                )
+                            desktop_binding_plans[candidate.id] = desktop_binding_plan
                         deleted = self.execute(
                             successful_ids,
                             self._revision,
@@ -1110,8 +1189,7 @@ class SessionCleanupManager:
                             deleted_rows_by_id = {
                                 str(row.get("id") or ""): row
                                 for row in deleted_rows
-                                if isinstance(row, Mapping)
-                                and str(row.get("id") or "")
+                                if isinstance(row, Mapping) and str(row.get("id") or "")
                             }
                         deletion_error = str(
                             deleted_operation.get("error")
@@ -1121,13 +1199,49 @@ class SessionCleanupManager:
                     except Exception as exc:
                         deletion_error = str(exc) or type(exc).__name__
 
+                    for current, _result in fresh_candidates:
+                        if (
+                            str(
+                                deleted_rows_by_id.get(current.id, {}).get("state")
+                                or ""
+                            )
+                            != "deleted"
+                        ):
+                            continue
+                        desktop_binding_plan = desktop_binding_plans.get(current.id)
+                        if desktop_binding_plan is None:
+                            continue
+                        try:
+                            desktop_binding_removed_counts[current.id] = (
+                                self._commit_desktop_binding_cleanup(
+                                    desktop_binding_plan
+                                )
+                            )
+                        except Exception as exc:
+                            desktop_binding_errors[current.id] = (
+                                str(exc) or type(exc).__name__
+                            )
+
                     for current, result in fresh_candidates:
                         row = deleted_rows_by_id.get(current.id, {})
                         if str(row.get("state") or "") == "deleted":
                             result["state"] = "migrated"
                             result["sourceDeleted"] = True
                             result["sourceRetained"] = False
-                            result["error"] = ""
+                            result["desktopBindingCleaned"] = not bool(
+                                desktop_binding_errors.get(current.id)
+                            )
+                            result["desktopBindingRemovedCount"] = (
+                                desktop_binding_removed_counts.get(current.id, 0)
+                            )
+                            result["error"] = (
+                                ""
+                                if not desktop_binding_errors.get(current.id)
+                                else (
+                                    "源会话已删除，但 Codex Desktop 侧栏绑定清理失败："
+                                    f"{desktop_binding_errors[current.id]}"
+                                )
+                            )
                             continue
                         row_error = str(row.get("error") or "").strip()
                         result["error"] = (
@@ -1146,28 +1260,34 @@ class SessionCleanupManager:
                 # reconcile the list.
                 pass
         copied_count = sum(
-            bool(result.get("targetVisible"))
-            and bool(result.get("targetResumable"))
+            bool(result.get("targetVisible")) and bool(result.get("targetResumable"))
             for result in results
         )
         migrated_count = sum(result.get("state") == "migrated" for result in results)
+        desktop_binding_cleanup_failed_count = sum(
+            bool(result.get("sourceDeleted"))
+            and not bool(result.get("desktopBindingCleaned"))
+            for result in results
+        )
         source_retained_count = sum(
             bool(result.get("sourceRetained")) for result in results
         )
         failed_count = (
-            total - migrated_count
+            total - migrated_count + desktop_binding_cleanup_failed_count
             if normalized_mode == "migrate"
             else total - copied_count
         )
         target_failed_count = total - copied_count
         unmigrated_count = total - migrated_count if normalized_mode == "migrate" else 0
         completed = (
-            migrated_count == total
+            migrated_count == total and desktop_binding_cleanup_failed_count == 0
             if normalized_mode == "migrate"
             else copied_count == total
         )
         has_forked_result = any(bool(result.get("forked")) for result in results)
-        state = "completed" if completed else ("partial" if has_forked_result else "failed")
+        state = (
+            "completed" if completed else ("partial" if has_forked_result else "failed")
+        )
         return self.mark_operation(
             request_id=request_id,
             action="sessionTransfer",
@@ -1182,6 +1302,7 @@ class SessionCleanupManager:
             copiedCount=copied_count,
             migratedCount=migrated_count,
             sourceRetainedCount=source_retained_count,
+            desktopBindingCleanupFailedCount=desktop_binding_cleanup_failed_count,
             targetFailedCount=max(0, target_failed_count),
             unmigratedCount=max(0, unmigrated_count),
             failedCount=max(0, failed_count),
@@ -1296,8 +1417,10 @@ class SessionCleanupManager:
         interrupted: bool = False,
     ) -> dict[str, object]:
         deleted = sum(row.get("state") == "deleted" for row in results)
-        state = "completed" if deleted == len(results) else (
-            "partial" if deleted else "failed"
+        state = (
+            "completed"
+            if deleted == len(results)
+            else ("partial" if deleted else "failed")
         )
         self._reload_after_execute()
         return self.mark_operation(
@@ -1343,11 +1466,12 @@ class SessionCleanupManager:
         confirmation = self._confirmations.pop(str(token or ""), None)
         if confirmation is None or confirmation.expires_at < float(self.clock()):
             raise SessionCleanupError("Confirmation token is missing or expired.")
-        if (
-            confirmation.revision != revision
-            or confirmation.item_ids != tuple(item.id for item in items)
+        if confirmation.revision != revision or confirmation.item_ids != tuple(
+            item.id for item in items
         ):
-            raise SessionCleanupError("Confirmation does not match the session selection.")
+            raise SessionCleanupError(
+                "Confirmation does not match the session selection."
+            )
         return items
 
     def _protected_ids(
@@ -1360,11 +1484,7 @@ class SessionCleanupManager:
             raise SessionCleanupError(
                 f"Active session state could not be verified ({type(exc).__name__})."
             ) from exc
-        return {
-            canonical
-            for value in values
-            if (canonical := _canonical_uuid(value))
-        }
+        return {canonical for value in values if (canonical := _canonical_uuid(value))}
 
     def _allowed_rollout_roots(self) -> tuple[Path, ...]:
         roots = [self.sessions_root]
@@ -1392,7 +1512,9 @@ class SessionCleanupManager:
                     )
                 }
                 if "threads" not in tables:
-                    raise SessionCleanupError("Codex state database has no threads table.")
+                    raise SessionCleanupError(
+                        "Codex state database has no threads table."
+                    )
                 columns = {
                     str(row[1])
                     for row in connection.execute("PRAGMA table_info(threads)")
@@ -1425,7 +1547,9 @@ class SessionCleanupManager:
                     else []
                 )
         except sqlite3.Error as exc:
-            raise SessionCleanupError("Codex state database could not be read.") from exc
+            raise SessionCleanupError(
+                "Codex state database could not be read."
+            ) from exc
         records: dict[str, _ThreadRecord] = {}
         unresolved = 0
         for row in rows:
@@ -1583,6 +1707,78 @@ class SessionCleanupManager:
 
     def _session_index_ids(self, *, strict: bool = False) -> set[str]:
         return self._session_index_metadata(strict=strict)[1]
+
+    def _desktop_source_binding_keys(
+        self,
+        session_ids: Sequence[str],
+    ) -> tuple[str, ...]:
+        """Return only Desktop client bindings whose value is an exact source id.
+
+        Desktop persists this one atom outside ``state_5.sqlite``.  It is read
+        here only as a pre-delete safety gate; the running Desktop process owns
+        the actual write through its persisted-atom bridge.
+        """
+        normalized_ids = {
+            str(session_id or "").strip().casefold()
+            for session_id in session_ids
+            if str(session_id or "").strip()
+        }
+        if not normalized_ids or not self.desktop_global_state_path.is_file():
+            return ()
+        try:
+            payload = json.loads(
+                self.desktop_global_state_path.read_text(encoding="utf-8")
+            )
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise SessionCleanupError(
+                "Codex Desktop 持久化状态无法验证，已保留源会话。"
+            ) from exc
+        if not isinstance(payload, Mapping):
+            raise SessionCleanupError(
+                "Codex Desktop 持久化状态格式无法验证，已保留源会话。"
+            )
+        atom_state = payload.get(_DESKTOP_PERSISTED_ATOM_STATE_KEY)
+        if atom_state is None:
+            return ()
+        if not isinstance(atom_state, Mapping):
+            raise SessionCleanupError(
+                "Codex Desktop 持久化状态格式无法验证，已保留源会话。"
+            )
+        bindings = atom_state.get(_DESKTOP_THREAD_BINDINGS_KEY)
+        if bindings is None:
+            return ()
+        if not isinstance(bindings, Mapping):
+            raise SessionCleanupError(
+                "Codex Desktop 会话侧栏绑定格式无法验证，已保留源会话。"
+            )
+        return tuple(
+            str(key)
+            for key, value in bindings.items()
+            if str(value or "").strip().casefold() in normalized_ids
+        )
+
+    @staticmethod
+    def _commit_desktop_binding_cleanup(plan: object) -> int:
+        commit = getattr(plan, "commit", None)
+        if not callable(commit):
+            raise SessionCleanupError("Codex Desktop 源会话侧栏绑定预检无效。")
+        report = commit()
+        if report is True:
+            return 0
+        if getattr(report, "verified", None) is not True:
+            raise SessionCleanupError("Codex Desktop 源会话侧栏绑定清理未验证。")
+        remaining = getattr(report, "remaining_binding_keys", ())
+        if isinstance(remaining, Sequence) and not isinstance(
+            remaining, (str, bytes, bytearray)
+        ):
+            if any(str(value or "").strip() for value in remaining):
+                raise SessionCleanupError("Codex Desktop 源会话侧栏绑定仍然存在。")
+        removed = getattr(report, "removed_binding_keys", ())
+        if not isinstance(removed, Sequence) or isinstance(
+            removed, (str, bytes, bytearray)
+        ):
+            return 0
+        return len([value for value in removed if str(value or "").strip()])
 
     def _delete_local_batch(self, items: Sequence[SessionCleanupItem]) -> None:
         session_ids = tuple(
@@ -1754,7 +1950,9 @@ class SessionCleanupManager:
                 raise SessionCleanupError(
                     "The session spawn relation changed after scanning."
                 )
-            current_descendants = tuple(self._descendants(item._session_id, records, parents))
+            current_descendants = tuple(
+                self._descendants(item._session_id, records, parents)
+            )
             if current_descendants != item._descendant_ids:
                 raise SessionCleanupError("Session spawn tree changed after scanning.")
             current_paths = tuple(

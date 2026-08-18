@@ -219,6 +219,7 @@ def test_worker_routes_session_transfer_to_app_server_and_configured_target() ->
     def transfer(*_args, **kwargs):
         assert kwargs["fork"](SOURCE_ID, "routin", "E:/project") == TARGET_ID
         assert kwargs["verify"](TARGET_ID, "routin") is True
+        assert callable(kwargs["prepare_desktop_binding_cleanup"])
         return transfer_result
 
     manager.transfer.side_effect = transfer
@@ -337,6 +338,7 @@ def test_worker_releases_fork_connection_before_migrate_materialization() -> Non
         assert kwargs["verify"](TARGET_ID, "routin") is True
         assert kwargs["materialize"](TARGET_ID, SOURCE_ID) is None
         assert kwargs["verify"](TARGET_ID, "routin") is True
+        assert callable(kwargs["prepare_desktop_binding_cleanup"])
         return transfer_result
 
     manager.transfer.side_effect = transfer
