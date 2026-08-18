@@ -97,8 +97,8 @@ def test_app_server_verifies_persistent_thread_before_source_deletion(
     assert client.verify_persistent_thread(TARGET_ID, "ROUTIN") is True
     assert client.request.call_args_list == [
         call(
-        "thread/read",
-        {"threadId": TARGET_ID, "includeTurns": True},
+            "thread/read",
+            {"threadId": TARGET_ID, "includeTurns": True},
         ),
         call(
             "thread/list",
@@ -219,7 +219,7 @@ def test_worker_routes_session_transfer_to_app_server_and_configured_target() ->
     def transfer(*_args, **kwargs):
         assert kwargs["fork"](SOURCE_ID, "routin", "E:/project") == TARGET_ID
         assert kwargs["verify"](TARGET_ID, "routin") is True
-        assert callable(kwargs["prepare_desktop_binding_cleanup"])
+        assert callable(kwargs["desktop_source_lifecycle"])
         return transfer_result
 
     manager.transfer.side_effect = transfer
@@ -276,7 +276,9 @@ def test_worker_routes_session_transfer_to_app_server_and_configured_target() ->
             "routin",
         )
         first_client.__exit__.assert_called_once_with(None, None, None)
-        assert client_factory.call_args_list == [call(codex_home=Path("E:/AppData/Codex"))]
+        assert client_factory.call_args_list == [
+            call(codex_home=Path("E:/AppData/Codex"))
+        ]
     finally:
         assert worker.close()
 
@@ -332,13 +334,35 @@ def test_worker_releases_fork_connection_before_migrate_materialization() -> Non
     manager.materialize_target_rollout.side_effect = lambda *_args: events.append(
         "materialize"
     )
+    desktop_lifecycle = MagicMock()
+    desktop_report = MagicMock()
+    desktop_report.to_payload.return_value = {
+        "threadId": SOURCE_ID,
+        "archived": True,
+        "deleted": True,
+        "archiveNotification": True,
+        "deleteNotification": True,
+        "verified": True,
+        "error": "",
+    }
+    desktop_lifecycle.archive_then_delete.side_effect = lambda *_args, **_kwargs: (
+        events.append("desktop-lifecycle") or desktop_report
+    )
 
     def transfer(*_args, **kwargs):
         assert kwargs["fork"](SOURCE_ID, "routin", "E:/project") == TARGET_ID
         assert kwargs["verify"](TARGET_ID, "routin") is True
         assert kwargs["materialize"](TARGET_ID, SOURCE_ID) is None
         assert kwargs["verify"](TARGET_ID, "routin") is True
-        assert callable(kwargs["prepare_desktop_binding_cleanup"])
+        assert kwargs["desktop_source_lifecycle"](SOURCE_ID, "E:/project") == {
+            "threadId": SOURCE_ID,
+            "archived": True,
+            "deleted": True,
+            "archiveNotification": True,
+            "deleteNotification": True,
+            "verified": True,
+            "error": "",
+        }
         return transfer_result
 
     manager.transfer.side_effect = transfer
@@ -352,6 +376,7 @@ def test_worker_releases_fork_connection_before_migrate_materialization() -> Non
         runtime_events=RuntimeEventBus(),
     )
     worker = SessionCleanupWorker(context, manager, on_deleted=lambda *_args: None)
+    worker._desktop_thread_lifecycle = desktop_lifecycle
     try:
         with pytest.MonkeyPatch.context() as patch:
             patch.setattr(
@@ -384,11 +409,16 @@ def test_worker_releases_fork_connection_before_migrate_materialization() -> Non
             "second-enter",
             "second-verify",
             "second-close",
+            "desktop-lifecycle",
         ]
         assert client_factory.call_args_list == [
             call(codex_home=Path("E:/AppData/Codex")),
             call(codex_home=Path("E:/AppData/Codex")),
         ]
         manager.materialize_target_rollout.assert_called_once_with(TARGET_ID, SOURCE_ID)
+        desktop_lifecycle.archive_then_delete.assert_called_once_with(
+            SOURCE_ID,
+            cwd="E:/project",
+        )
     finally:
         assert worker.close()

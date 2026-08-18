@@ -114,11 +114,7 @@ class _Confirmation:
 UsageSnapshotPrepare = Callable[[SessionCleanupItem], object]
 UsageSnapshotCommit = Callable[[object], None]
 UsageSnapshotDiscard = Callable[[object], None]
-DesktopBindingCleanupPrepare = Callable[[Sequence[str]], object]
-
-
-_DESKTOP_PERSISTED_ATOM_STATE_KEY = "electron-persisted-atom-state"
-_DESKTOP_THREAD_BINDINGS_KEY = "client-thread-bindings-v1"
+DesktopSourceLifecycle = Callable[[str, str], Mapping[str, object]]
 
 
 def _canonical_uuid(value: object) -> str:
@@ -298,7 +294,6 @@ class SessionCleanupManager:
         usage_snapshot_prepare: UsageSnapshotPrepare | None = None,
         usage_snapshot_commit: UsageSnapshotCommit | None = None,
         usage_snapshot_discard: UsageSnapshotDiscard | None = None,
-        desktop_global_state_path: Path | None = None,
         clock: Callable[[], float] = time.time,
         token_factory: Callable[[], str] | None = None,
         confirmation_ttl_seconds: float = DEFAULT_CONFIRMATION_TTL_SECONDS,
@@ -310,11 +305,6 @@ class SessionCleanupManager:
         self.state_db_path = Path(state_db_path)
         self.sessions_root = Path(sessions_root)
         self.session_index_path = Path(session_index_path)
-        self.desktop_global_state_path = Path(
-            desktop_global_state_path
-            if desktop_global_state_path is not None
-            else self.state_db_path.parent / ".codex-global-state.json"
-        )
         self.current_session_ids = current_session_ids or (lambda: ())
         self.active_session_ids = active_session_ids or (lambda: ())
         self.usage_snapshot_prepare = usage_snapshot_prepare
@@ -849,14 +839,15 @@ class SessionCleanupManager:
         fork: Callable[[str, str, str], str],
         materialize: Callable[[str, str], object] | None = None,
         verify: Callable[[str, str], bool] | None = None,
-        prepare_desktop_binding_cleanup: DesktopBindingCleanupPrepare | None = None,
+        desktop_source_lifecycle: DesktopSourceLifecycle | None = None,
         request_id: str = "",
     ) -> dict[str, object]:
         """Fork selected sessions to another Provider, optionally removing sources.
 
         ``fork`` is injected by the runtime worker so this manager remains
-        responsible for inventory/revalidation and local deletion safety while
-        the App Server protocol stays outside the storage layer.
+        responsible for inventory/revalidation.  Migration source deletion is
+        intentionally delegated to the running Desktop lifecycle so the
+        Desktop-owned local thread catalog receives the archive/delete events.
         """
         normalized_source = str(source_provider or "").strip().casefold()
         normalized_target = str(target_provider or "").strip().casefold()
@@ -925,14 +916,16 @@ class SessionCleanupManager:
                 sourceRetainedCount=sum(
                     bool(result.get("sourceRetained")) for result in results
                 ),
+                sourceArchivedCount=sum(
+                    bool(result.get("sourceArchived")) for result in results
+                ),
                 targetFailedCount=target_failed_count,
                 unmigratedCount=(
                     len(results) - migrated_count if normalized_mode == "migrate" else 0
                 ),
-                # A migration is not terminal until its shared safe-delete
-                # transaction finishes; do not label ready targets as failed
-                # while that gate is still running. Already-known fork or
-                # verification failures are still reported immediately.
+                # A migration is not terminal until Desktop has confirmed both
+                # source lifecycle notifications.  Do not label ready targets
+                # as failed while that gate is still running.
                 failedCount=target_failed_count,
             )
             if callable(publisher):
@@ -999,8 +992,8 @@ class SessionCleanupManager:
                     "historyMaterialized": history_materialized,
                     "sourceDeleted": False,
                     "sourceRetained": normalized_mode == "migrate",
-                    "desktopBindingCleaned": normalized_mode != "migrate",
-                    "desktopBindingRemovedCount": 0,
+                    "sourceArchived": False,
+                    "desktopLifecycleVerified": normalized_mode != "migrate",
                     "indexWarning": index_warning,
                     "error": "",
                 }
@@ -1024,8 +1017,8 @@ class SessionCleanupManager:
                         "historyMaterialized": history_materialized,
                         "sourceDeleted": False,
                         "sourceRetained": normalized_mode == "migrate",
-                        "desktopBindingCleaned": False,
-                        "desktopBindingRemovedCount": 0,
+                        "sourceArchived": False,
+                        "desktopLifecycleVerified": False,
                         "indexWarning": index_warning,
                         "error": error_text,
                     }
@@ -1104,151 +1097,111 @@ class SessionCleanupManager:
                     for _original, result in migration_candidates:
                         result["error"] = "源会话已保留：删除前会话清单不完整。"
                 else:
-                    successful_ids = [
-                        candidate.id for candidate, _result in fresh_candidates
-                    ]
-                    deletion_error = ""
-                    deleted_rows_by_id: dict[str, Mapping[str, object]] = {}
-                    desktop_binding_errors: dict[str, str] = {}
-                    desktop_binding_removed_counts: dict[str, int] = {}
-                    desktop_binding_plans: dict[str, object] = {}
-                    try:
-                        preview = self.preview(
-                            successful_ids,
-                            self._revision,
-                            request_id=request_id,
-                        )
-                        preview_operation = preview.get("operation")
-                        confirmation_token = str(
-                            preview_operation.get("confirmationToken")
-                            if isinstance(preview_operation, Mapping)
-                            else ""
-                        )
-                        if not confirmation_token:
-                            raise SessionCleanupError("源会话删除确认令牌生成失败。")
-                        for candidate, _result in fresh_candidates:
+                    if not callable(desktop_source_lifecycle):
+                        for _current, result in fresh_candidates:
+                            result["error"] = (
+                                "Codex Desktop 归档/删除通道当前不可用，源会话已保留。"
+                            )
+                    else:
+                        for current, result in fresh_candidates:
                             source_family_ids = tuple(
                                 dict.fromkeys(
                                     (
-                                        candidate._session_id,
-                                        *candidate._descendant_ids,
+                                        current._session_id,
+                                        *current._descendant_ids,
                                     )
                                 )
                             )
-                            persisted_binding_keys = self._desktop_source_binding_keys(
-                                source_family_ids
-                            )
-                            if not callable(prepare_desktop_binding_cleanup):
-                                if not persisted_binding_keys:
-                                    continue
-                                raise SessionCleanupError(
-                                    "Codex Desktop 源会话侧栏绑定仍存在，"
-                                    "但清理通道当前不可用；为保护源会话，已取消删除。"
-                                )
+                            usage_receipt: object | None = None
+                            reports: list[Mapping[str, object]] = []
+                            lifecycle_error = ""
                             try:
-                                desktop_binding_plan = prepare_desktop_binding_cleanup(
-                                    source_family_ids
-                                )
+                                if self.usage_snapshot_prepare is not None:
+                                    usage_receipt = self.usage_snapshot_prepare(current)
+                                for source_id in source_family_ids:
+                                    report = desktop_source_lifecycle(
+                                        source_id,
+                                        current._cwd,
+                                    )
+                                    if not isinstance(report, Mapping):
+                                        raise SessionCleanupError(
+                                            "Codex Desktop 归档/删除通道返回了无效结果。"
+                                        )
+                                    if (
+                                        _canonical_uuid(report.get("threadId"))
+                                        != source_id
+                                    ):
+                                        raise SessionCleanupError(
+                                            "Codex Desktop 归档/删除通道返回了不匹配的会话标识。"
+                                        )
+                                    reports.append(report)
                             except Exception as exc:
-                                # A live preflight can discover an unflushed
-                                # binding that the state-file safety gate has
-                                # not observed yet. The Desktop adapter marks
-                                # that case explicitly; do not delete its
-                                # source merely because the file was stale.
-                                live_binding_detected = bool(
-                                    getattr(exc, "source_binding_detected", False)
+                                lifecycle_error = str(exc) or type(exc).__name__
+
+                            archived = (
+                                bool(reports)
+                                and len(reports) == len(source_family_ids)
+                                and all(
+                                    bool(report.get("archived"))
+                                    and bool(report.get("archiveNotification"))
+                                    for report in reports
                                 )
-                                if persisted_binding_keys or live_binding_detected:
-                                    raise
-                                # With no on-disk or live source binding proof,
-                                # Desktop being closed/unreachable must not
-                                # block a CLI-only migration.
+                            )
+                            deleted = archived and all(
+                                bool(report.get("deleted"))
+                                and bool(report.get("deleteNotification"))
+                                and bool(report.get("verified"))
+                                for report in reports
+                            )
+                            report_errors = [
+                                str(report.get("error") or "").strip()
+                                for report in reports
+                                if str(report.get("error") or "").strip()
+                            ]
+                            detail = lifecycle_error or "; ".join(report_errors)
+
+                            if deleted:
+                                result["state"] = "migrated"
+                                result["sourceDeleted"] = True
+                                result["sourceRetained"] = False
+                                result["sourceArchived"] = True
+                                result["desktopLifecycleVerified"] = True
+                                result["error"] = ""
+                                if (
+                                    usage_receipt
+                                    and self.usage_snapshot_commit is not None
+                                ):
+                                    try:
+                                        self.usage_snapshot_commit(usage_receipt)
+                                    except Exception as exc:
+                                        result["usageWarning"] = (
+                                            "源会话已由 Codex Desktop 删除，"
+                                            "但使用量归档失败："
+                                            f"{str(exc) or type(exc).__name__}"
+                                        )
                                 continue
-                            if not callable(
-                                getattr(desktop_binding_plan, "commit", None)
+
+                            if (
+                                usage_receipt
+                                and self.usage_snapshot_discard is not None
                             ):
-                                raise SessionCleanupError(
-                                    "Codex Desktop 源会话侧栏绑定预检返回无效结果。"
+                                try:
+                                    self.usage_snapshot_discard(usage_receipt)
+                                except Exception:
+                                    pass
+                            result["sourceArchived"] = archived
+                            result["desktopLifecycleVerified"] = False
+                            result["sourceRetained"] = True
+                            if archived:
+                                result["error"] = (
+                                    "源会话已由 Codex Desktop 归档，但永久删除未完成；"
+                                    "已保留归档副本。" + (f"{detail}" if detail else "")
                                 )
-                            desktop_binding_plans[candidate.id] = desktop_binding_plan
-                        deleted = self.execute(
-                            successful_ids,
-                            self._revision,
-                            confirmation_token,
-                            request_id=request_id,
-                        )
-                        deleted_operation = deleted.get("operation")
-                        deleted_rows = (
-                            deleted_operation.get("results")
-                            if isinstance(deleted_operation, Mapping)
-                            else []
-                        )
-                        if isinstance(deleted_rows, Sequence) and not isinstance(
-                            deleted_rows, (str, bytes, bytearray)
-                        ):
-                            deleted_rows_by_id = {
-                                str(row.get("id") or ""): row
-                                for row in deleted_rows
-                                if isinstance(row, Mapping) and str(row.get("id") or "")
-                            }
-                        deletion_error = str(
-                            deleted_operation.get("error")
-                            if isinstance(deleted_operation, Mapping)
-                            else ""
-                        ).strip()
-                    except Exception as exc:
-                        deletion_error = str(exc) or type(exc).__name__
-
-                    for current, _result in fresh_candidates:
-                        if (
-                            str(
-                                deleted_rows_by_id.get(current.id, {}).get("state")
-                                or ""
-                            )
-                            != "deleted"
-                        ):
-                            continue
-                        desktop_binding_plan = desktop_binding_plans.get(current.id)
-                        if desktop_binding_plan is None:
-                            continue
-                        try:
-                            desktop_binding_removed_counts[current.id] = (
-                                self._commit_desktop_binding_cleanup(
-                                    desktop_binding_plan
+                            else:
+                                result["error"] = (
+                                    "Codex Desktop 未确认源会话已归档，源会话已保留。"
+                                    + (f"{detail}" if detail else "")
                                 )
-                            )
-                        except Exception as exc:
-                            desktop_binding_errors[current.id] = (
-                                str(exc) or type(exc).__name__
-                            )
-
-                    for current, result in fresh_candidates:
-                        row = deleted_rows_by_id.get(current.id, {})
-                        if str(row.get("state") or "") == "deleted":
-                            result["state"] = "migrated"
-                            result["sourceDeleted"] = True
-                            result["sourceRetained"] = False
-                            result["desktopBindingCleaned"] = not bool(
-                                desktop_binding_errors.get(current.id)
-                            )
-                            result["desktopBindingRemovedCount"] = (
-                                desktop_binding_removed_counts.get(current.id, 0)
-                            )
-                            result["error"] = (
-                                ""
-                                if not desktop_binding_errors.get(current.id)
-                                else (
-                                    "源会话已删除，但 Codex Desktop 侧栏绑定清理失败："
-                                    f"{desktop_binding_errors[current.id]}"
-                                )
-                            )
-                            continue
-                        row_error = str(row.get("error") or "").strip()
-                        result["error"] = (
-                            row_error
-                            or deletion_error
-                            or "源会话未通过安全删除验证，已保留。"
-                        )
                 publish_progress(force=True)
 
         if any(bool(result.get("forked")) for result in results):
@@ -1264,23 +1217,26 @@ class SessionCleanupManager:
             for result in results
         )
         migrated_count = sum(result.get("state") == "migrated" for result in results)
-        desktop_binding_cleanup_failed_count = sum(
-            bool(result.get("sourceDeleted"))
-            and not bool(result.get("desktopBindingCleaned"))
+        desktop_lifecycle_failure_count = sum(
+            bool(result.get("forked"))
+            and bool(result.get("targetVisible"))
+            and bool(result.get("targetResumable"))
+            and not bool(result.get("sourceDeleted"))
+            and normalized_mode == "migrate"
             for result in results
         )
         source_retained_count = sum(
             bool(result.get("sourceRetained")) for result in results
         )
         failed_count = (
-            total - migrated_count + desktop_binding_cleanup_failed_count
+            total - migrated_count
             if normalized_mode == "migrate"
             else total - copied_count
         )
         target_failed_count = total - copied_count
         unmigrated_count = total - migrated_count if normalized_mode == "migrate" else 0
         completed = (
-            migrated_count == total and desktop_binding_cleanup_failed_count == 0
+            migrated_count == total
             if normalized_mode == "migrate"
             else copied_count == total
         )
@@ -1302,7 +1258,10 @@ class SessionCleanupManager:
             copiedCount=copied_count,
             migratedCount=migrated_count,
             sourceRetainedCount=source_retained_count,
-            desktopBindingCleanupFailedCount=desktop_binding_cleanup_failed_count,
+            sourceArchivedCount=sum(
+                bool(result.get("sourceArchived")) for result in results
+            ),
+            desktopLifecycleFailureCount=desktop_lifecycle_failure_count,
             targetFailedCount=max(0, target_failed_count),
             unmigratedCount=max(0, unmigrated_count),
             failedCount=max(0, failed_count),
@@ -1707,78 +1666,6 @@ class SessionCleanupManager:
 
     def _session_index_ids(self, *, strict: bool = False) -> set[str]:
         return self._session_index_metadata(strict=strict)[1]
-
-    def _desktop_source_binding_keys(
-        self,
-        session_ids: Sequence[str],
-    ) -> tuple[str, ...]:
-        """Return only Desktop client bindings whose value is an exact source id.
-
-        Desktop persists this one atom outside ``state_5.sqlite``.  It is read
-        here only as a pre-delete safety gate; the running Desktop process owns
-        the actual write through its persisted-atom bridge.
-        """
-        normalized_ids = {
-            str(session_id or "").strip().casefold()
-            for session_id in session_ids
-            if str(session_id or "").strip()
-        }
-        if not normalized_ids or not self.desktop_global_state_path.is_file():
-            return ()
-        try:
-            payload = json.loads(
-                self.desktop_global_state_path.read_text(encoding="utf-8")
-            )
-        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-            raise SessionCleanupError(
-                "Codex Desktop 持久化状态无法验证，已保留源会话。"
-            ) from exc
-        if not isinstance(payload, Mapping):
-            raise SessionCleanupError(
-                "Codex Desktop 持久化状态格式无法验证，已保留源会话。"
-            )
-        atom_state = payload.get(_DESKTOP_PERSISTED_ATOM_STATE_KEY)
-        if atom_state is None:
-            return ()
-        if not isinstance(atom_state, Mapping):
-            raise SessionCleanupError(
-                "Codex Desktop 持久化状态格式无法验证，已保留源会话。"
-            )
-        bindings = atom_state.get(_DESKTOP_THREAD_BINDINGS_KEY)
-        if bindings is None:
-            return ()
-        if not isinstance(bindings, Mapping):
-            raise SessionCleanupError(
-                "Codex Desktop 会话侧栏绑定格式无法验证，已保留源会话。"
-            )
-        return tuple(
-            str(key)
-            for key, value in bindings.items()
-            if str(value or "").strip().casefold() in normalized_ids
-        )
-
-    @staticmethod
-    def _commit_desktop_binding_cleanup(plan: object) -> int:
-        commit = getattr(plan, "commit", None)
-        if not callable(commit):
-            raise SessionCleanupError("Codex Desktop 源会话侧栏绑定预检无效。")
-        report = commit()
-        if report is True:
-            return 0
-        if getattr(report, "verified", None) is not True:
-            raise SessionCleanupError("Codex Desktop 源会话侧栏绑定清理未验证。")
-        remaining = getattr(report, "remaining_binding_keys", ())
-        if isinstance(remaining, Sequence) and not isinstance(
-            remaining, (str, bytes, bytearray)
-        ):
-            if any(str(value or "").strip() for value in remaining):
-                raise SessionCleanupError("Codex Desktop 源会话侧栏绑定仍然存在。")
-        removed = getattr(report, "removed_binding_keys", ())
-        if not isinstance(removed, Sequence) or isinstance(
-            removed, (str, bytes, bytearray)
-        ):
-            return 0
-        return len([value for value in removed if str(value or "").strip()])
 
     def _delete_local_batch(self, items: Sequence[SessionCleanupItem]) -> None:
         session_ids = tuple(

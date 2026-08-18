@@ -16,7 +16,7 @@ from .core.session_cleanup import (
 )
 from .core.session_transfer import CodexAppServerClient
 from .core.deleted_usage import DeletedUsageLedger, DeletedUsageLedgerError
-from .platforms.codex_persisted_atoms import CodexDesktopBindingCleaner
+from .platforms.codex_desktop_threads import CodexDesktopThreadLifecycle
 
 
 _LOGGER = logging.getLogger("codex_usage_hud.session_cleanup_runtime")
@@ -92,10 +92,10 @@ class SessionCleanupWorker:
         self._context = context
         self.manager = manager
         self._on_deleted = on_deleted
-        # Constructing this adapter only captures the configured local CDP
-        # endpoint.  It does not attach to Desktop until a migration actually
-        # finds an exact persisted source binding that needs cleanup.
-        self._desktop_binding_cleaner = CodexDesktopBindingCleaner()
+        # This only captures the configured CDP endpoint.  It attaches to the
+        # Desktop process if and when a migration reaches its source lifecycle
+        # phase after the target has been fully verified.
+        self._desktop_thread_lifecycle = CodexDesktopThreadLifecycle()
         self._queue: queue.Queue[dict[str, object] | None] = queue.Queue()
         self._closed = Event()
         self._worker = Thread(
@@ -300,6 +300,21 @@ class SessionCleanupWorker:
                             finally:
                                 open_app_server()
 
+                        def archive_and_delete_source(
+                            source_id: str,
+                            cwd: str,
+                        ) -> Mapping[str, object]:
+                            # The target has already passed its durable/resume
+                            # checks when the manager enters this callback.
+                            # Release the separate fork connection so Desktop's
+                            # own App Server is the sole owner of the source
+                            # lifecycle and its Local Thread Catalog update.
+                            close_app_server()
+                            return self._desktop_thread_lifecycle.archive_then_delete(
+                                source_id,
+                                cwd=cwd,
+                            ).to_payload()
+
                         open_app_server()
                         try:
                             snapshot = self.manager.transfer(
@@ -322,7 +337,7 @@ class SessionCleanupWorker:
                                         provider,
                                     )
                                 ),
-                                prepare_desktop_binding_cleanup=self._desktop_binding_cleaner.prepare_source_binding_cleanup,
+                                desktop_source_lifecycle=archive_and_delete_source,
                                 request_id=request_id,
                             )
                         finally:
