@@ -983,6 +983,7 @@ class SessionCleanupManager:
                 result = {
                     "id": item.id,
                     "title": item.title,
+                    "workdir": item._cwd,
                     "targetSessionId": new_session_id,
                     "state": "copied",
                     "forked": True,
@@ -1006,6 +1007,7 @@ class SessionCleanupManager:
                     {
                         "id": item.id,
                         "title": item.title,
+                        "workdir": item._cwd,
                         "targetSessionId": new_session_id,
                         "state": "copied"
                         if target_ready

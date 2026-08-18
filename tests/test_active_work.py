@@ -13,7 +13,7 @@ def test_active_work_pump_publishes_sequence_bound_result_and_wakes() -> None:
     pump = RendererActiveWorkPump(
         "context",
         wake,
-        build_items=lambda context, snapshot, path: expected,
+        build_items=lambda context, snapshot, path, priority_paths: expected,
     )
     try:
         assert pump.request(SimpleNamespace(selection_seq=12), Path("session.jsonl"))
@@ -27,11 +27,16 @@ def test_active_work_pump_publishes_sequence_bound_result_and_wakes() -> None:
 def test_active_work_pump_coalesces_to_latest_pending_request() -> None:
     first_started = Event()
     release_first = Event()
-    calls: list[int] = []
+    calls: list[tuple[int, tuple[Path, ...]]] = []
 
-    def build_items(context: object, snapshot: object, path: Path | None) -> list[int]:
+    def build_items(
+        context: object,
+        snapshot: object,
+        path: Path | None,
+        priority_paths: tuple[Path, ...],
+    ) -> list[int]:
         sequence = int(getattr(snapshot, "selection_seq"))
-        calls.append(sequence)
+        calls.append((sequence, priority_paths))
         if sequence == 1:
             first_started.set()
             assert release_first.wait(1.0)
@@ -40,14 +45,29 @@ def test_active_work_pump_coalesces_to_latest_pending_request() -> None:
     wake = Event()
     pump = RendererActiveWorkPump("context", wake, build_items=build_items)
     try:
-        assert pump.request(SimpleNamespace(selection_seq=1), None)
+        assert pump.request(
+            SimpleNamespace(selection_seq=1),
+            None,
+            (Path("first.jsonl"),),
+        )
         assert first_started.wait(1.0)
-        assert pump.request(SimpleNamespace(selection_seq=2), None)
-        assert pump.request(SimpleNamespace(selection_seq=3), None)
+        assert pump.request(
+            SimpleNamespace(selection_seq=2),
+            None,
+            (Path("second.jsonl"),),
+        )
+        assert pump.request(
+            SimpleNamespace(selection_seq=3),
+            None,
+            (Path("third.jsonl"),),
+        )
         release_first.set()
         assert wake.wait(1.0)
         assert pump.take_latest() == (3, [3])
-        assert calls == [1, 3]
+        assert calls == [
+            (1, (Path("first.jsonl"),)),
+            (3, (Path("second.jsonl"), Path("third.jsonl"))),
+        ]
     finally:
         release_first.set()
         pump.close()
@@ -57,7 +77,12 @@ def test_active_work_pump_uses_a_shallow_snapshot_copy() -> None:
     release = Event()
     observed: list[str] = []
 
-    def build_items(context: object, snapshot: object, path: Path | None) -> list[object]:
+    def build_items(
+        context: object,
+        snapshot: object,
+        path: Path | None,
+        priority_paths: tuple[Path, ...],
+    ) -> list[object]:
         assert release.wait(1.0)
         observed.append(str(getattr(snapshot, "title")))
         return []
@@ -77,7 +102,12 @@ def test_active_work_pump_uses_a_shallow_snapshot_copy() -> None:
 
 
 def test_active_work_pump_publishes_empty_result_after_builder_error() -> None:
-    def fail(context: object, snapshot: object, path: Path | None) -> list[object]:
+    def fail(
+        context: object,
+        snapshot: object,
+        path: Path | None,
+        priority_paths: tuple[Path, ...],
+    ) -> list[object]:
         raise RuntimeError("boom")
 
     wake = Event()
@@ -94,7 +124,12 @@ def test_active_work_pump_close_during_work_suppresses_publish() -> None:
     started = Event()
     release = Event()
 
-    def build_items(context: object, snapshot: object, path: Path | None) -> list[int]:
+    def build_items(
+        context: object,
+        snapshot: object,
+        path: Path | None,
+        priority_paths: tuple[Path, ...],
+    ) -> list[int]:
         started.set()
         assert release.wait(1.0)
         return [1]

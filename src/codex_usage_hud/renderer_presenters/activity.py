@@ -79,9 +79,21 @@ def merge_activity_events(
         token_titles: list[str] = []
         details: list[str] = []
         tooltip_lines: list[str] = []
+        task_indexes: set[int] = set()
+        round_indexes: set[int] = set()
         active = False
         has_meaningful = False
         for _moment, _order, item in group:
+            task_index = int(item.get("taskIndex") or 0)
+            if task_index > 0:
+                task_indexes.add(task_index)
+            round_index = int(item.get("roundIndex") or 0)
+            if round_index > 0:
+                round_indexes.add(round_index)
+            for value in item.get("roundIndexes") or []:
+                normalized = int(value or 0)
+                if normalized > 0:
+                    round_indexes.add(normalized)
             title = str(item.get("title") or "")
             detail = str(item.get("detail") or "")
             token_confirm = token_confirm_event(title, detail)
@@ -106,20 +118,27 @@ def merge_activity_events(
         title_text = "，".join(titles) if titles else "活动"
         detail_text = "；".join(details)
         tooltip = "\n".join(tooltip_lines) if tooltip_lines else title_text
+        merged_item: dict[str, object] = {
+            "time": timeline_time_fn(moment),
+            "title": compact(title_text, 40),
+            "detail": compact(detail_text, 96),
+            "tooltip": compact(
+                f"{timeline_time_fn(moment)}  {title_text}\n{tooltip}",
+                320,
+            ),
+            "active": active,
+        }
+        if len(task_indexes) == 1:
+            merged_item["taskIndex"] = next(iter(task_indexes))
+        if round_indexes:
+            ordered_round_indexes = sorted(round_indexes)
+            merged_item["roundIndex"] = ordered_round_indexes[-1]
+            merged_item["roundIndexes"] = ordered_round_indexes
         merged.append(
             (
                 moment,
                 order,
-                {
-                    "time": timeline_time_fn(moment),
-                    "title": compact(title_text, 40),
-                    "detail": compact(detail_text, 96),
-                    "tooltip": compact(
-                        f"{timeline_time_fn(moment)}  {title_text}\n{tooltip}",
-                        320,
-                    ),
-                    "active": active,
-                },
+                merged_item,
                 has_meaningful,
             )
         )

@@ -27,6 +27,7 @@ from codex_usage_hud.core.parser import (
     RequestRound,
     RequestTokens,
     SlowSummary,
+    TaskHistory,
     ToolCallTiming,
 )
 from codex_usage_hud.core.runtime_errors import RuntimeErrorEvent
@@ -532,6 +533,21 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn('data-field="topActivityTaskOrdinal"', renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("function selectActivityTask", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("activityTaskNavigable", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("activityTaskPinned", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn(
+            "function locateActivityTrailRound(root, taskIndex, roundIndex)",
+            renderer_hud.RENDERER_HUD_SCRIPT,
+        )
+        self.assertIn("[data-content-search-turn-key]", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("[data-content-search-unit-key]", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("[data-app-action-timeline-scroll]", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("activityTaskTurnId", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("node.scrollTop = offset > 0 ? -offset : 0;", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn('data-locate-highlight="true"', renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn(
+            'async function scrollToActivityRound(copyText, taskPrompt, roundIndex = 0, taskTurnId = "")',
+            renderer_hud.RENDERER_HUD_SCRIPT,
+        )
         self.assertIn('data-field="topActivityLoadMore"', renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertNotIn("list.appendChild(button)", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("height: calc(34px * 4 + 7px * 3);", renderer_hud.RENDERER_HUD_SCRIPT)
@@ -2645,12 +2661,11 @@ class RendererHudPayloadTests(unittest.TestCase):
                 completed_at=second_done,
             )
         ]
-        from codex_usage_hud.core.parser import TaskHistory
-
         snapshot.activity_tasks = [
             TaskHistory(
                 index=1,
                 count=2,
+                turn_id="turn-1",
                 prompt="第一需求",
                 started_at=started,
                 completed_at=first_done,
@@ -2675,6 +2690,7 @@ class RendererHudPayloadTests(unittest.TestCase):
             TaskHistory(
                 index=2,
                 count=2,
+                turn_id="turn-2",
                 prompt="第二需求",
                 started_at=second_start,
                 completed_at=second_done,
@@ -2693,6 +2709,58 @@ class RendererHudPayloadTests(unittest.TestCase):
         )
         self.assertEqual(details["activityTasks"][0]["activityGap"], "1轮")
         self.assertEqual(details["activityTasks"][1]["activityGap"], "1轮")
+        self.assertEqual(
+            [item["turnId"] for item in details["activityTasks"]],
+            ["turn-1", "turn-2"],
+        )
+        self.assertEqual(
+            [
+                (item["taskIndex"], item["taskTurnId"])
+                for item in details["heavyRounds"]
+            ],
+            [(2, "turn-2"), (1, "turn-1")],
+        )
+
+    def test_payload_keeps_activity_task_navigation_enabled_while_processing(self) -> None:
+        first_start = datetime(2026, 6, 5, 13, 0, 0).astimezone()
+        first_done = datetime(2026, 6, 5, 13, 0, 10).astimezone()
+        current_start = datetime(2026, 6, 5, 13, 0, 11).astimezone()
+        snapshot = ParsedSession(
+            session_id="session-running-history-123",
+            status="parsed",
+            task_index=2,
+            task_count=2,
+            task_prompt="处理中需求",
+            task_started_at=current_start,
+            request=RequestTokens(status="running", model="gpt-5.5"),
+        )
+        snapshot.activity_tasks = [
+            TaskHistory(
+                index=1,
+                count=2,
+                turn_id="turn-1",
+                prompt="已完成需求",
+                started_at=first_start,
+                completed_at=first_done,
+            ),
+            TaskHistory(
+                index=2,
+                count=2,
+                turn_id="turn-2",
+                prompt="处理中需求",
+                started_at=current_start,
+                request=snapshot.request,
+            ),
+        ]
+
+        details = payload_from_snapshot(snapshot).to_json()["topDetails"]
+
+        self.assertEqual(details["activityTasks"][1]["executingLabel"], "正在执行")
+        self.assertTrue(details["activityTaskNavigable"])
+        self.assertEqual(
+            [item["turnId"] for item in details["activityTasks"]],
+            ["turn-1", "turn-2"],
+        )
 
     def test_payload_merges_same_second_activity_nodes_and_suppresses_token_details(self) -> None:
         started_at = datetime(2026, 6, 5, 13, 0, 0).astimezone()

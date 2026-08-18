@@ -480,13 +480,16 @@ TEXT = r"""
       if (copyText) {
         row.dataset.copyable = "true";
         row.dataset.copyText = copyText;
-        row.dataset.copyTitle = tooltip ? `点击复制轮次内容\n${tooltip}` : "点击复制轮次内容";
+        row.dataset.copyTitle = tooltip
+          ? `点击定位轮次并复制内容\n${tooltip}`
+          : "点击定位轮次并复制内容";
         row.dataset.copyField = "heavy";
         row.title = row.dataset.copyTitle;
       }
       if (item.taskIndex) row.dataset.activityTaskIndex = String(item.taskIndex);
       if (item.roundIndex) row.dataset.activityRoundIndex = String(item.roundIndex);
       if (item.taskPrompt) row.dataset.activityTaskPrompt = String(item.taskPrompt);
+      if (item.taskTurnId) row.dataset.activityTaskTurnId = String(item.taskTurnId);
       const title = document.createElement("span");
       title.className = "codex-usage-hud-heavy-round-title";
       title.textContent = String(item.title || "");
@@ -497,6 +500,26 @@ TEXT = r"""
       row.append(title, detail);
       list.appendChild(row);
     }
+  }
+
+  function activityTrailRoundIndexes(item) {
+    const indexes = [];
+    const primary = Number(item?.roundIndex || 0);
+    if (primary > 0) indexes.push(Math.round(primary));
+    if (Array.isArray(item?.roundIndexes)) {
+      for (const value of item.roundIndexes) {
+        const normalized = Number(value || 0);
+        if (normalized > 0) indexes.push(Math.round(normalized));
+      }
+    }
+    const titleMatch = String(item?.title || "").match(/轮次\s*#(\d+)/);
+    if (titleMatch) indexes.push(Number(titleMatch[1]));
+    return Array.from(new Set(indexes.filter((value) => value > 0)));
+  }
+
+  function activityTrailMatchesRound(item, roundIndex) {
+    const expected = Math.round(Number(roundIndex || 0));
+    return expected > 0 && activityTrailRoundIndexes(item).includes(expected);
   }
 
   function renderActivityTimeline(root, details) {
@@ -550,6 +573,22 @@ TEXT = r"""
       const row = document.createElement("div");
       row.className = "codex-usage-hud-activity-node";
       row.dataset.active = String(!!item.active);
+      const taskIndex = Math.round(Number(item?.taskIndex || details?.index || 0));
+      const roundIndexes = activityTrailRoundIndexes(item);
+      if (taskIndex > 0) row.dataset.activityTaskIndex = String(taskIndex);
+      if (roundIndexes.length) {
+        row.dataset.activityRoundIndex = String(roundIndexes[roundIndexes.length - 1]);
+        row.dataset.activityRoundIndexes = roundIndexes.join(",");
+      }
+      const locateTaskIndex = Math.round(Number(root.dataset.activityLocateTaskIndex || 0));
+      const locateRoundIndex = Math.round(Number(root.dataset.activityLocateRoundIndex || 0));
+      if (
+        locateRoundIndex > 0
+        && (!locateTaskIndex || !taskIndex || locateTaskIndex === taskIndex)
+        && roundIndexes.includes(locateRoundIndex)
+      ) {
+        row.dataset.locateHighlight = "true";
+      }
       const tooltip = String(item.tooltip || [item.time, item.title, item.detail].filter(Boolean).join("  "));
       if (tooltip) row.title = tooltip;
       const time = document.createElement("span");
@@ -592,6 +631,8 @@ TEXT = r"""
     if (!tasks.length) {
       delete root.dataset.activityTaskSessionKey;
       delete root.dataset.activityTaskIndex;
+      delete root.dataset.activityTaskCount;
+      delete root.dataset.activityTaskPinned;
       return null;
     }
     const sessionKey = String(
@@ -601,16 +642,22 @@ TEXT = r"""
     const payloadIndex = Number(details?.activityTaskIndex || 0);
     const previousSessionKey = String(root.dataset.activityTaskSessionKey || "");
     const previousCount = Number(root.dataset.activityTaskCount || 0);
+    const sameSession = previousSessionKey === sessionKey;
+    const pinned = sameSession && root.dataset.activityTaskPinned === "true";
     let selected = Number(root.dataset.activityTaskIndex || 0);
     if (
       !Number.isFinite(selected)
       || selected < 1
-      || previousSessionKey !== sessionKey
-      || previousCount !== count
+      || !sameSession
+      || (!pinned && previousCount !== count)
     ) {
       selected = payloadIndex > 0 ? payloadIndex : count;
     }
     selected = clamp(Math.round(selected), 1, count);
+    if (!tasks.some((item) => Number(item.index || 0) === selected)) {
+      selected = payloadIndex > 0 ? payloadIndex : Number(tasks[count - 1]?.index || count);
+      delete root.dataset.activityTaskPinned;
+    }
     root.dataset.activityTaskSessionKey = sessionKey;
     root.dataset.activityTaskCount = String(count);
     root.dataset.activityTaskIndex = String(selected);
@@ -640,6 +687,7 @@ TEXT = r"""
     const current = Number(root.dataset.activityTaskIndex || details.activityTaskIndex || tasks.length);
     const next = clamp(Math.round(current) + Number(delta || 0), 1, tasks.length);
     root.dataset.activityTaskIndex = String(next);
+    root.dataset.activityTaskPinned = "true";
     renderTopDetails(root, payload);
     return true;
   }
@@ -648,59 +696,663 @@ TEXT = r"""
     const payload = currentPayload() || {};
     const details = payload?.topDetails || {};
     const tasks = activityTaskItems(details);
-    if (details?.activityTaskNavigable !== true || tasks.length < 2) return false;
+    if (!tasks.length) return false;
     const next = clamp(Math.round(Number(index || 0)), 1, tasks.length);
     root.dataset.activityTaskIndex = String(next);
+    root.dataset.activityTaskPinned = "true";
     renderTopDetails(root, payload);
     return true;
   }
 
-  function scrollToActivityRequest(taskPrompt) {
-    const prompt = String(taskPrompt || "").replace(/\s+/g, " ").trim();
-    if (!prompt) return false;
-    const needle = prompt.slice(0, 220);
-    const candidates = [
-      ...Array.from(document.querySelectorAll("[data-content-search-unit-key]")),
-      ...Array.from(document.querySelectorAll("[data-turn-key]")),
-    ];
-    const match = candidates.find((node) => {
-      const text = String(node.innerText || node.textContent || "").replace(/\s+/g, " ");
-      return text.includes("你说：") && text.includes(needle);
-    });
-    if (!match) return false;
-    const target = match.closest("[data-content-search-unit-key], [data-turn-key]") || match;
-    target.scrollIntoView?.({ block: "center", inline: "nearest", behavior: "smooth" });
+  function locateActivityTrailRound(root, taskIndex, roundIndex) {
+    const normalizedTaskIndex = Math.round(Number(taskIndex || 0));
+    const normalizedRoundIndex = Math.round(Number(roundIndex || 0));
+    if (normalizedRoundIndex <= 0) return false;
+    const payload = currentPayload() || {};
+    const rawDetails = payload?.topDetails || {};
+    const tasks = activityTaskItems(rawDetails);
+    if (normalizedTaskIndex > 0 && tasks.length) {
+      selectActivityTaskIndex(root, normalizedTaskIndex);
+    }
+    const selected = tasks.find(
+      (item) => Number(item.index || 0) === Number(root.dataset.activityTaskIndex || normalizedTaskIndex),
+    );
+    const details = selected ? { ...rawDetails, ...selected } : rawDetails;
+    const items = Array.isArray(details?.activityTrail)
+      ? details.activityTrail.filter((item) => item && (item.title || item.detail || item.time))
+      : [];
+    const itemIndex = items.findIndex((item) => activityTrailMatchesRound(item, normalizedRoundIndex));
+    if (itemIndex < 0) return false;
+
+    const list = root.querySelector('[data-field="topActivityTrail"]');
+    if (!list) return false;
+    const button = root.querySelector('[data-field="topActivityLoadMore"]');
+    const pageSize = Math.max(1, Number(button?.dataset.pageSize || 12));
+    const currentVisible = Math.max(4, Number(list.dataset.visibleCount || 4));
+    const requiredVisible = itemIndex + 1;
+    if (requiredVisible > currentVisible) {
+      const pages = Math.ceil((requiredVisible - currentVisible) / pageSize);
+      list.dataset.visibleCount = String(currentVisible + (pages * pageSize));
+    }
+
+    const locateToken = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    root.dataset.activityLocateTaskIndex = String(normalizedTaskIndex || Number(selected?.index || 0));
+    root.dataset.activityLocateRoundIndex = String(normalizedRoundIndex);
+    root.dataset.activityLocateToken = locateToken;
+    renderTopDetails(root, payload);
+
+    const row = Array.from(
+      root.querySelectorAll(".codex-usage-hud-activity-node[data-activity-round-index]"),
+    ).find((node) => String(node.dataset.activityRoundIndexes || node.dataset.activityRoundIndex || "")
+      .split(",")
+      .map(Number)
+      .includes(normalizedRoundIndex));
+    if (!row) return false;
+    const listRect = list.getBoundingClientRect();
+    const rowRect = row.getBoundingClientRect();
+    const targetScrollTop = Math.max(
+      0,
+      Number(list.scrollTop || 0)
+        + (rowRect.top - listRect.top)
+        - Math.max(0, (list.clientHeight - rowRect.height) / 2),
+    );
+    if (typeof list.scrollTo === "function") {
+      list.scrollTo({ top: targetScrollTop, behavior: "smooth" });
+    } else {
+      list.scrollTop = targetScrollTop;
+    }
+    ctx.lifecycle.timeout("activity_trail_locate", () => {
+      if (!root.isConnected || root.dataset.activityLocateToken !== locateToken) return;
+      delete root.dataset.activityLocateTaskIndex;
+      delete root.dataset.activityLocateRoundIndex;
+      delete root.dataset.activityLocateToken;
+      root.querySelectorAll('[data-locate-highlight="true"]').forEach((node) => {
+        delete node.dataset.locateHighlight;
+      });
+    }, 1800);
     return true;
   }
 
-  function scrollToActivityRound(copyText, taskPrompt) {
-    if (scrollToActivityRequest(taskPrompt)) return true;
-    const source = String(copyText || "").replace(/\s+/g, " ").trim();
-    if (!source) return false;
+  function normalizedActivityText(value) {
+    return String(value || "").replace(/\s+/g, " ").trim();
+  }
+
+  function activityConversationTurn(node) {
+    return node?.closest?.("[data-content-search-turn-key], [data-turn-key]") || null;
+  }
+
+  function activityConversationUnits(scope = document) {
+    const hudRoot = document.getElementById(rootId);
+    return Array.from(scope.querySelectorAll?.("[data-content-search-unit-key]") || [])
+      .filter((node) => !hudRoot?.contains(node));
+  }
+
+  function selectedActivityTaskContext(taskPrompt, taskTurnId = "") {
+    const payload = currentPayload() || {};
+    const details = payload?.topDetails || {};
+    const tasks = activityTaskItems(details);
+    const root = document.getElementById(rootId);
+    const selectedIndex = Math.round(Number(
+      root?.dataset.activityTaskIndex || details?.activityTaskIndex || tasks.length || 0,
+    ));
+    const selected = tasks.find((item) => Number(item?.index || 0) === selectedIndex) || null;
+    const prompt = String(taskPrompt || selected?.currentTask || "").trim();
+    const normalizedPrompt = normalizedActivityText(prompt);
+    const duplicatePromptCount = tasks.filter(
+      (item) => normalizedActivityText(item?.currentTask || item?.prompt || "") === normalizedPrompt,
+    ).length;
+    const turnId = String(taskTurnId || selected?.turnId || "").trim();
+    return {
+      prompt,
+      turnId,
+      taskIndex: Math.max(0, Number(selected?.index || selectedIndex || 0)),
+      taskCount: Math.max(0, Number(selected?.count || tasks.length || 0)),
+      // Without a stable turn key, permit text fallback only when the selected
+      // task prompt is unique in the payload.  Duplicate prompts are
+      // intentionally treated as unresolved rather than risking another Req.
+      allowUnkeyedFallback: !!turnId || duplicatePromptCount <= 1,
+    };
+  }
+
+  function activityRequestNeedles(taskPrompt) {
+    const prompt = normalizedActivityText(taskPrompt);
+    if (!prompt) return [];
+    const lines = String(taskPrompt || "")
+      .split(/\r?\n/)
+      .map(normalizedActivityText)
+      .filter((line) => line.length >= 12)
+      .sort((left, right) => right.length - left.length);
+    return Array.from(new Set([prompt, ...lines]))
+      .map((value) => value.slice(0, 600))
+      .filter(Boolean);
+  }
+
+  function activityUnitBelongsToTurn(unit, turnId) {
+    const expected = String(turnId || "").trim();
+    if (!expected) return true;
+    const key = String(unit?.getAttribute?.("data-content-search-unit-key") || "");
+    return !key || key === expected || key.startsWith(`${expected}:`);
+  }
+
+  function bestActivityRequestUnit(units, needles, allowUserFallback = false, turnId = "") {
+    const isUserUnit = (unit) => (
+      unit.matches?.('[data-local-conversation-user-anchor="true"]')
+      || !!unit.querySelector?.('[data-local-conversation-user-anchor="true"]')
+      || /^(?:你说[：:]|You said:)/i.test(normalizedActivityText(unit.innerText || unit.textContent))
+    );
+    const scopedUnits = units.filter((unit) => activityUnitBelongsToTurn(unit, turnId));
+    for (const needle of needles) {
+      const matches = scopedUnits
+        .map((unit) => ({
+          unit,
+          user: isUserUnit(unit),
+          text: normalizedActivityText(unit.innerText || unit.textContent),
+        }))
+        .filter(({ text }) => text.includes(needle))
+        .sort((left, right) => (
+          Number(right.user) - Number(left.user)
+          || (left.text.length - needle.length) - (right.text.length - needle.length)
+        ));
+      if (matches.length) return matches[0].unit;
+    }
+    // A turn id is an authoritative scope.  If its content is mounted but the
+    // prompt text is unavailable (for example while markdown is still loading),
+    // only fall back to a user unit from that same turn.  Never pick an
+    // arbitrary unit from the current viewport: doing so can jump to another
+    // Req when the requested turn is still virtualized.
+    return allowUserFallback ? (scopedUnits.find(isUserUnit) || null) : null;
+  }
+
+  function findActivityTurnAnchor(taskTurnId) {
+    const turnId = String(taskTurnId || "").trim();
+    if (!turnId) return null;
+    const candidates = [
+      ...Array.from(document.querySelectorAll("[data-content-search-turn-key]")),
+      ...Array.from(document.querySelectorAll("[data-turn-key]")),
+    ];
+    const exact = candidates.find(
+      (node) => (
+        node.getAttribute("data-content-search-turn-key") === turnId
+        || node.getAttribute("data-turn-key") === turnId
+      ),
+    );
+    if (!exact) return null;
+    return exact.closest?.("[data-turn-key]") || exact;
+  }
+
+  function findActivityRequestTarget(
+    taskPrompt,
+    taskTurnId = "",
+    allowUnkeyedFallback = true,
+  ) {
+    const needles = activityRequestNeedles(taskPrompt);
+    const turnId = String(taskTurnId || "").trim();
+    if (!needles.length && !turnId) return null;
+    // A legacy JSONL session can lack the stable task_started.turn_id.  When
+    // the payload contains more than one task with the same prompt, a global
+    // text search is unsafe: the target may be virtualized away while another
+    // Req with identical text is mounted.  Refuse that ambiguous fallback
+    // instead of jumping to the wrong conversation turn.
+    if (!turnId && allowUnkeyedFallback === false) return null;
+    if (turnId) {
+      const exactTurn = Array.from(
+        document.querySelectorAll("[data-content-search-turn-key]"),
+      ).find((node) => node.getAttribute("data-content-search-turn-key") === turnId);
+      if (exactTurn) {
+        const units = activityConversationUnits(exactTurn);
+        if (!units.length) return null;
+        const unit = bestActivityRequestUnit(units, needles, true, turnId);
+        return unit ? { unit, turn: exactTurn } : null;
+      }
+      const keyedUnits = activityConversationUnits().filter((unit) => {
+        const unitKey = String(unit.getAttribute("data-content-search-unit-key") || "");
+        return unitKey === turnId || unitKey.startsWith(`${turnId}:`);
+      });
+      if (keyedUnits.length) {
+        const unit = bestActivityRequestUnit(keyedUnits, needles, true, turnId);
+        return unit ? { unit, turn: activityConversationTurn(unit) } : null;
+      }
+      return null;
+    }
+    const units = activityConversationUnits();
+    const unit = bestActivityRequestUnit(units, needles);
+    if (unit) return { unit, turn: activityConversationTurn(unit) };
+    const turns = Array.from(
+      document.querySelectorAll("[data-content-search-turn-key], [data-turn-key]"),
+    );
+    for (const needle of needles) {
+      const turn = turns.find((node) => normalizedActivityText(node.innerText || node.textContent).includes(needle));
+      if (turn) return { unit: null, turn };
+    }
+    return null;
+  }
+
+  function activityScrollIsCurrent(operation) {
+    return !!operation
+      && operation.active !== false
+      && activeActivityScroll === operation
+      && ctx.lifecycle.active();
+  }
+
+  function cancelActivityScroll(operation = activeActivityScroll) {
+    if (!operation) return false;
+    operation.active = false;
+    const cancelWait = operation.cancelWait;
+    operation.cancelWait = null;
+    if (typeof cancelWait === "function") cancelWait();
+    if (activeActivityScroll === operation) activeActivityScroll = null;
+    return true;
+  }
+
+  function beginActivityScroll() {
+    cancelActivityScroll();
+    const operation = {
+      id: ++activityScrollSerial,
+      active: true,
+      cancelWait: null,
+    };
+    activeActivityScroll = operation;
+    return operation;
+  }
+
+  function finishActivityScroll(operation) {
+    if (!operation) return;
+    operation.active = false;
+    const cancelWait = operation.cancelWait;
+    operation.cancelWait = null;
+    if (typeof cancelWait === "function") cancelWait();
+    if (activeActivityScroll === operation) activeActivityScroll = null;
+  }
+
+  async function waitForActivityVirtualization(frames = 2, operation = null) {
+    for (let index = 0; index < Math.max(1, Number(frames || 0)); index += 1) {
+      if (operation && !activityScrollIsCurrent(operation)) return false;
+      const completed = await new Promise((resolve) => {
+        let settled = false;
+        let frame = 0;
+        let fallbackTimer = 0;
+        const finish = (result = true) => {
+          if (settled) return;
+          settled = true;
+          if (operation?.cancelWait === cancel) operation.cancelWait = null;
+          if (frame) ctx.lifecycle.clearFrame(frame);
+          if (fallbackTimer) ctx.lifecycle.clearTimeout(fallbackTimer);
+          resolve(result && (!operation || activityScrollIsCurrent(operation)));
+        };
+        const cancel = () => finish(false);
+        if (operation) operation.cancelWait = cancel;
+        // Electron can throttle requestAnimationFrame while the Desktop window
+        // is occluded.  Keep the official frame wait, with a short tracked
+        // fallback so a Top3 click cannot stall indefinitely in that state.
+        fallbackTimer = ctx.lifecycle.timeout(
+          "activity_virtualization_frame",
+          finish,
+          80,
+        );
+        if (typeof window.requestAnimationFrame === "function") {
+          frame = ctx.lifecycle.frame(
+            "activity_virtualization_frame",
+            () => finish(true),
+          );
+        } else {
+          finish();
+        }
+      });
+      if (!completed) return false;
+    }
+    return true;
+  }
+
+  function activityTimelineOffset(node) {
+    return Math.max(0, -Number(node?.scrollTop || 0));
+  }
+
+  function setActivityTimelineOffset(node, value) {
+    const offset = Math.max(0, Number(value || 0));
+    node.scrollTop = offset > 0 ? -offset : 0;
+  }
+
+  function waitForMaterializedActivityRequest(
+    context,
+    timeoutMs = 450,
+    timeline = null,
+    operation = null,
+  ) {
+    const existing = findActivityRequestTarget(
+      context.prompt,
+      context.turnId,
+      context.allowUnkeyedFallback,
+    );
+    if (existing) return Promise.resolve(existing);
+    if (operation && !activityScrollIsCurrent(operation)) return Promise.resolve(null);
+    const timeout = Math.max(80, Math.round(Number(timeoutMs || 0)));
+    const observeTarget = timeline || document.body || document.documentElement;
+    return new Promise((resolve) => {
+      let observer = null;
+      let timer = 0;
+      let settled = false;
+      const finish = (target) => {
+        if (settled) return;
+        settled = true;
+        if (observer) observer.disconnect();
+        ctx.observers?.clear?.("activity_request_materialization");
+        if (timer) ctx.lifecycle.clearTimeout(timer);
+        for (const release of releases) release?.();
+        if (operation?.cancelWait === cancel) operation.cancelWait = null;
+        resolve(target && (!operation || activityScrollIsCurrent(operation)) ? target : null);
+      };
+      const check = () => {
+        if (operation && !activityScrollIsCurrent(operation)) {
+          finish(null);
+          return;
+        }
+        const target = findActivityRequestTarget(
+          context.prompt,
+          context.turnId,
+          context.allowUnkeyedFallback,
+        );
+        if (target) finish(target);
+      };
+      const cancel = () => finish(null);
+      const releases = [];
+      if (operation) operation.cancelWait = cancel;
+      if (typeof MutationObserver === "function" && observeTarget) {
+        observer = new MutationObserver(check);
+        try {
+          observer.observe(observeTarget, {
+            subtree: true,
+            childList: true,
+            attributes: true,
+            attributeFilter: [
+              "data-content-search-turn-key",
+              "data-content-search-unit-key",
+              "data-local-conversation-user-anchor",
+            ],
+          });
+          ctx.observers?.set?.("activity_request_materialization", observer);
+        } catch (_) {
+          observer = null;
+        }
+      }
+      if (timeline) {
+        for (const type of ["scroll", "scrollend"]) {
+          const release = ctx.lifecycle.listen?.(
+            "activity_request_materialization",
+            timeline,
+            type,
+            check,
+            { passive: true },
+          );
+          if (typeof release === "function") releases.push(release);
+        }
+      }
+      timer = ctx.lifecycle.timeout(
+        "activity_request_materialization",
+        () => finish(findActivityRequestTarget(
+          context.prompt,
+          context.turnId,
+          context.allowUnkeyedFallback,
+        )),
+        timeout,
+      );
+      if (typeof window.requestAnimationFrame === "function") {
+        ctx.lifecycle.frame("activity_request_materialization", check);
+      } else {
+        check();
+      }
+    });
+  }
+
+  async function materializeActivityRequest(context, operation) {
+    if (!activityScrollIsCurrent(operation)) return null;
+    let target = findActivityRequestTarget(
+      context.prompt,
+      context.turnId,
+      context.allowUnkeyedFallback,
+    );
+    if (target) return target;
+    if (context.allowUnkeyedFallback === false) return null;
+    const timeline = document.querySelector("[data-app-action-timeline-scroll]");
+    if (!timeline) return null;
+    const mountedAnchor = findActivityTurnAnchor(context.turnId);
+    if (mountedAnchor) {
+      mountedAnchor.scrollIntoView?.({ block: "center", inline: "nearest", behavior: "auto" });
+      target = await waitForMaterializedActivityRequest(context, 1500, timeline, operation);
+      if (!activityScrollIsCurrent(operation)) return null;
+      if (target) return target;
+    }
+    let maxOffset = Math.max(0, Number(timeline.scrollHeight || 0) - Number(timeline.clientHeight || 0));
+    if (maxOffset <= 0) return null;
+    const originalOffset = activityTimelineOffset(timeline);
+    const taskIndex = Math.max(1, Math.round(Number(context.taskIndex || 1)));
+    const taskCount = Math.max(taskIndex, Math.round(Number(context.taskCount || taskIndex)));
+    const anchor = taskCount > 1
+      ? maxOffset * ((taskCount - taskIndex) / (taskCount - 1))
+      : originalOffset;
+    const positions = [];
+    const seen = new Set();
+    const addPosition = (value, insertAt = null) => {
+      const normalized = Math.round(clamp(Number(value || 0), 0, maxOffset));
+      if (!seen.has(normalized)) {
+        seen.add(normalized);
+        if (Number.isInteger(insertAt)) {
+          positions.splice(clamp(insertAt, 0, positions.length), 0, normalized);
+        } else {
+          positions.push(normalized);
+        }
+      }
+    };
+    addPosition(anchor);
+    // Reaching the oldest loaded boundary is what prompts the official list to
+    // fetch another history page.  Try both boundaries early, then refine.
+    addPosition(maxOffset);
+    addPosition(0);
+    const page = Math.max(120, Number(timeline.clientHeight || 0) * 0.82);
+    for (let step = 1; step <= 8; step += 1) {
+      addPosition(anchor - (page * step));
+      addPosition(anchor + (page * step));
+    }
+    // Turn heights are not uniform, so also probe a coarse set of absolute
+    // positions.  This remains bounded while covering conversations where a
+    // single long turn makes the task-index estimate inaccurate.
+    for (let segment = 1; segment < 12; segment += 1) {
+      addPosition((maxOffset * segment) / 12);
+    }
+    const deadline = Date.now() + 6500;
+    for (let index = 0; index < positions.length && Date.now() < deadline; index += 1) {
+      if (!activityScrollIsCurrent(operation)) return null;
+      maxOffset = Math.max(
+        maxOffset,
+        Math.max(0, Number(timeline.scrollHeight || 0) - Number(timeline.clientHeight || 0)),
+      );
+      const position = clamp(Number(positions[index] || 0), 0, maxOffset);
+      setActivityTimelineOffset(timeline, position);
+      const atBoundary = position <= 1 || position >= maxOffset - 1;
+      const waitMs = atBoundary ? 1200 : (index === 0 ? 700 : 350);
+      target = await waitForMaterializedActivityRequest(context, waitMs, timeline, operation);
+      if (!activityScrollIsCurrent(operation)) return null;
+      if (target) return target;
+      const updatedMaxOffset = Math.max(
+        0,
+        Number(timeline.scrollHeight || 0) - Number(timeline.clientHeight || 0),
+      );
+      if (updatedMaxOffset > maxOffset + 1) {
+        // Pagination can grow the spacer after reaching the old boundary.
+        // Queue the new boundary and a fresh task-index estimate instead of
+        // abandoning the scan with the stale scrollHeight.
+        maxOffset = updatedMaxOffset;
+        const insertAt = index + 1;
+        addPosition(
+          maxOffset * ((taskCount - taskIndex) / Math.max(1, taskCount - 1)),
+          insertAt,
+        );
+        addPosition(maxOffset, insertAt);
+      }
+    }
+    if (!activityScrollIsCurrent(operation)) return null;
+    setActivityTimelineOffset(timeline, originalOffset);
+    await waitForActivityVirtualization(1, operation);
+    return null;
+  }
+
+  function activityRoundNeedles(copyText) {
+    const source = normalizedActivityText(copyText);
     const lines = String(copyText || "")
       .split(/\r?\n/)
-      .map((line) => line.replace(/\s+/g, " ").trim())
-      .filter((line) => line.length >= 12 && !/^Req\d+-#\d+/.test(line));
-    const needle = (lines.sort((a, b) => b.length - a.length)[0] || source).slice(0, 180);
+      .map((line) => normalizedActivityText(
+        line.replace(/^(?:输入|输出|工具调用|工具返回|推理|活动)\s*[：:]\s*/, ""),
+      ))
+      .filter((line) => (
+        line.length >= 10
+        && !/^Req\d+-#\d+/.test(line)
+        && !/^(?:金额|Tokens)\b/i.test(line)
+        && !/^(?:↑|↻|↓|◇)/.test(line)
+      ));
+    if (source.length >= 10 && !/^Req\d+-#\d+/.test(source)) lines.push(source);
+    return Array.from(new Set(lines))
+      .sort((left, right) => right.length - left.length)
+      .map((line) => line.slice(0, 600));
+  }
+
+  function smallestActivityTextNode(scope, needle) {
+    if (!scope || !needle) return null;
+    const hudRoot = document.getElementById(rootId);
     const selectors = [
       "[data-content-search-unit-key]",
-      "[data-turn-key]",
       "[data-markdown-text-style='assistant-message']",
       "[data-message-author-role]",
+      "[data-message-id]",
+      "[role='listitem']",
+      "p",
+      "pre",
+      "code",
+      "button",
+      "div",
+      "span",
     ];
-    const candidates = [
-      ...Array.from(document.querySelectorAll("[data-content-search-unit-key]")),
-      ...Array.from(document.querySelectorAll(selectors.join(","))),
-    ];
-    const match = candidates.find((node) => {
-      const text = String(node.innerText || node.textContent || "").replace(/\s+/g, " ");
-      return text.includes(needle);
-    });
-    if (!match) return false;
-    const target = match.closest("[data-content-search-unit-key], [data-turn-key]") || match;
+    return Array.from(scope.querySelectorAll?.(selectors.join(",")) || [])
+      .filter((node) => !hudRoot?.contains(node))
+      .map((node) => ({ node, text: normalizedActivityText(node.innerText || node.textContent) }))
+      .filter(({ text }) => text.includes(needle))
+      .sort((left, right) => {
+        const leftExact = left.text === needle ? -1000 : 0;
+        const rightExact = right.text === needle ? -1000 : 0;
+        return (leftExact + left.text.length) - (rightExact + right.text.length);
+      })[0]?.node || null;
+  }
+
+  function findActivityRoundTarget(copyText, requestTarget, roundIndex = 0) {
+    const needles = activityRoundNeedles(copyText);
+    const requestScope = requestTarget?.turn || requestTarget?.unit || null;
+    const scopes = requestScope ? [requestScope] : [];
+    for (const scope of scopes) {
+      for (const needle of needles) {
+        const match = smallestActivityTextNode(scope, needle);
+        if (match) {
+          return match.closest?.(
+            "[data-content-search-unit-key], [data-markdown-text-style='assistant-message'], [data-message-author-role]",
+          ) || match;
+        }
+      }
+    }
+    return null;
+  }
+
+  function pulseActivityConversationTarget(target, roundIndex = 0) {
+    if (!target) return;
+    const token = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    target.dataset.codexHudLocatePulse = token;
+    if (roundIndex) target.dataset.codexHudLocateRound = String(roundIndex);
+    target.animate?.(
+      [
+        { boxShadow: "0 0 0 0 rgba(243, 210, 122, 0)" },
+        { boxShadow: "0 0 0 3px rgba(243, 210, 122, .72)" },
+        { boxShadow: "0 0 0 8px rgba(243, 210, 122, 0)" },
+      ],
+      { duration: 1200, easing: "ease-out" },
+    );
+    ctx.lifecycle.timeout("conversation_locate_pulse", () => {
+      if (!target.isConnected || target.dataset.codexHudLocatePulse !== token) return;
+      delete target.dataset.codexHudLocatePulse;
+      delete target.dataset.codexHudLocateRound;
+    }, 1300);
+  }
+
+  function scrollToActivityRequest(taskPrompt, behavior = "smooth") {
+    const context = selectedActivityTaskContext(taskPrompt);
+    const target = findActivityRequestTarget(
+      context.prompt,
+      context.turnId,
+      context.allowUnkeyedFallback,
+    );
+    const node = target?.unit || target?.turn;
+    if (!node) return false;
+    node.scrollIntoView?.({ block: "center", inline: "nearest", behavior });
+    return true;
+  }
+
+  async function scrollToActivityRound(copyText, taskPrompt, roundIndex = 0, taskTurnId = "") {
+    const operation = beginActivityScroll();
+    const context = selectedActivityTaskContext(taskPrompt, taskTurnId);
+    const timeline = document.querySelector("[data-app-action-timeline-scroll]");
+    let requestTarget = await materializeActivityRequest(context, operation);
+    if (!activityScrollIsCurrent(operation)) return false;
+    let requestUnitTarget = requestTarget?.unit || requestTarget?.turn;
+    if (requestUnitTarget) {
+      requestUnitTarget.scrollIntoView?.({ block: "center", inline: "nearest", behavior: "auto" });
+      if (!(await waitForActivityVirtualization(2, operation))) return false;
+      // VirtualizedTurnList may replace the whole mounted turn after the first
+      // official-anchor scroll.  Re-resolve by the stable turn id before doing
+      // the precise input/output lookup; otherwise the pulse lands on a
+      // detached node even though the viewport moved to the right Req.
+      const refreshedRequest = findActivityRequestTarget(
+        context.prompt,
+        context.turnId,
+        context.allowUnkeyedFallback,
+      ) || await waitForMaterializedActivityRequest(context, 350, timeline, operation);
+      if (!activityScrollIsCurrent(operation)) return false;
+      if (refreshedRequest) {
+        requestTarget = refreshedRequest;
+        requestUnitTarget = refreshedRequest.unit || refreshedRequest.turn;
+      } else if (!requestUnitTarget.isConnected) {
+        requestUnitTarget = null;
+      }
+    }
+    let preciseTarget = findActivityRoundTarget(copyText, requestTarget, roundIndex);
+    let target = preciseTarget || requestUnitTarget;
+    if (!target) {
+      finishActivityScroll(operation);
+      return false;
+    }
     target.scrollIntoView?.({ block: "center", inline: "nearest", behavior: "smooth" });
-    target.dataset.codexHudLocatePulse = "true";
-    window.setTimeout(() => delete target.dataset.codexHudLocatePulse, 1200);
+    if (!(await waitForActivityVirtualization(2, operation))) return false;
+    const correctedRequest = findActivityRequestTarget(
+      context.prompt,
+      context.turnId,
+      context.allowUnkeyedFallback,
+    )
+      || (!target.isConnected
+        ? await waitForMaterializedActivityRequest(context, 350, timeline, operation)
+        : null);
+    if (!activityScrollIsCurrent(operation)) return false;
+    if (correctedRequest) {
+      const correctedPrecise = findActivityRoundTarget(copyText, correctedRequest, roundIndex);
+      const correctedTarget = correctedPrecise || correctedRequest.unit || correctedRequest.turn;
+      if (correctedTarget) {
+        requestTarget = correctedRequest;
+        preciseTarget = correctedPrecise;
+        if (correctedTarget !== target) {
+          correctedTarget.scrollIntoView?.({ block: "center", inline: "nearest", behavior: "smooth" });
+        }
+        target = correctedTarget;
+      }
+    }
+    if (!target.isConnected) {
+      finishActivityScroll(operation);
+      return false;
+    }
+    pulseActivityConversationTarget(target, roundIndex);
+    finishActivityScroll(operation);
     return true;
   }
 
@@ -822,6 +1474,8 @@ TEXT = r"""
   }
 
     let installed = false;
+    let activeActivityScroll = null;
+    let activityScrollSerial = 0;
     const numericTokenRe = /\$?\d+(?:,\d{3})*(?:\.\d+)?(?:[kM%])?/g;
     const numericAnimations = new WeakMap();
 
@@ -840,6 +1494,8 @@ TEXT = r"""
     function dispose() {
       const wasInstalled = installed;
       installed = false;
+      cancelActivityScroll();
+      ctx.observers?.clear?.("activity_request_materialization");
       const root = document.getElementById(rootId);
       root?.querySelectorAll(".codex-usage-hud-line").forEach(cancelNumericAnimation);
       ctx.lifecycle.clearInterval(window[runningTimerName] || 0);
@@ -859,6 +1515,7 @@ TEXT = r"""
       refreshMarquee,
       renderActivityTimeline,
       renderTopDetails,
+      locateActivityTrailRound,
       selectActivityTask,
       selectActivityTaskIndex,
       scrollToActivityRequest,

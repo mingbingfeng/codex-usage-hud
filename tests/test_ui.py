@@ -2616,6 +2616,96 @@ class BudgetHelperTests(unittest.TestCase):
             retained = active_work_items_for_snapshot(context, snapshot, parent)
             self.assertEqual([item.id for item in retained], ["session-parent"])
 
+    def test_active_cli_item_uses_changed_path_when_mtime_is_frozen(self) -> None:
+        parser = JsonlSessionParser()
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            current = root / "current.jsonl"
+            resumed_session_id = "00000000-0000-0000-0000-000000000002"
+            resumed = root / f"rollout-2026-01-01T00-00-00-{resumed_session_id}.jsonl"
+            current.write_text(
+                json.dumps(
+                    {
+                        "timestamp": now.isoformat(),
+                        "type": "session_meta",
+                        "payload": {"id": "session-current"},
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            resumed.write_text(
+                "\n".join(
+                    json.dumps(row)
+                    for row in (
+                        {
+                            "timestamp": now.isoformat(),
+                            "type": "session_meta",
+                            "payload": {
+                                "id": resumed_session_id,
+                                "source": "cli",
+                                "originator": "codex-tui",
+                            },
+                        },
+                        {
+                            "timestamp": now.isoformat(),
+                            "type": "event_msg",
+                            "payload": {"type": "task_started"},
+                        },
+                        {
+                            "timestamp": now.isoformat(),
+                            "type": "event_msg",
+                            "payload": {
+                                "type": "user_message",
+                                "message": "continue after rate limit",
+                            },
+                        },
+                        {
+                            "timestamp": now.isoformat(),
+                            "type": "event_msg",
+                            "payload": {
+                                "type": "agent_message",
+                                "message": "still working",
+                            },
+                        },
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            frozen_mtime = (now - timedelta(hours=6)).timestamp()
+            os.utime(resumed, (frozen_mtime, frozen_mtime))
+            for index in range(active_work.ACTIVE_WORK_CANDIDATE_LIMIT):
+                filler = root / f"newer-{index}.jsonl"
+                filler.write_text("{}\n", encoding="utf-8")
+                newer_mtime = (now - timedelta(minutes=index + 1)).timestamp()
+                os.utime(filler, (newer_mtime, newer_mtime))
+
+            snapshot = parser.parse_file(current)
+            context = SimpleNamespace(
+                sessions_root=root,
+                parser=parser,
+                active_session_tracker=None,
+            )
+
+            candidates = active_work._recent_session_files(
+                root,
+                priority_paths=(resumed,),
+            )
+            items = active_work_items_for_snapshot(
+                context,
+                snapshot,
+                current,
+                priority_paths=(resumed,),
+            )
+
+            self.assertEqual(len(candidates), active_work.ACTIVE_WORK_CANDIDATE_LIMIT)
+            self.assertIn(resumed, candidates)
+            resumed_item = next(item for item in items if item.id == resumed_session_id)
+            self.assertEqual(resumed_item.client_kind, "cli")
+            self.assertIn(resumed_item.status, {"running", "active"})
+
     def test_active_work_items_show_independent_desktop_delegation(self) -> None:
         parser = JsonlSessionParser()
         now = datetime.now().astimezone()

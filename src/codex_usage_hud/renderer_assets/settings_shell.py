@@ -38,6 +38,7 @@ _TEXT_PREFIX = r"""
         resume: false,
         workdir: "",
         workdirCustom: false,
+        migratedWorkdirs: false,
         model: "",
         commandEdited: false,
         commandText: "",
@@ -98,6 +99,7 @@ _TEXT_PREFIX = r"""
           resume: codexCliState.resume === true,
           workdir: codexCliState.workdir,
           workdirCustom: codexCliState.workdirCustom === true,
+          migratedWorkdirs: codexCliState.migratedWorkdirs === true,
           model: String(codexCliState.model || "").trim(),
           command: String(command || ""),
           commandEdited: codexCliState.commandEdited === true
@@ -117,6 +119,123 @@ _TEXT_PREFIX = r"""
         }
       }
 
+      function codexCliTransferWorkdirIdentity(path) {
+        const value = codexCliNormaliseWorkdirPath(path).replace(/\\/g, "/");
+        return /^[a-z]:\//i.test(value) ? value.toLowerCase() : value;
+      }
+
+      function codexCliNormaliseWorkdirPath(path) {
+        const value = String(path || "").trim();
+        const longPathPrefix = "\\\\?\\";
+        if (!value.startsWith(longPathPrefix)) return value;
+        const remainder = value.slice(longPathPrefix.length);
+        return remainder.toUpperCase().startsWith("UNC\\")
+          ? `\\\\${remainder.slice(4)}`
+          : remainder;
+      }
+
+      function codexCliStoredTransferWorkdirs() {
+        try {
+          const values = JSON.parse(ctx.storage.read(localStorage, codexCliTransferWorkdirStorageKey, "{}"));
+          return values && typeof values === "object" && !Array.isArray(values) ? values : {};
+        } catch (_) {
+          return {};
+        }
+      }
+
+      function codexCliTransferWorkdirStorageKey(providerValue = codexCliState.options?.provider || codexCliState.provider) {
+        const provider = String(providerValue || "").trim().toLowerCase();
+        return provider ? `provider:${provider}` : "";
+      }
+
+      function codexCliTransferWorkdirs() {
+        const key = codexCliTransferWorkdirStorageKey();
+        const stored = key ? codexCliStoredTransferWorkdirs()[key] : null;
+        const values = Array.isArray(stored?.workdirs) ? stored.workdirs : [];
+        const seen = new Set();
+        return values.reduce((result, item) => {
+          const path = codexCliNormaliseWorkdirPath(item?.path);
+          const identity = codexCliTransferWorkdirIdentity(path);
+          if (!path || !identity || seen.has(identity)) return result;
+          seen.add(identity);
+          result.push({ path, label: codexCliNormaliseWorkdirPath(item?.label) || path });
+          return result;
+        }, []);
+      }
+
+      function codexCliPersistTransferWorkdirs(operation) {
+        if (String(operation?.action || "").toLowerCase() !== "sessiontransfer") return false;
+        const targetProvider = String(operation?.targetProvider || "").trim().toLowerCase();
+        if (!targetProvider) return false;
+        const ready = (Array.isArray(operation?.results) ? operation.results : [])
+          .filter((item) => item?.targetVisible === true && item?.targetResumable === true)
+          .map((item) => ({
+            path: codexCliNormaliseWorkdirPath(item?.workdir),
+            label: codexCliNormaliseWorkdirPath(item?.workdirName),
+          }));
+        if (!ready.length) return false;
+        try {
+          const stored = codexCliStoredTransferWorkdirs();
+          const key = codexCliTransferWorkdirStorageKey(targetProvider);
+          const current = Array.isArray(stored[key]?.workdirs) ? stored[key].workdirs : [];
+          const seen = new Set();
+          const workdirs = [...current, ...ready].reduce((result, item) => {
+            const path = codexCliNormaliseWorkdirPath(item?.path);
+            const identity = codexCliTransferWorkdirIdentity(path);
+            if (!path || !identity || seen.has(identity)) return result;
+            seen.add(identity);
+            result.push({ path, label: codexCliNormaliseWorkdirPath(item?.label) || path });
+            return result;
+          }, []);
+          if (!workdirs.length) return false;
+          stored[key] = { workdirs, savedAt: Date.now() };
+          ctx.storage.write(localStorage, codexCliTransferWorkdirStorageKey, JSON.stringify(stored));
+          return true;
+        } catch (_) {
+          return false;
+        }
+      }
+
+      function codexCliVisibleWorkdirs() {
+        const discovered = Array.isArray(codexCliState.options?.workdirs)
+          ? codexCliState.options.workdirs
+          : [];
+        const values = codexCliState.migratedWorkdirs
+          ? codexCliTransferWorkdirs()
+          : discovered;
+        return values.reduce((result, item) => {
+          const path = codexCliNormaliseWorkdirPath(item?.path);
+          if (!path) return result;
+          result.push({
+            ...item,
+            path,
+            label: codexCliNormaliseWorkdirPath(item?.label) || path,
+          });
+          return result;
+        }, []);
+      }
+
+      function codexCliWorkdirOptionsHtml() {
+        return codexCliVisibleWorkdirs().map((item) => `
+          <option value="${escapeHtml(item.path)}" ${!codexCliState.workdirCustom && item.path === codexCliState.workdir ? "selected" : ""}>
+            ${escapeHtml(item.label)} · ${escapeHtml(item.path)}
+          </option>
+        `).join("");
+      }
+
+      function codexCliSyncWorkdirOptions(layer) {
+        const select = layer?.querySelector('[data-codex-cli-field="workdirSelect"]');
+        if (!select) return;
+        const paths = codexCliVisibleWorkdirs().map((item) => String(item?.path || ""));
+        if (!paths.includes(codexCliState.workdir)) {
+          codexCliState.workdir = "";
+          codexCliState.workdirCustom = false;
+        }
+        const custom = codexCliState.migratedWorkdirs ? "" : '<option value="__custom__">自定义路径…</option>';
+        select.innerHTML = `<option value="" disabled ${!codexCliState.workdir ? "selected" : ""}>请选择工作目录</option>${custom}${codexCliWorkdirOptionsHtml()}`;
+        select.value = codexCliState.workdir || "";
+      }
+
       function codexCliValidatedQuickLaunchState(saved, options = codexCliState.options || {}) {
         if (!saved || typeof saved !== "object" || Array.isArray(saved)) return null;
         const provider = String(options.provider || codexCliState.provider || "").trim().toLowerCase();
@@ -132,7 +251,7 @@ _TEXT_PREFIX = r"""
         if (saved.commandEdited === true) return null;
         const terminalId = String(saved.terminalId || "").trim();
         const permission = String(saved.permission || "").trim();
-        const workdir = String(saved.workdir || "").trim();
+        const workdir = codexCliNormaliseWorkdirPath(saved.workdir);
         const terminals = Array.isArray(options.terminals) ? options.terminals : [];
         const permissions = Array.isArray(options.permissions) ? options.permissions : [];
         if (!terminalId || !terminals.some((item) => String(item?.id || "") === terminalId)) return null;
@@ -187,11 +306,11 @@ _TEXT_PREFIX = r"""
         codexCliState.useProxy = saved.useProxy === true;
         codexCliState.resume = saved.resume === true;
         const workdir = String(saved.workdir || "").trim();
+        codexCliState.migratedWorkdirs = saved.migratedWorkdirs === true;
         if (workdir) {
           codexCliState.workdir = workdir;
-          const knownWorkdir = (Array.isArray(codexCliState.options?.workdirs)
-            ? codexCliState.options.workdirs
-            : []).some((item) => String(item?.path || "") === workdir);
+          const knownWorkdir = codexCliVisibleWorkdirs()
+            .some((item) => String(item?.path || "") === workdir);
           codexCliState.workdirCustom = saved.workdirCustom === true || !knownWorkdir;
         }
         codexCliState.model = String(saved.model || "").trim();
@@ -409,6 +528,8 @@ _TEXT_PREFIX = r"""
         setValue('[data-codex-cli-field="model"]', codexCliState.model);
         const resume = layer.querySelector('[data-codex-cli-field="resume"]');
         if (resume) resume.checked = codexCliState.resume === true;
+        const migratedWorkdirs = layer.querySelector('[data-codex-cli-field="migratedWorkdirs"]');
+        if (migratedWorkdirs) migratedWorkdirs.checked = codexCliState.migratedWorkdirs === true;
         const workdirSelect = layer.querySelector('[data-codex-cli-field="workdirSelect"]');
         const workdirInput = layer.querySelector('[data-codex-cli-field="workdirInput"]');
         if (workdirSelect) {
@@ -421,7 +542,7 @@ _TEXT_PREFIX = r"""
         }
         if (workdirInput) {
           workdirInput.value = codexCliState.workdir;
-          workdirInput.hidden = codexCliState.workdirCustom !== true;
+          workdirInput.hidden = codexCliState.migratedWorkdirs || codexCliState.workdirCustom !== true;
         }
         const command = layer.querySelector('[data-codex-cli-field="command"]');
         if (syncCommand && command && command.value !== codexCliDisplayedCommandText()) {
@@ -442,11 +563,14 @@ _TEXT_PREFIX = r"""
         codexCliState.permission = value('[data-codex-cli-field="permission"]') || "full";
         codexCliState.model = value('[data-codex-cli-field="model"]');
         codexCliState.resume = layer.querySelector('[data-codex-cli-field="resume"]')?.checked === true;
+        codexCliState.migratedWorkdirs = layer.querySelector('[data-codex-cli-field="migratedWorkdirs"]')?.checked === true;
         const workdirSelect = value('[data-codex-cli-field="workdirSelect"]');
         codexCliState.workdirCustom = workdirSelect === "__custom__";
-        codexCliState.workdir = codexCliState.workdirCustom
-          ? value('[data-codex-cli-field="workdirInput"]')
-          : workdirSelect;
+        codexCliState.workdir = codexCliNormaliseWorkdirPath(
+          codexCliState.workdirCustom
+            ? value('[data-codex-cli-field="workdirInput"]')
+            : workdirSelect,
+        );
       }
 
       function codexCliSyncOptionsFromCommand(text) {
@@ -465,7 +589,11 @@ _TEXT_PREFIX = r"""
         const location = command.match(/Set-Location\s+-LiteralPath\s+'((?:''|[^'])*)'/i)
           || command.match(/cd\s+\/d\s+"([^"]+)"/i)
           || command.match(/cd\s+--\s+'((?:'\\''|[^'])*)'/i);
-        if (location) codexCliState.workdir = String(location[1] || "").replace(/''/g, "'");
+        if (location) {
+          codexCliState.workdir = codexCliNormaliseWorkdirPath(
+            String(location[1] || "").replace(/''/g, "'"),
+          );
+        }
         const workdirKnown = (Array.isArray(codexCliState.options?.workdirs) ? codexCliState.options.workdirs : [])
           .some((item) => String(item?.path || "") === codexCliState.workdir);
         codexCliState.workdirCustom = !!codexCliState.workdir && !workdirKnown;
@@ -582,7 +710,6 @@ _TEXT_PREFIX = r"""
         const options = codexCliState.options || {};
         const terminals = Array.isArray(options.terminals) ? options.terminals : [];
         const permissions = Array.isArray(options.permissions) ? options.permissions : [];
-        const workdirs = Array.isArray(options.workdirs) ? options.workdirs : [];
         const terminalOptions = terminals.map((item) => `
           <option value="${escapeHtml(item.id)}" ${item.id === codexCliState.terminalId ? "selected" : ""}>
             ${escapeHtml(item.label)}${item.recommended ? " · 推荐" : ""}
@@ -593,11 +720,7 @@ _TEXT_PREFIX = r"""
             ${escapeHtml(item.label)}
           </option>
         `).join("");
-        const workdirOptions = workdirs.map((item) => `
-          <option value="${escapeHtml(item.path)}" ${!codexCliState.workdirCustom && item.path === codexCliState.workdir ? "selected" : ""}>
-            ${escapeHtml(item.label)} · ${escapeHtml(item.path)}
-          </option>
-        `).join("");
+        const workdirOptions = codexCliWorkdirOptionsHtml();
         const chatTestState = codexCliChatTestState();
         const powershell7 = options.powershell7 || {};
         const powershellNotice = options.platform === "windows" && powershell7.available !== true
@@ -639,15 +762,15 @@ _TEXT_PREFIX = r"""
                 <button type="button" class="codex-usage-hud-settings-icon-action codex-usage-hud-codex-cli-model-refresh" data-action="codex-cli-model-refresh" aria-label="重新获取当前 Provider 的模型列表" title="重新获取模型列表" ${codexCliState.modelsFetching ? "disabled" : ""}><span aria-hidden="true">↻</span></button>
               </div>
             </div>
-            <label class="codex-usage-hud-codex-cli-field">
-              <span>工作目录</span>
+            <div class="codex-usage-hud-codex-cli-field codex-usage-hud-codex-cli-workdir-field">
+              <div class="codex-usage-hud-codex-cli-field-head"><span>工作目录</span><label class="codex-usage-hud-codex-cli-check codex-usage-hud-codex-cli-check-compact"><input type="checkbox" data-codex-cli-field="migratedWorkdirs" ${codexCliState.migratedWorkdirs ? "checked" : ""}><span>来自迁移</span></label></div>
               <select data-codex-cli-field="workdirSelect">
                 <option value="" disabled ${!codexCliState.workdir && codexCliState.workdirCustom !== true ? "selected" : ""}>请选择工作目录</option>
-                <option value="__custom__">自定义路径…</option>
+                ${codexCliState.migratedWorkdirs ? "" : '<option value="__custom__">自定义路径…</option>'}
                 ${workdirOptions}
               </select>
               <input data-codex-cli-field="workdirInput" value="${escapeHtml(codexCliState.workdir)}" placeholder="输入目录绝对路径" aria-label="工作目录路径">
-            </label>
+            </div>
             <details class="codex-usage-hud-codex-cli-chat-test codex-usage-hud-codex-cli-wide" data-codex-cli-chat-test="true" ${chatTestState === "open" ? "open" : ""} ${chatTestState === "hidden" ? "hidden" : ""}>
               <summary id="codex-usage-hud-codex-cli-model-help"><span data-codex-cli-model-note="true">${codexCliModelNote()}</span> · 没有模型列表？改用自定义模型名发送简短聊天测试<span data-codex-cli-model-error="true">${codexCliChatTestSummarySuffix()}</span></summary>
               <div class="codex-usage-hud-codex-cli-chat-test-body">
@@ -938,6 +1061,13 @@ _TEXT_PREFIX = r"""
           codexCliSyncOptionsFromCommand(command?.value || "");
           return;
         }
+        if (field === "migratedWorkdirs") {
+          codexCliReadControls();
+          codexCliSyncWorkdirOptions(codexCliDialogLayer());
+          codexCliSyncControls({ syncCommand: false });
+          codexCliRenderCommand();
+          return;
+        }
         codexCliReadControls();
         codexCliRenderCommand();
       }
@@ -995,6 +1125,7 @@ _TEXT_PREFIX = r"""
           command,
           workdir: codexCliState.workdir,
           workdirCustom: codexCliState.workdirCustom === true,
+          migratedWorkdirs: codexCliState.migratedWorkdirs === true,
         };
         codexCliState.launchTimeoutTimerId = ctx.lifecycle.timeout(
           "codex_cli_launch_timeout",
@@ -1188,6 +1319,7 @@ _TEXT_PREFIX = r"""
           codexCliState.resume = false;
           codexCliState.workdir = "";
           codexCliState.workdirCustom = false;
+          codexCliState.migratedWorkdirs = false;
           codexCliState.commandText = "";
           codexCliState.commandEdited = false;
           const persistedLaunchState = codexCliPersistedLaunchState();
@@ -3408,24 +3540,8 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
           : `目标可见可续聊 ${targetReady} · 目标未就绪 ${targetFailed}`;
         const operationError = String(operation?.error || "").trim();
         const targetProvider = String(operation?.targetProvider || "").trim().toLowerCase();
-        const readyResults = (Array.isArray(operation?.results) ? operation.results : [])
-          .filter((item) => item?.targetVisible === true && item?.targetResumable === true)
-          .filter((item) => String(item?.targetSessionId || "").trim());
-        const resumeState = String(sessionTransferState.resumeState || "").toLowerCase();
-        const resumeRequestId = String(sessionTransferState.resumeRequestId || "").trim();
-        const targetNotice = readyResults.length
-          ? '<span class="codex-usage-hud-session-transfer-target-notice">已按目标 Provider 的会话列表确认落盘，并通过续聊校验。可在新终端直接打开指定会话继续聊天。</span>'
-          : "";
-        const resumeActions = readyResults.map((item) => {
-          const targetId = String(item?.targetSessionId || "").trim();
-          const busy = !!resumeRequestId && String(sessionTransferState.resumeSessionId || "") === targetId;
-          const label = busy && resumeState === "starting"
-            ? "正在打开..."
-            : `在 ${escapeHtml(targetProvider || "目标 Provider")} 中继续`;
-          return `<button type="button" class="codex-usage-hud-settings-action" data-action="session-transfer-resume" title="在新终端使用目标 Provider 继续此会话" data-session-transfer-resume-id="${escapeHtml(targetId)}" data-session-transfer-resume-provider="${escapeHtml(targetProvider)}" ${busy ? "disabled" : ""}>${label}</button>`;
-        }).join("");
-        const resumeStatus = resumeState && sessionTransferState.resumeMessage
-          ? `<span class="codex-usage-hud-session-transfer-target-notice">${escapeHtml(sessionTransferState.resumeMessage)}</span>`
+        const targetNotice = targetReady
+          ? '<span class="codex-usage-hud-session-transfer-target-notice">已按目标 Provider 的会话列表确认落盘。启动 Codex CLI 时勾选“来自迁移”可选择对应工作目录。</span>'
           : "";
         const errors = [
           operationError
@@ -3436,7 +3552,7 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
           .slice(0, 4)
           .map((item) => `<div class="codex-usage-hud-session-transfer-error">${escapeHtml(item?.title || "会话")}：${escapeHtml(item?.error || "未知错误")}</div>`),
         ].join("");
-        return `<div class="codex-usage-hud-session-transfer-result" data-kind="${state === "completed" ? "success" : "error"}"><strong>${escapeHtml(headline)}</strong><span>${escapeHtml(details)}</span>${targetNotice}${resumeStatus}${resumeActions}${errors}</div>`;
+        return `<div class="codex-usage-hud-session-transfer-result" data-kind="${state === "completed" ? "success" : "error"}"><strong>${escapeHtml(headline)}</strong><span>${escapeHtml(details)}</span>${targetNotice}${errors}</div>`;
       }
 
       function syncSessionTransferDialogControls(data = sessionCleanupFromPayload(), viewOverride = null) {
@@ -3714,50 +3830,6 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
         return submitted;
       }
 
-      function resumeSessionTransferTarget(button) {
-        if (!sessionTransferState.open || sessionTransferState.resumeRequestId) return false;
-        const targetId = String(button?.dataset?.sessionTransferResumeId || "").trim();
-        const targetProvider = String(
-          button?.dataset?.sessionTransferResumeProvider
-          || sessionTransferState.targetProvider
-          || "",
-        ).trim().toLowerCase();
-        if (!targetId || !targetProvider) return false;
-        const operation = sessionTransferOperation();
-        const result = Array.isArray(operation?.results)
-          ? operation.results.find((item) => String(item?.targetSessionId || "").trim() === targetId)
-          : null;
-        if (result?.targetVisible !== true || result?.targetResumable !== true) {
-          setSettingsStatus("目标会话尚未通过可见和续聊校验，未启动。", "error");
-          return false;
-        }
-        const requestId = typedSettingsRequestId("session-transfer-resume");
-        sessionTransferState.resumeRequestId = requestId;
-        sessionTransferState.resumeSessionId = targetId;
-        sessionTransferState.resumeState = "starting";
-        sessionTransferState.resumeMessage = "正在打开目标 Provider 会话...";
-        if (button) button.disabled = true;
-        renderSessionTransferDialog();
-        const submitted = submitSettingsCommand(
-          {
-            action: "codexCliLaunch",
-            requestId,
-            provider: targetProvider,
-            sessionTransferResumeId: targetId,
-          },
-          "正在打开目标 Provider 会话...",
-          { preserveOverlay: true },
-        );
-        if (!submitted) {
-          sessionTransferState.resumeRequestId = "";
-          sessionTransferState.resumeSessionId = "";
-          sessionTransferState.resumeState = "error";
-          sessionTransferState.resumeMessage = "续聊启动请求未能提交，请重试。";
-          renderSessionTransferDialog();
-        }
-        return submitted;
-      }
-
       function applySessionTransferPayload(payload) {
         const incoming = payload?.sessionCleanup;
         if (!incoming || typeof incoming !== "object") return;
@@ -3785,6 +3857,7 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
           if (!sessionTransferState.requestId || responseRequestId === sessionTransferState.requestId) {
             sessionTransferState.operation = operation;
             if (terminal) {
+              codexCliPersistTransferWorkdirs(operation);
               sessionTransferState.requestId = "";
               sessionTransferState.selectedIds.clear();
             }
@@ -5554,7 +5627,6 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
       closeSessionTransferDialog,
       requestSessionTransferScan,
       submitSessionTransfer,
-      resumeSessionTransferTarget,
       sessionTransferSelectableIds,
       syncSessionTransferSelection,
       syncSessionTransferSelectAll,
@@ -5691,7 +5763,6 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
     closeSessionTransferDialog,
     requestSessionTransferScan,
     submitSessionTransfer,
-    resumeSessionTransferTarget,
     sessionTransferSelectableIds,
     syncSessionTransferSelection,
     syncSessionTransferSelectAll,

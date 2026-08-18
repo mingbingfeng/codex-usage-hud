@@ -87,6 +87,7 @@ def activity_trail(
         detail: str,
         *,
         active: bool = False,
+        round_index: int = 0,
     ) -> None:
         nonlocal order
         if moment is None:
@@ -109,20 +110,27 @@ def activity_trail(
             return
         seen.add(key)
         order += 1
+        event: dict[str, object] = {
+            "time": context.timeline_time(moment),
+            "title": context.compact(title, 26),
+            "detail": context.compact(detail, 72),
+            "tooltip": context.compact(
+                f"{context.timeline_time(moment)}  {title}  {detail}",
+                260,
+            ),
+            "active": active,
+        }
+        task_index = int(getattr(snapshot, "task_index", 0) or 0)
+        if task_index > 0:
+            event["taskIndex"] = task_index
+        if round_index > 0:
+            event["roundIndex"] = round_index
+            event["roundIndexes"] = [round_index]
         events.append(
             (
                 moment,
                 order,
-                {
-                    "time": context.timeline_time(moment),
-                    "title": context.compact(title, 26),
-                    "detail": context.compact(detail, 72),
-                    "tooltip": context.compact(
-                        f"{context.timeline_time(moment)}  {title}  {detail}",
-                        260,
-                    ),
-                    "active": active,
-                },
+                event,
             )
         )
 
@@ -142,6 +150,7 @@ def activity_trail(
                 context=context,
             ),
             active=active,
+            round_index=int(item.index or 0),
         )
     add(
         snapshot.request.started_at,

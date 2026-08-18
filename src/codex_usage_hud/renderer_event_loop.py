@@ -61,6 +61,7 @@ class RendererLoopState:
     latest_active_work_refresh_at: float = 0.0
     active_work_refresh_pending: bool = False
     active_work_refresh_not_before: float = 0.0
+    pending_active_work_paths: tuple[Path, ...] = ()
     background_usage_response_retry_attempts: int = 0
     background_usage_response_retry_not_before: float = 0.0
     soft_reinstall_pending: bool = False
@@ -370,7 +371,7 @@ class RendererRefreshPorts:
         [list[object], ParsedSession],
         list[object],
     ]
-    request_active_work: Callable[[ParsedSession], bool]
+    request_active_work: Callable[[ParsedSession, tuple[Path, ...]], bool]
     update_snapshot_activity: Callable[[ParsedSession], None]
     push_lightweight: Callable[[ParsedSession], bool]
     push_full: Callable[[ParsedSession, RendererTickInputs], bool]
@@ -557,12 +558,35 @@ class RendererRefreshExecutor:
                     list(fresh.active_work_items),
                     fresh,
                 )
-        if decision.refresh_active_work_items and latest is not None:
-            self.ports.request_active_work(fresh)
-        if decision.refresh_active_work_items:
+        priority_paths = tuple(
+            dict.fromkeys(
+                (*self.state.pending_active_work_paths, *decision.active_work_paths)
+            )
+        )
+        active_work_queued = False
+        if decision.refresh_active_work_items and (
+            latest is not None or priority_paths
+        ):
+            active_work_queued = self.ports.request_active_work(
+                fresh,
+                priority_paths,
+            )
+        if decision.refresh_active_work_items and (
+            not priority_paths or active_work_queued
+        ):
             self.state.latest_active_work_refresh_at = self.ports.monotonic()
             self.state.active_work_refresh_pending = False
             self.state.active_work_refresh_not_before = 0.0
+            if active_work_queued:
+                self.state.pending_active_work_paths = ()
+        elif priority_paths:
+            self.state.pending_active_work_paths = priority_paths
+            self.state.active_work_refresh_pending = True
+            self.state.active_work_refresh_not_before = max(
+                self.state.active_work_refresh_not_before,
+                self.ports.monotonic()
+                + self.ports.active_work_after_session_seconds,
+            )
 
     def _record_success(
         self,
@@ -726,6 +750,7 @@ class SnapshotRefreshDecision:
     refresh_budget_aggregate: bool
     refresh_budget_paths: tuple[Path, ...]
     refresh_active_work_items: bool
+    active_work_paths: tuple[Path, ...]
     lightweight_active_session: bool
     hydrated_session: bool
     snapshot_kwargs: dict[str, object]
@@ -751,6 +776,12 @@ def snapshot_refresh_decision(
         tuple(sorted(paths, key=path_key))
         if paths and all(path.suffix.lower() == ".jsonl" for path in paths)
         else ()
+    )
+    active_work_paths = tuple(
+        sorted(
+            (path for path in paths if path.suffix.lower() == ".jsonl"),
+            key=path_key,
+        )
     )
     refresh_budget_aggregate = runtime_policies.should_refresh_budget_aggregate(
         has_snapshot=has_latest_snapshot,
@@ -808,6 +839,7 @@ def snapshot_refresh_decision(
         refresh_budget_aggregate=refresh_budget_aggregate,
         refresh_budget_paths=refresh_budget_paths,
         refresh_active_work_items=refresh_active_work_items,
+        active_work_paths=active_work_paths,
         lightweight_active_session=lightweight,
         hydrated_session=hydrated,
         snapshot_kwargs=snapshot_kwargs,

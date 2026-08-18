@@ -483,6 +483,7 @@ def _task_snapshot(snapshot: ParsedSession, task: TaskHistory) -> ParsedSession:
     """Project one historical task through the existing activity presenters."""
     projected = copy.copy(snapshot)
     projected.task_prompt = task.prompt
+    projected.task_turn_id = task.turn_id
     projected.task_index = task.index
     projected.task_count = task.count
     projected.task_started_at = task.started_at
@@ -508,6 +509,7 @@ def _activity_task_payload(
     return {
         "index": task.index,
         "count": task.count,
+        "turnId": task.turn_id,
         "taskOrdinal": f"Req {task.index}/{task.count}",
         "currentTask": _top_current_task(projected),
         "executing": _top_executing_text(projected),
@@ -1284,7 +1286,14 @@ def _top_heavy_rounds(snapshot: ParsedSession) -> list[dict[str, object]]:
         ).strip()
         for task in (getattr(snapshot, "activity_tasks", []) or [])
     }
+    task_turn_ids = {
+        max(1, int(getattr(task, "index", 0) or 1)): str(
+            getattr(task, "turn_id", "") or ""
+        ).strip()
+        for task in (getattr(snapshot, "activity_tasks", []) or [])
+    }
     fallback_prompt = str(getattr(snapshot, "task_prompt", "") or "").strip()
+    fallback_turn_id = str(getattr(snapshot, "task_turn_id", "") or "").strip()
     for task_index, item in task_rows:
         if not (
             item.status != "waiting"
@@ -1329,6 +1338,7 @@ def _top_heavy_rounds(snapshot: ParsedSession) -> list[dict[str, object]]:
                 "taskIndex": task_index,
                 "roundIndex": int(item.index),
                 "taskPrompt": task_prompts.get(task_index, "") or fallback_prompt,
+                "taskTurnId": task_turn_ids.get(task_index, "") or fallback_turn_id,
                 "tooltip": (
                     f"轮次 #{item.index} · {duration}\n"
                     f"金额 {_format_fixed_money(cost, estimated)} · Tokens {total:,}\n"
@@ -1580,10 +1590,7 @@ def _top_details(snapshot: ParsedSession, session_cost: float | None) -> dict[st
         details["activityTasks"] = activity_tasks
         details["activityTaskIndex"] = int(snapshot.task_index or 0)
         details["activityTaskCount"] = len(activity_tasks)
-        details["activityTaskNavigable"] = bool(
-            snapshot.task_completed_at is not None
-            or snapshot.task_aborted_at is not None
-        ) and len(activity_tasks) > 1
+        details["activityTaskNavigable"] = len(activity_tasks) > 1
     details.update(session_parts)
     details.update(activity_labels)
     return details

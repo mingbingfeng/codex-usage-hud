@@ -232,15 +232,45 @@ def test_activity_presenter_extracts_tool_details_and_merges_events() -> None:
 
     merged = activity.merge_activity_events(
         [
-            (moment, 1, {"title": "请求完成", "detail": "model"}),
-            (moment, 2, {"title": "任务完成", "detail": "done"}),
-            (moment, 3, {"title": "Token确认", "detail": "received token_count"}),
+            (
+                moment,
+                1,
+                {
+                    "title": "请求完成",
+                    "detail": "model",
+                    "taskIndex": 2,
+                    "roundIndex": 7,
+                },
+            ),
+            (
+                moment,
+                2,
+                {
+                    "title": "任务完成",
+                    "detail": "done",
+                    "taskIndex": 2,
+                    "roundIndexes": [7, 8],
+                },
+            ),
+            (
+                moment,
+                3,
+                {
+                    "title": "Token确认",
+                    "detail": "received token_count",
+                    "taskIndex": 2,
+                    "roundIndex": 8,
+                },
+            ),
         ],
         compact=compact,
     )
     assert len(merged) == 1
     assert merged[0]["title"] == "任务完成，Token确认"
     assert "请求完成" not in str(merged[0]["title"])
+    assert merged[0]["taskIndex"] == 2
+    assert merged[0]["roundIndex"] == 8
+    assert merged[0]["roundIndexes"] == [7, 8]
 
 
 def test_activity_round_detail_keeps_cost_and_token_order() -> None:

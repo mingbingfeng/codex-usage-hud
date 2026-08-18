@@ -1089,6 +1089,7 @@ def test_snapshot_refresh_decision_uses_incremental_paths_and_hydration() -> Non
 
     assert not decision.refresh_budget_aggregate
     assert decision.refresh_budget_paths == (Path("a.jsonl"), Path("b.jsonl"))
+    assert decision.active_work_paths == (Path("a.jsonl"), Path("b.jsonl"))
     assert decision.hydrated_session
     assert decision.snapshot_kwargs["refresh_current_session_usage"] is False
 
@@ -1107,6 +1108,7 @@ def _refresh_ports(
     capture_observation: MagicMock | None = None,
     acknowledge_observation: MagicMock | None = None,
     retry_observation: MagicMock | None = None,
+    request_active_work: MagicMock | None = None,
 ) -> RendererRefreshPorts:
     return RendererRefreshPorts(
         monotonic=lambda: 10.0,
@@ -1117,7 +1119,7 @@ def _refresh_ports(
         selection_is_stale=lambda snapshot: stale,
         current_selection_seq=lambda: 9,
         refresh_current_work=lambda items, snapshot: list(items),
-        request_active_work=lambda snapshot: True,
+        request_active_work=request_active_work or MagicMock(return_value=True),
         update_snapshot_activity=lambda snapshot: None,
         push_lightweight=push_lightweight or MagicMock(return_value=True),
         push_full=push_full or MagicMock(return_value=True),
@@ -1175,6 +1177,123 @@ def test_refresh_executor_builds_and_publishes_initial_snapshot() -> None:
         "snapshotBuiltAt": 20_000,
         "payloadSendStartedAt": 20_000,
     }
+
+
+def test_refresh_executor_passes_changed_jsonl_to_active_work() -> None:
+    latest = ParsedSession(active_work_items=["existing"])
+    fresh = ParsedSession(session_id="session-2")
+    request_active_work = MagicMock(return_value=True)
+    state = RendererLoopState(
+        latest_snapshot=latest,
+        latest_budget_signature=("budget",),
+    )
+    executor = RendererRefreshExecutor(
+        state,
+        _refresh_ports(
+            fresh=fresh,
+            request_active_work=request_active_work,
+        ),
+    )
+    inputs = _tick_inputs(
+        plan=RefreshPlan(snapshot=True),
+        reasons={"sessions-root"},
+    )
+    changed_path = Path("resumed.jsonl")
+    inputs.file_change_paths = {changed_path, Path("hud-settings.json")}
+
+    assert executor.apply(inputs, False) is fresh
+
+    request_active_work.assert_called_once_with(fresh, (changed_path,))
+
+
+def test_refresh_executor_retains_changed_jsonl_until_deferred_active_work() -> None:
+    latest = ParsedSession(active_work_items=["existing"])
+    fresh = ParsedSession(session_id="session-2")
+    request_active_work = MagicMock(return_value=True)
+    state = RendererLoopState(
+        latest_snapshot=latest,
+        latest_budget_signature=("budget",),
+        active_work_refresh_pending=True,
+        active_work_refresh_not_before=20.0,
+    )
+    executor = RendererRefreshExecutor(
+        state,
+        _refresh_ports(
+            fresh=fresh,
+            request_active_work=request_active_work,
+        ),
+    )
+    changed_path = Path("resumed.jsonl")
+    suppressed_inputs = _tick_inputs(
+        plan=RefreshPlan(snapshot=True),
+        reasons={"sessions-root"},
+    )
+    suppressed_inputs.file_change_paths = {changed_path}
+
+    assert executor.apply(suppressed_inputs, False) is fresh
+    request_active_work.assert_not_called()
+    assert state.pending_active_work_paths == (changed_path,)
+
+    state.active_work_refresh_not_before = 0.0
+    deferred_inputs = _tick_inputs(plan=RefreshPlan(snapshot=True))
+
+    assert executor.apply(deferred_inputs, False) is fresh
+    request_active_work.assert_called_once_with(fresh, (changed_path,))
+    assert state.pending_active_work_paths == ()
+
+
+def test_refresh_executor_keeps_changed_jsonl_when_active_work_rejects_it() -> None:
+    latest = ParsedSession(active_work_items=["existing"])
+    fresh = ParsedSession(session_id="session-2")
+    request_active_work = MagicMock(return_value=False)
+    state = RendererLoopState(
+        latest_snapshot=latest,
+        latest_budget_signature=("budget",),
+    )
+    executor = RendererRefreshExecutor(
+        state,
+        _refresh_ports(
+            fresh=fresh,
+            request_active_work=request_active_work,
+        ),
+    )
+    changed_path = Path("resumed.jsonl")
+    inputs = _tick_inputs(
+        plan=RefreshPlan(snapshot=True),
+        reasons={"sessions-root"},
+    )
+    inputs.file_change_paths = {changed_path}
+
+    assert executor.apply(inputs, False) is fresh
+
+    request_active_work.assert_called_once_with(fresh, (changed_path,))
+    assert state.pending_active_work_paths == (changed_path,)
+    assert state.active_work_refresh_pending
+    assert state.active_work_refresh_not_before == 11.2
+
+
+def test_refresh_executor_queues_changed_jsonl_for_initial_snapshot() -> None:
+    fresh = ParsedSession(session_id="session-1")
+    request_active_work = MagicMock(return_value=True)
+    state = RendererLoopState()
+    executor = RendererRefreshExecutor(
+        state,
+        _refresh_ports(
+            fresh=fresh,
+            request_active_work=request_active_work,
+        ),
+    )
+    changed_path = Path("resumed.jsonl")
+    inputs = _tick_inputs(
+        plan=RefreshPlan(snapshot=True),
+        reasons={"sessions-root"},
+    )
+    inputs.file_change_paths = {changed_path}
+
+    assert executor.apply(inputs, False) is fresh
+
+    request_active_work.assert_called_once_with(fresh, (changed_path,))
+    assert state.pending_active_work_paths == ()
 
 
 def test_refresh_executor_visible_first_schedules_deferred_active_work() -> None:

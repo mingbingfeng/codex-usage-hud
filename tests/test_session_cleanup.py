@@ -420,6 +420,9 @@ class SessionCleanupManagerTests(unittest.TestCase):
         self.assertEqual(operation["state"], "completed")
         self.assertEqual(operation["copiedCount"], 1)
         self.assertEqual(operation["migratedCount"], 1)
+        self.assertEqual(
+            operation["results"][0]["workdir"], str(root / "project-a")
+        )
         self.assertEqual(forked, [ROOT_ID])
         self.assertEqual(
             lifecycle_calls,

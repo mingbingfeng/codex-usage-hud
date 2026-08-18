@@ -41,7 +41,7 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
-ActiveWorkBuilder = Callable[[object, object, Path | None], list[Any]]
+ActiveWorkBuilder = Callable[[object, object, Path | None, tuple[Path, ...]], list[Any]]
 
 ACTIVE_WORK_CANDIDATE_LIMIT = 16
 ACTIVE_WORK_STALE_SECONDS = 4 * 60 * 60
@@ -75,17 +75,28 @@ class RendererActiveWorkPump:
         self._build_items = build_items
         self._lock = threading.Lock()
         self._closed = False
-        self._pending: tuple[object, Path | None, int] | None = None
+        self._pending: tuple[object, Path | None, tuple[Path, ...], int] | None = None
         self._latest: tuple[int, list[Any]] | None = None
         self._worker: threading.Thread | None = None
 
-    def request(self, snapshot: object, session_path: Path | None) -> bool:
+    def request(
+        self,
+        snapshot: object,
+        session_path: Path | None,
+        priority_paths: Sequence[Path] = (),
+    ) -> bool:
         with self._lock:
             if self._closed:
                 return False
+            normalized_paths = tuple(dict.fromkeys(Path(path) for path in priority_paths))
+            if self._pending is not None:
+                normalized_paths = tuple(
+                    dict.fromkeys((*self._pending[2], *normalized_paths))
+                )
             self._pending = (
                 copy.copy(snapshot),
                 session_path,
+                normalized_paths,
                 int(getattr(snapshot, "selection_seq", 0) or 0),
             )
             if self._worker is not None and self._worker.is_alive():
@@ -124,12 +135,13 @@ class RendererActiveWorkPump:
                 with self._lock:
                     self._worker = None
                 return
-            snapshot, session_path, selection_seq = request
+            snapshot, session_path, priority_paths, selection_seq = request
             try:
                 items = self._build_items(
                     self._context,
                     snapshot,
                     session_path,
+                    priority_paths,
                 )
             except Exception as exc:
                 _LOGGER.info(
@@ -159,16 +171,28 @@ def _recent_session_files(
     *,
     current_path: Path | None = None,
     limit: int = ACTIVE_WORK_CANDIDATE_LIMIT,
+    priority_paths: Sequence[Path] = (),
 ) -> list[Path]:
-    paths: dict[str, tuple[Path, float]] = {}
+    priority_keys = {
+        _session_path_key(Path(path))
+        for path in priority_paths
+        if Path(path).suffix.lower() == ".jsonl"
+    }
+    paths: dict[str, tuple[Path, float, bool]] = {}
     if current_path is not None:
         try:
+            stat = current_path.stat()
             paths[_session_path_key(current_path)] = (
                 current_path,
-                current_path.stat().st_mtime,
+                stat.st_mtime,
+                _session_path_key(current_path) in priority_keys,
             )
         except OSError:
-            paths[_session_path_key(current_path)] = (current_path, 0.0)
+            paths[_session_path_key(current_path)] = (
+                current_path,
+                0.0,
+                _session_path_key(current_path) in priority_keys,
+            )
     for root in _active_work_scan_roots(sessions_root):
         if not root.exists():
             continue
@@ -176,14 +200,19 @@ def _recent_session_files(
             iterator = root.rglob("*.jsonl")
             for path in iterator:
                 try:
-                    mtime = path.stat().st_mtime
+                    stat = path.stat()
                 except OSError:
                     continue
-                paths[_session_path_key(path)] = (path, mtime)
+                path_key = _session_path_key(path)
+                paths[path_key] = (
+                    path,
+                    stat.st_mtime,
+                    path_key in priority_keys,
+                )
         except OSError:
             continue
-    ordered = sorted(paths.values(), key=lambda item: item[1], reverse=True)
-    return [path for path, _mtime in ordered[: max(1, int(limit))]]
+    ordered = sorted(paths.values(), key=lambda item: (item[2], item[1]), reverse=True)
+    return [path for path, _mtime, _priority in ordered[: max(1, int(limit))]]
 
 
 def _work_activity_label(value: str) -> str:
@@ -593,6 +622,7 @@ def active_work_items_for_snapshot(
     context: "RuntimeContext",
     snapshot: ParsedSession,
     session_path: Path | None,
+    priority_paths: Sequence[Path] = (),
 ) -> list[WorkStatusItem]:
     """Build primary-screen work bubble items from recently active Codex sessions."""
     item_limit = _work_overlay_item_limit_for_context(context)
@@ -629,6 +659,7 @@ def active_work_items_for_snapshot(
         context.sessions_root,
         current_path=session_path,
         limit=ACTIVE_WORK_CANDIDATE_LIMIT,
+        priority_paths=priority_paths,
     ):
         if _session_path_key(path) == current_key:
             continue

@@ -648,6 +648,234 @@ console.log("renderer-leaf-domains-ok");
     assert "renderer-leaf-domains-ok" in completed.stdout
 
 
+def test_session_view_activity_scroll_scopes_to_turn_and_reacquires_virtualized_nodes() -> None:
+    session_view_factory = SESSION_VIEW.split(
+        "  const sessionViewDomain = ctx.domains.register(",
+        1,
+    )[0]
+    script = """
+const assert = require("node:assert/strict");
+const rootId = "codex-usage-hud-root";
+const warningClass = "warning";
+const errorClass = "error";
+const runningTimerName = "__running";
+const payload = {
+  rendererSessionId: "session-test",
+  topDetails: {
+    activityTaskIndex: 2,
+    activityTasks: [
+      { index: 1, count: 2, turnId: "target-turn", currentTask: "目标需求" },
+      { index: 2, count: 2, turnId: "other-turn", currentTask: "当前需求" },
+    ],
+  },
+};
+const events = [];
+const timelineOffsets = [];
+let mountTarget = false;
+let targetMounted = false;
+const timers = new Set();
+const root = {
+  dataset: { activityTaskIndex: "2" },
+  isConnected: true,
+  contains: () => false,
+  querySelector: (selector) => {
+    if (selector === '[data-field="topActivityTrail"]') return activityList;
+    if (selector === '[data-field="topActivityLoadMore"]') return loadMore;
+    return null;
+  },
+  querySelectorAll: () => [],
+};
+const activityList = { dataset: { visibleCount: "4" }, scrollTop: 0, clientHeight: 100 };
+const loadMore = { dataset: { pageSize: "12" } };
+const timeline = {
+  scrollHeight: 1000,
+  clientHeight: 100,
+  _scrollTop: 0,
+  get scrollTop() { return this._scrollTop; },
+  set scrollTop(value) { this._scrollTop = Number(value); timelineOffsets.push(this._scrollTop); },
+  addEventListener() {},
+  removeEventListener() {},
+};
+const makeNode = ({ key = "", turn = null, text = "", user = false, outer = false }) => {
+  const node = {
+    dataset: {},
+    isConnected: true,
+    innerText: text,
+    textContent: text,
+    getAttribute(name) {
+      if (name === "data-content-search-unit-key") return key;
+      if (name === "data-content-search-turn-key") return turn?.turnId || "";
+      if (name === "data-turn-key") return outer ? turn?.outerKey || "" : "";
+      return null;
+    },
+    matches(selector) {
+      if (selector.includes("data-local-conversation-user-anchor")) return user;
+      if (selector.includes("data-content-search-unit-key")) return !!key;
+      return false;
+    },
+    querySelector(selector) {
+      return selector.includes("data-local-conversation-user-anchor") && user ? {} : null;
+    },
+    querySelectorAll(selector) {
+      if (selector.includes("data-content-search-unit-key")) return turn?.units || [];
+      return [];
+    },
+    closest(selector) {
+      if (selector.includes("data-content-search-unit-key") && key) return node;
+      if (selector.includes("data-content-search-turn-key")) return turn;
+      if (selector.includes("data-turn-key")) return turn?.outer || null;
+      return null;
+    },
+    scrollIntoView(options = {}) { events.push({ kind: "scroll", node, behavior: options.behavior || "auto" }); },
+    animate() { events.push({ kind: "animate", node }); return { cancel() {} }; },
+    getBoundingClientRect() { return { top: user ? 10 : 40, bottom: user ? 30 : 80, height: user ? 20 : 40 }; },
+  };
+  if (key) node.dataset.contentSearchUnitKey = key;
+  return node;
+};
+const otherTurn = { turnId: "other-turn", outerKey: "outer-other", units: [] };
+otherTurn.outer = makeNode({ turn: otherTurn, outer: true, text: "另一个 Req" });
+const otherUser = makeNode({
+  key: "other-turn:user",
+  turn: otherTurn,
+  user: true,
+  text: "你说：目标输入精确内容 ABCDE",
+});
+const otherOutput = makeNode({
+  key: "other-turn:output",
+  turn: otherTurn,
+  text: "目标输出精确内容 ABCDE",
+});
+otherTurn.units = [otherUser, otherOutput];
+const targetTurn = { turnId: "target-turn", outerKey: "outer-target", units: [] };
+targetTurn.outer = makeNode({ turn: targetTurn, outer: true, text: "目标 Req" });
+const targetUser = makeNode({
+  key: "target-turn:user",
+  turn: targetTurn,
+  user: true,
+  text: "你说：目标输入精确内容 ABCDE",
+});
+const targetOutput = makeNode({
+  key: "target-turn:output",
+  turn: targetTurn,
+  text: "目标输出精确内容 ABCDE",
+});
+targetTurn.units = [targetUser, targetOutput];
+for (const turn of [otherTurn, targetTurn]) {
+  turn.isConnected = true;
+  turn.innerText = turn.units.map((unit) => unit.textContent).join(" ");
+  turn.textContent = turn.innerText;
+  turn.getAttribute = (name) => (
+    name === "data-content-search-turn-key" ? turn.turnId
+      : (name === "data-turn-key" ? turn.outerKey : null)
+  );
+  turn.querySelectorAll = (selector) => (
+    selector.includes("data-content-search-unit-key") ? turn.units : []
+  );
+  turn.closest = (selector) => selector.includes("data-turn-key") ? turn.outer : null;
+}
+const document = {
+  body: {},
+  documentElement: {},
+  getElementById: (id) => id === rootId ? root : null,
+  querySelector(selector) {
+    if (selector === "[data-app-action-timeline-scroll]") return timeline;
+    return null;
+  },
+  querySelectorAll(selector) {
+    const turns = targetMounted ? [otherTurn, targetTurn] : [otherTurn];
+    const units = turns.flatMap((turn) => turn.units);
+    if (selector === "[data-content-search-turn-key]") return turns;
+    if (selector === "[data-content-search-unit-key]") return units;
+    if (selector === "[data-turn-key]") return turns.map((turn) => turn.outer);
+    if (selector.includes("data-content-search-turn-key")) return turns;
+    return [];
+  },
+};
+global.window = {
+  requestAnimationFrame(callback) {
+    if (mountTarget && !targetMounted) targetMounted = true;
+    callback(0);
+    return 0;
+  },
+  cancelAnimationFrame() {},
+  setTimeout,
+  clearTimeout,
+};
+global.document = document;
+global.currentPayload = () => payload;
+global.clamp = (value, min, max) => Math.max(min, Math.min(max, value));
+global.budgetDomain = { refreshProgressRailLabel() {}, refreshCollapsedProgressStrip() {} };
+global.diagnosticsDomain = { applyConnectionHealth() {} };
+const ctx = {
+  lifecycle: {
+    active: () => true,
+    frame: (_owner, callback) => window.requestAnimationFrame(callback),
+    clearFrame() {},
+    timeout: (_owner, callback) => { const id = { callback }; timers.add(id); return id; },
+    clearTimeout: (id) => timers.delete(id),
+    interval: () => 0,
+    clearInterval() {},
+  },
+};
+const shared = {};
+""" + session_view_factory + r"""
+const domain = createSessionViewDomain(ctx, shared);
+
+(async () => {
+// A same-text user/output pair in another Req must not be selected while the
+// requested stable turn is still virtualized away.
+timeline.scrollHeight = 100;
+let result = await domain.scrollToActivityRound(
+  "输出：\n目标输出精确内容 ABCDE",
+  "目标需求",
+  3,
+  "target-turn",
+);
+assert.equal(result, false);
+assert.equal(events.length, 0);
+assert.equal(timelineOffsets.length, 0);
+
+// Once the reverse timeline materializes the target, locate the user anchor,
+// then the exact output inside that same Req.  The other Req remains untouched.
+events.length = 0;
+timelineOffsets.length = 0;
+timeline.scrollHeight = 1000;
+mountTarget = true;
+root.dataset.activityTaskIndex = "1";
+result = await domain.scrollToActivityRound(
+  "输出：\n目标输出精确内容 ABCDE",
+  "目标需求",
+  3,
+  "target-turn",
+);
+assert.equal(result, true, JSON.stringify({ result, events, timelineOffsets }));
+assert.ok(timelineOffsets.some((value) => value < 0), JSON.stringify(timelineOffsets));
+assert.deepEqual(
+  events.filter((event) => event.kind === "scroll").map((event) => [event.node, event.behavior]),
+  [[targetUser, "auto"], [targetOutput, "smooth"]],
+);
+assert.ok(events.some((event) => event.kind === "animate" && event.node === targetOutput));
+assert.equal(targetOutput.dataset.codexHudLocateRound, "3");
+assert.equal(otherOutput.dataset.codexHudLocateRound, undefined);
+console.log("session-view-activity-scroll-ok");
+})().catch((error) => {
+  console.error(error.stack || error);
+  process.exitCode = 1;
+});
+"""
+    completed = subprocess.run(
+        ["node", "--input-type=commonjs"],
+        input=script,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+    assert "session-view-activity-scroll-ok" in completed.stdout
+
+
 def test_leaf_bundle_keeps_one_iife_and_one_boot_placeholder() -> None:
     script = manifest.RENDERER_HUD_SCRIPT_TEMPLATE
     assert script.lstrip().startswith("(() => {")

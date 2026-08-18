@@ -464,6 +464,7 @@ class TaskHistory:
     last_output: Activity = field(default_factory=Activity)
     slow: SlowSummary = field(default_factory=SlowSummary)
     error: str = ""
+    turn_id: str = ""
 
 
 @dataclass
@@ -534,6 +535,7 @@ class ParsedSession:
     active_work_items: list[WorkStatusItem] = field(default_factory=list)
     estimate_base: BaseEstimate = field(default_factory=BaseEstimate)
     reading_activity: ReadingActivity = field(default_factory=ReadingActivity)
+    task_turn_id: str = ""
 
 
 @dataclass
@@ -890,6 +892,7 @@ class JsonlSessionParser:
 
         task_started_index, task_started_at = self.latest_task_started(records)
         parsed.task_started_at = task_started_at
+        parsed.task_turn_id = self.task_turn_id(records, task_started_index)
         parsed.task_prompt = self.latest_task_prompt(records, task_started_index)
         parsed.task_index, parsed.task_count = self.task_ordinal(
             records,
@@ -1083,6 +1086,19 @@ class JsonlSessionParser:
             }:
                 break
         return ""
+
+    def task_turn_id(
+        self,
+        records: Sequence[Mapping[str, Any]],
+        task_started_index: int | None,
+    ) -> str:
+        """Return the stable Codex turn id for one task-start marker."""
+        if task_started_index is None or not (0 <= task_started_index < len(records)):
+            return ""
+        payload = records[task_started_index].get("payload") or {}
+        if not isinstance(payload, Mapping):
+            return ""
+        return str(payload.get("turn_id") or "").strip()
 
     def task_ordinal(
         self,
@@ -1297,6 +1313,7 @@ class JsonlSessionParser:
                 TaskHistory(
                     index=ordinal,
                     count=count,
+                    turn_id=self.task_turn_id(records, start),
                     prompt=self.task_prompt_in_range(
                         records,
                         segment_start,

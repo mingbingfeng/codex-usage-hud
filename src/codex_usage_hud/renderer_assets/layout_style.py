@@ -2824,11 +2824,33 @@ TEXT = r"""
           #${rootId} .codex-usage-hud-codex-cli-wide {
             grid-column: 1 / -1;
           }
+          #${rootId} .codex-usage-hud-codex-cli-field-head {
+            min-width: 0;
+            display: flex;
+            align-items: baseline;
+            justify-content: flex-start;
+            gap: 8px;
+          }
           #${rootId} .codex-usage-hud-codex-cli-check {
             min-height: 30px;
             display: flex;
             align-items: center;
             gap: 7px;
+          }
+          #${rootId} .codex-usage-hud-codex-cli-check-compact {
+            min-height: 0;
+            flex: 0 0 auto;
+            gap: 5px;
+            line-height: 1;
+            white-space: nowrap;
+          }
+          #${rootId} .codex-usage-hud-codex-cli-field .codex-usage-hud-codex-cli-check-compact input {
+            box-sizing: border-box;
+            width: 13px;
+            min-height: 13px;
+            height: 13px;
+            padding: 0;
+            transform: translateY(1px);
           }
           #${rootId} .codex-usage-hud-codex-cli-check input {
             width: 15px;
@@ -5486,6 +5508,15 @@ TEXT = r"""
           #${rootId} .codex-usage-hud-activity-node[data-active="true"] .codex-usage-hud-activity-node-dot {
             background: var(--codex-usage-hud-accent);
             box-shadow: 0 0 0 3px color-mix(in srgb, var(--codex-usage-hud-accent) 16%, transparent);
+          }
+          #${rootId} .codex-usage-hud-activity-node[data-locate-highlight="true"] {
+            border-radius: 5px;
+            background: color-mix(in srgb, var(--codex-usage-hud-accent) 12%, transparent);
+            box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--codex-usage-hud-accent) 48%, transparent);
+          }
+          #${rootId} .codex-usage-hud-activity-node[data-locate-highlight="true"] .codex-usage-hud-activity-node-dot {
+            background: var(--codex-usage-hud-accent);
+            box-shadow: 0 0 0 4px color-mix(in srgb, var(--codex-usage-hud-accent) 24%, transparent);
           }
           #${rootId} .codex-usage-hud-divider {
             background: var(--codex-usage-hud-divider);

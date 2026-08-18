@@ -420,13 +420,18 @@ TEXT = r"""
           flashCopyState(copyNode, ok);
         });
         if (copyNode.dataset.copyField === "heavy") {
+          const taskIndex = Number(copyNode.dataset.activityTaskIndex || 0);
+          const roundIndex = Number(copyNode.dataset.activityRoundIndex || 0);
           sessionViewDomain.selectActivityTaskIndex(
             root,
-            Number(copyNode.dataset.activityTaskIndex || 0),
+            taskIndex,
           );
-          sessionViewDomain.scrollToActivityRound(
+          sessionViewDomain.locateActivityTrailRound(root, taskIndex, roundIndex);
+          void sessionViewDomain.scrollToActivityRound(
             copyNode.dataset.copyText || "",
             copyNode.dataset.activityTaskPrompt || "",
+            roundIndex,
+            copyNode.dataset.activityTaskTurnId || "",
           );
         }
         return;
@@ -665,12 +670,6 @@ TEXT = r"""
         event.preventDefault();
         event.stopPropagation();
         moveSessionTransferPage(action.dataset.direction === "prev" ? -1 : 1);
-        return;
-      }
-      if (action.dataset.action === "session-transfer-resume") {
-        event.preventDefault();
-        event.stopPropagation();
-        resumeSessionTransferTarget(action);
         return;
       }
       if (action.dataset.action === "session-cleanup-date-toggle") {

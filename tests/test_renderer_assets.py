@@ -157,13 +157,11 @@ def test_provider_settings_expose_session_copy_and_transfer_workflow() -> None:
     assert 'action: "sessionTransfer"' in SETTINGS_SHELL
     assert "sessionTransferState.selectedIds" in SETTINGS_SHELL
     assert "codex-usage-hud-session-transfer-card" in LAYOUT_STYLE
-    assert 'data-action="session-transfer-resume"' in SETTINGS_SHELL
-    assert "function resumeSessionTransferTarget" in SETTINGS_SHELL
-    assert "      submitSessionTransfer,\n      resumeSessionTransferTarget," in SETTINGS_SHELL
-    assert "    submitSessionTransfer,\n    resumeSessionTransferTarget," in SETTINGS_SHELL
+    assert 'data-action="session-transfer-resume"' not in SETTINGS_SHELL
+    assert "function resumeSessionTransferTarget" not in SETTINGS_SHELL
     assert "targetVisible" in SETTINGS_SHELL
     assert "targetResumable" in SETTINGS_SHELL
-    assert "在新终端使用目标 Provider 继续此会话" in SETTINGS_SHELL
+    assert "勾选“来自迁移”可选择对应工作目录" in SETTINGS_SHELL
     assert "refreshCodexDesktopSessionList" not in SETTINGS_SHELL
     assert "restartCodexDesktop" not in SETTINGS_SHELL
     assert "const sessionTransferPageSize = 50" in SETTINGS_SHELL
@@ -194,13 +192,13 @@ def test_session_transfer_reuses_session_management_scan_state_and_controls() ->
     assert 'rootScope.listen(document, "click"' in script
     assert 'rootScope.listen(document, "change"' in script
     assert "sessionTransferState.mode = sessionTransferModeValue(sessionTransferMode);" in script
-    assert 'action.dataset.action === "session-transfer-resume"' in script
+    assert 'action.dataset.action === "session-transfer-resume"' not in script
     assert "for (const id of sessionTransferSelectableIds())" in script
     assert "function sessionTransferModeValue" in script
     assert 'const sessionTransferMode = event.target?.closest?.(\'[data-session-transfer-mode]\');' in script
     assert "Radio input events fire as soon as the native selection changes." in script
     assert "if (sessionTransferState.open) applySessionTransferPayload(payload);" in script
-    assert "sessionTransferResumeId" in SETTINGS_SHELL
+    assert "sessionTransferResumeId" not in SETTINGS_SHELL
     assert "function scheduleSessionCleanupScanWatchdog(requestId)" in script
     assert 'const bindingAvailable = !!ctx.bindings?.available?.(settingsCommandBindingName);' in SETTINGS_SHELL
     assert "sessionCleanupScanWatchdogTimer" in script
@@ -234,6 +232,20 @@ def test_codex_cli_dialog_is_compact_and_persists_profile_scoped_launches() -> N
     assert 'launch.disabled = !codexCliTerminal().id;' in SETTINGS_SHELL
     assert "请先选择工作目录后再启动 Codex CLI" in SETTINGS_SHELL
     assert 'data-codex-cli-field="resume"' in form
+    assert 'data-codex-cli-field="migratedWorkdirs"' in form
+    assert "来自迁移" in form
+    assert "codex-usage-hud-codex-cli-field-head" in form
+    assert "codex-usage-hud-codex-cli-check-compact" in form
+    assert "justify-content: flex-start;" in LAYOUT_STYLE
+    assert "align-items: baseline;" in LAYOUT_STYLE
+    assert ".codex-usage-hud-codex-cli-field .codex-usage-hud-codex-cli-check-compact input" in LAYOUT_STYLE
+    assert "function codexCliNormaliseWorkdirPath(" in SETTINGS_SHELL
+    assert 'const longPathPrefix = "\\\\\\\\?\\\\";' in SETTINGS_SHELL
+    assert "codexCliPersistTransferWorkdirs(operation);" in SETTINGS_SHELL
+    assert "function codexCliTransferWorkdirStorageKey(" in SETTINGS_SHELL
+    assert 'return provider ? `provider:${provider}` : "";' in SETTINGS_SHELL
+    assert "function codexCliTransferWorkdirs()" in SETTINGS_SHELL
+    assert "const seen = new Set();" in SETTINGS_SHELL
     assert form.index('data-codex-cli-field="resume"') < form.index("启动终端")
     assert "codex-usage-hud-codex-cli-check codex-usage-hud-codex-cli-wide" not in form
     assert "codexCliPersistLaunchState(pendingLaunchState);" in SETTINGS_SHELL

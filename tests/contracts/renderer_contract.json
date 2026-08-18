@@ -6,8 +6,8 @@
   },
   "currentBundle": {
     "phase": "P6.7",
-    "sha256": "b54d0bc70779caccbad61bf70430c49c566d874181760b881d0a7aed1f3007f4",
-    "byteLength": 973588
+    "sha256": "69ee0f4afd2bcfeaff4f788a830cdd0cf3495adee062814599f07108b4b1b1b0",
+    "byteLength": 1005056
   },
   "sha256": "f83d65265c55143fa775f509f09ce109c2aa75a03946b42cf462cb6cbd4ea637",
   "byteLength": 548705,
@@ -28,6 +28,7 @@
   "multiplexedSettingsActions": ["backgroundUsage", "sessionCleanup", "audit"],
   "storageKeys": [
     "codexUsageHudCodexCliLaunches:v1",
+    "codexUsageHudCodexCliTransferWorkdirs:v1",
     "codexUsageHudPanelState:v5",
     "codexUsageHudSessionCleanupFilters:v1",
     "codexUsageHudSettingsUiState:v1",
@@ -38,12 +39,12 @@
     "backgroundUsage", "diagnostics", "usageInsights", "sessionCleanup"
   ],
   "lifecycleCounts": {
-    "mutationObservers": 7,
+    "mutationObservers": 8,
     "resizeObservers": 1,
     "setIntervals": 4,
-    "setTimeouts": 28,
+    "setTimeouts": 32,
     "kernelSetIntervals": 1,
-    "kernelSetTimeouts": 2
+    "kernelSetTimeouts": 1
   },
   "lifecycleInventory": [
     {
@@ -122,6 +123,7 @@
     {"kind": "MutationObserver", "owner": "active_session", "creation": "ctx.observers.set(\"active_session\", new MutationObserver", "startCondition": "selected-session anchor is available", "cleanup": "ctx.observers.clear(\"active_session\")"},
     {"kind": "MutationObserver", "owner": "active_session_bootstrap", "creation": "ctx.observers.set(\"active_session_bootstrap\", new MutationObserver", "startCondition": "selected-session anchor is not yet available", "cleanup": "ctx.observers.clear(\"active_session_bootstrap\")"},
     {"kind": "MutationObserver", "owner": "composer_attachments", "creation": "ctx.observers.set(\"composer_attachments\", new MutationObserver", "startCondition": "composer attachment reporting is installed", "cleanup": "ctx.observers.clear(\"composer_attachments\")"},
+    {"kind": "MutationObserver", "owner": "activity_request_materialization", "creation": "observer = new MutationObserver(check)", "startCondition": "a Top3 target is not currently materialized", "cleanup": "observer.disconnect()"},
     {"kind": "MutationObserver", "owner": "layout", "creation": "ctx.observers.set(\"layout\", new MutationObserver", "startCondition": "header or composer layout anchor is available", "cleanup": "ctx.observers.clear(\"layout\")"},
     {"kind": "MutationObserver", "owner": "layout_bootstrap", "creation": "ctx.observers.set(\"layout_bootstrap\", new MutationObserver", "startCondition": "layout anchors are not both available", "cleanup": "ctx.observers.clear(\"layout_bootstrap\")"},
     {"kind": "ResizeObserver", "owner": "layout", "creation": "ctx.observers.set(\"layout_resize\", new ResizeObserver", "startCondition": "ResizeObserver exists and a layout anchor is available", "cleanup": "ctx.observers.clear(\"layout_resize\")"},
@@ -136,7 +138,10 @@
     "background_usage_policy",
     "settings_restart", "settings_export", "composer_attachments", "layout_report",
     "layout_settle", "layout_settle", "layout_settle", "composer_layout", "layout_bootstrap",
-    "session_view_progress", "copy_feedback", "stale_guard", "codex_cli_launch_timeout",
+    "session_view_progress", "copy_feedback", "activity_trail_locate", "activity_virtualization_frame",
+    "activity_request_materialization",
+    "conversation_locate_pulse",
+    "stale_guard", "codex_cli_launch_timeout",
     "codex_cli_launch_min_visible", "session_cleanup_scan_watchdog",
     "session_transfer_selection", "session_transfer_select_all", "session_transfer_selection"
   ],

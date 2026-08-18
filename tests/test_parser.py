@@ -555,13 +555,25 @@ class JsonlSessionParserTests(unittest.TestCase):
         parser = JsonlSessionParser()
         records = [
             record("2026-05-28T00:00:00Z", "turn_context", {"model": "gpt-5.5"}),
-            record("2026-05-28T00:00:01Z", "event_msg", {"type": "task_started"}),
+            record(
+                "2026-05-28T00:00:01Z",
+                "event_msg",
+                {"type": "task_started", "turn_id": "turn-1"},
+            ),
             token_count("2026-05-28T00:00:02Z", 20, 5, 6, 1, 26, 26),
             record("2026-05-28T00:00:03Z", "event_msg", {"type": "task_complete"}),
-            record("2026-05-28T00:00:04Z", "event_msg", {"type": "task_started"}),
+            record(
+                "2026-05-28T00:00:04Z",
+                "event_msg",
+                {"type": "task_started", "turn_id": "turn-2"},
+            ),
             token_count("2026-05-28T00:00:05Z", 30, 7, 9, 2, 39, 65),
             record("2026-05-28T00:00:06Z", "event_msg", {"type": "task_complete"}),
-            record("2026-05-28T00:00:07Z", "event_msg", {"type": "task_started"}),
+            record(
+                "2026-05-28T00:00:07Z",
+                "event_msg",
+                {"type": "task_started", "turn_id": "turn-3"},
+            ),
         ]
         for index, item in enumerate(records, 1):
             item["_line"] = index
@@ -575,6 +587,11 @@ class JsonlSessionParserTests(unittest.TestCase):
         self.assertEqual(len(snapshot.activity_tasks), 3)
         self.assertEqual([item.index for item in snapshot.activity_tasks], [1, 2, 3])
         self.assertEqual([item.count for item in snapshot.activity_tasks], [3, 3, 3])
+        self.assertEqual(
+            [item.turn_id for item in snapshot.activity_tasks],
+            ["turn-1", "turn-2", "turn-3"],
+        )
+        self.assertEqual(snapshot.task_turn_id, "turn-3")
         self.assertEqual(
             [len(item.request_history) for item in snapshot.activity_tasks],
             [1, 1, 1],
