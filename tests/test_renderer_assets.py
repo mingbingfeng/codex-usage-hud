@@ -9,6 +9,7 @@ from codex_usage_hud.renderer_assets.layout_gestures import TEXT as LAYOUT_GESTU
 from codex_usage_hud.renderer_assets.layout_markup import TEXT as LAYOUT_MARKUP
 from codex_usage_hud.renderer_assets.layout_observers import TEXT as LAYOUT_OBSERVERS
 from codex_usage_hud.renderer_assets.layout_style import TEXT as LAYOUT_STYLE
+from codex_usage_hud.renderer_assets.router import TEXT as ROUTER
 from codex_usage_hud.renderer_assets.settings_shell import TEXT as SETTINGS_SHELL
 from codex_usage_hud.renderer_assets.settings_support_panels import (
     TEXT as SETTINGS_SUPPORT_PANELS,
@@ -253,6 +254,46 @@ def test_codex_cli_dialog_is_compact_and_persists_profile_scoped_launches() -> N
     assert "codexCliState.launchRequestId" in launch
     assert "codex-usage-hud-codex-cli-proxy {" in LAYOUT_STYLE
     assert "width: 76px;" in LAYOUT_STYLE
+
+
+def test_codex_cli_models_are_loaded_on_dropdown_interaction_without_extra_status_row() -> None:
+    open_start = SETTINGS_SHELL.index("function openCodexCliDialog(provider = \"\")")
+    open_end = SETTINGS_SHELL.index("function openCodexCliQuickLaunch", open_start)
+    open_dialog = SETTINGS_SHELL[open_start:open_end]
+    refresh_start = SETTINGS_SHELL.index("function refreshCodexCliDialog()")
+    refresh_end = SETTINGS_SHELL.index("function codexCliCopyCommand()", refresh_start)
+    refresh_dialog = SETTINGS_SHELL[refresh_start:refresh_end]
+    chat_state_start = SETTINGS_SHELL.index("function codexCliChatTestState()")
+    chat_state_end = SETTINGS_SHELL.index("function reopenCodexCliModelPicker(select)", chat_state_start)
+    chat_state = SETTINGS_SHELL[chat_state_start:chat_state_end]
+    status_start = SETTINGS_SHELL.index('if (action === "codexCliFetchModels"')
+    status_end = SETTINGS_SHELL.index('if (action === "codexCliChatTest"', status_start)
+    model_status = SETTINGS_SHELL[status_start:status_end]
+
+    assert "requestCodexCliModels();" not in open_dialog
+    assert "requestCodexCliModels();" not in refresh_dialog
+    assert 'rootScope.listen(root, "pointerdown"' in ROUTER
+    assert 'data-codex-cli-field="model"' in ROUTER
+    assert '["Enter", " ", "ArrowDown", "F4"]' in ROUTER
+    assert "requestCodexCliModels({ reopenPicker: true });" in ROUTER
+    assert 'action.dataset.action === "codex-cli-model-refresh"' in ROUTER
+    assert "requestCodexCliModels({ force: true });" in ROUTER
+    assert 'data-codex-cli-model-note="true"' in SETTINGS_SHELL
+    assert 'data-action="codex-cli-model-refresh"' in SETTINGS_SHELL
+    assert "点击模型下拉框获取当前 Provider 的模型列表。" in SETTINGS_SHELL
+    assert 'class="codex-usage-hud-codex-cli-model-note"' not in SETTINGS_SHELL
+    assert "function reopenCodexCliModelPicker(select)" in SETTINGS_SHELL
+    assert 'select.matches(":open")' in SETTINGS_SHELL
+    assert "select.showPicker();" in SETTINGS_SHELL
+    assert "renderCodexCliDialog();" not in model_status
+    assert "syncCodexCliModelDiscoveryState({ syncOptions: true, reopenPicker });" in model_status
+    assert "codexCliState.models = [];" not in model_status
+    assert 'if (count) return "hidden";' not in chat_state
+    assert "codex-usage-hud-codex-cli-model-control" in LAYOUT_STYLE
+    assert "grid-template-columns: minmax(0, 1fr) 30px;" in LAYOUT_STYLE
+    assert "text-overflow: ellipsis;" in LAYOUT_STYLE
+    assert "white-space: nowrap;" in LAYOUT_STYLE
+    assert "调整上方选项会重新生成命令" not in SETTINGS_SHELL
 
 
 def test_codex_cli_quick_launch_menu_is_idempotent_and_provider_scoped() -> None:

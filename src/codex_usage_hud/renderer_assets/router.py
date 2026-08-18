@@ -137,6 +137,11 @@ TEXT = r"""
     rootScope.listen(window, "resize", () => {
       syncSettingsProviderTabNavigation();
     }, { passive: true });
+    rootScope.listen(root, "pointerdown", (event) => {
+      const modelSelect = event.target?.closest?.('[data-codex-cli-field="model"]');
+      if (!modelSelect || !root.contains(modelSelect)) return;
+      requestCodexCliModels({ reopenPicker: true });
+    });
     const sessionTransferModeInputFromEvent = (event) => {
       const direct = event.target?.closest?.('[data-session-transfer-mode]');
       if (direct) return direct;
@@ -380,6 +385,10 @@ TEXT = r"""
           return;
         }
       }
+      const modelSelect = event.target?.closest?.('[data-codex-cli-field="model"]');
+      if (modelSelect && root.contains(modelSelect) && ["Enter", " ", "ArrowDown", "F4"].includes(event.key)) {
+        requestCodexCliModels({ reopenPicker: true });
+      }
       const workdirButton = event.target?.closest?.('[data-action="usage-insights-open-workdir"]');
       if (workdirButton && root.contains(workdirButton) && (event.key === "Enter" || event.key === " ")) {
         return;
@@ -510,6 +519,12 @@ TEXT = r"""
         event.preventDefault();
         event.stopPropagation();
         refreshCodexCliDialog();
+        return;
+      }
+      if (action.dataset.action === "codex-cli-model-refresh") {
+        event.preventDefault();
+        event.stopPropagation();
+        requestCodexCliModels({ force: true });
         return;
       }
       if (action.dataset.action === "codex-cli-copy") {

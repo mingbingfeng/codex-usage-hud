@@ -25,6 +25,9 @@ _TEXT_PREFIX = r"""
         requestId: "",
         models: [],
         modelsFetching: false,
+        modelsFetched: false,
+        modelsRequestId: "",
+        reopenModelPickerAfterFetch: false,
         modelsError: "",
         chatTestOk: false,
         options: null,
@@ -493,7 +496,9 @@ _TEXT_PREFIX = r"""
             options.push(`<option value="${escapeHtml(value)}" ${value === current ? "selected" : ""}>${escapeHtml(value)}</option>`);
           });
         } else if (codexCliState.modelsFetching) {
-          options.push('<option value="" disabled>正在获取模型列表…</option>');
+          options.push('<option value="" disabled data-codex-cli-model-placeholder="true">正在获取模型列表…</option>');
+        } else {
+          options.push('<option value="" disabled data-codex-cli-model-placeholder="true">点击获取模型列表…</option>');
         }
         if (current && !hasCurrent) {
           options.push(`<option value="${escapeHtml(current)}" selected>${escapeHtml(current)}（自定义）</option>`);
@@ -503,9 +508,11 @@ _TEXT_PREFIX = r"""
 
       function codexCliModelNote() {
         if (codexCliState.modelsFetching) return "正在获取当前 Provider 的模型列表…";
+        if (codexCliState.modelsError) return "模型列表获取失败，点击下拉框或刷新按钮重试。";
         const count = Array.isArray(codexCliState.models) ? codexCliState.models.length : 0;
         if (count) return `已从当前 Provider 获取 ${count} 个模型。`;
-        return "";
+        if (codexCliState.modelsFetched) return "当前 Provider 未返回可用模型，可再次点击下拉框重试。";
+        return "点击模型下拉框获取当前 Provider 的模型列表。";
       }
 
       function codexCliChatTestSummarySuffix() {
@@ -517,9 +524,58 @@ _TEXT_PREFIX = r"""
       function codexCliChatTestState() {
         if (codexCliState.chatTestOk) return "hidden";
         if (codexCliState.modelsError) return "open";
-        const count = Array.isArray(codexCliState.models) ? codexCliState.models.length : 0;
-        if (count) return "hidden";
         return "";
+      }
+
+      function reopenCodexCliModelPicker(select) {
+        if (!select || document.activeElement !== select) return false;
+        try {
+          if (select.matches(":open")) return true;
+        } catch (_) {}
+        try {
+          if (typeof select.showPicker !== "function") return false;
+          select.showPicker();
+          return true;
+        } catch (_) {
+          return false;
+        }
+      }
+
+      function syncCodexCliModelDiscoveryState({ syncOptions = false, reopenPicker = false } = {}) {
+        const layer = codexCliDialogLayer();
+        if (!layer) return;
+        const select = layer.querySelector('[data-codex-cli-field="model"]');
+        if (select && syncOptions) {
+          select.innerHTML = codexCliModelOptions();
+          const current = String(codexCliState.model || "").trim();
+          if ([...select.options].some((option) => option.value === current)) {
+            select.value = current;
+          }
+        }
+        const note = layer.querySelector('[data-codex-cli-model-note="true"]');
+        if (note) note.textContent = codexCliModelNote();
+        const error = layer.querySelector('[data-codex-cli-model-error="true"]');
+        if (error) {
+          const message = String(codexCliState.modelsError || "").trim();
+          error.textContent = message ? `（${message}）` : "";
+        }
+        const placeholder = layer.querySelector('[data-codex-cli-model-placeholder="true"]');
+        if (placeholder) {
+          placeholder.textContent = codexCliState.modelsFetching
+            ? "正在获取模型列表…"
+            : "点击获取模型列表…";
+        }
+        const refresh = layer.querySelector('[data-action="codex-cli-model-refresh"]');
+        if (refresh) {
+          refresh.disabled = codexCliState.modelsFetching;
+          refresh.dataset.loading = String(codexCliState.modelsFetching);
+        }
+        const chatTest = layer.querySelector('[data-codex-cli-chat-test="true"]');
+        if (chatTest) {
+          chatTest.hidden = codexCliState.chatTestOk;
+          if (codexCliState.modelsError) chatTest.open = true;
+        }
+        if (select && reopenPicker) reopenCodexCliModelPicker(select);
       }
 
       function codexCliFormHtml() {
@@ -576,11 +632,13 @@ _TEXT_PREFIX = r"""
               <span>Agent 访问权限</span>
               <select data-codex-cli-field="permission">${permissionOptions}</select>
             </label>
-            <label class="codex-usage-hud-codex-cli-field" title="启动参数覆盖为 -c model=；留空则用 profile 或默认模型">
-              <span>模型（可选）</span>
-              <select data-codex-cli-field="model">${codexCliModelOptions()}</select>
-              <div class="codex-usage-hud-codex-cli-model-note" data-codex-cli-model-note="true">${codexCliModelNote()}</div>
-            </label>
+            <div class="codex-usage-hud-codex-cli-field" title="启动参数覆盖为 -c model=；留空则用 profile 或默认模型">
+              <span id="codex-usage-hud-codex-cli-model-label">模型（可选）</span>
+              <div class="codex-usage-hud-codex-cli-model-control">
+                <select data-codex-cli-field="model" aria-labelledby="codex-usage-hud-codex-cli-model-label" aria-describedby="codex-usage-hud-codex-cli-model-help">${codexCliModelOptions()}</select>
+                <button type="button" class="codex-usage-hud-settings-icon-action codex-usage-hud-codex-cli-model-refresh" data-action="codex-cli-model-refresh" aria-label="重新获取当前 Provider 的模型列表" title="重新获取模型列表" ${codexCliState.modelsFetching ? "disabled" : ""}><span aria-hidden="true">↻</span></button>
+              </div>
+            </div>
             <label class="codex-usage-hud-codex-cli-field">
               <span>工作目录</span>
               <select data-codex-cli-field="workdirSelect">
@@ -591,7 +649,7 @@ _TEXT_PREFIX = r"""
               <input data-codex-cli-field="workdirInput" value="${escapeHtml(codexCliState.workdir)}" placeholder="输入目录绝对路径" aria-label="工作目录路径">
             </label>
             <details class="codex-usage-hud-codex-cli-chat-test codex-usage-hud-codex-cli-wide" data-codex-cli-chat-test="true" ${chatTestState === "open" ? "open" : ""} ${chatTestState === "hidden" ? "hidden" : ""}>
-              <summary>没有模型列表？改用自定义模型名发送简短聊天测试${codexCliChatTestSummarySuffix()}</summary>
+              <summary id="codex-usage-hud-codex-cli-model-help"><span data-codex-cli-model-note="true">${codexCliModelNote()}</span> · 没有模型列表？改用自定义模型名发送简短聊天测试<span data-codex-cli-model-error="true">${codexCliChatTestSummarySuffix()}</span></summary>
               <div class="codex-usage-hud-codex-cli-chat-test-body">
                 <label>
                   <span>自定义模型名称</span>
@@ -602,7 +660,6 @@ _TEXT_PREFIX = r"""
               </div>
             </details>
           </div>
-          <div class="codex-usage-hud-codex-cli-meta">调整上方选项会重新生成命令；直接编辑命令后，选项会尽量同步。</div>
           ${powershellNotice}
           ${options.codex?.available === false ? '<div class="codex-usage-hud-codex-cli-notice" data-tone="warning">当前 PATH 中未检测到 codex 命令，但仍可先编辑并启动命令。</div>' : ""}
           <div class="codex-usage-hud-codex-cli-command-head">
@@ -651,19 +708,33 @@ _TEXT_PREFIX = r"""
         );
       }
 
-      function requestCodexCliModels() {
-        if (!codexCliState.open || !codexCliState.provider) return;
+      function requestCodexCliModels({ force = false, reopenPicker = false } = {}) {
+        const count = Array.isArray(codexCliState.models) ? codexCliState.models.length : 0;
+        if (!codexCliState.open || !codexCliState.provider || codexCliState.modelsFetching || (!force && count)) return false;
+        const requestId = typedSettingsRequestId("codex-cli-models");
         codexCliState.modelsFetching = true;
+        codexCliState.modelsFetched = false;
+        codexCliState.modelsRequestId = requestId;
+        codexCliState.reopenModelPickerAfterFetch = reopenPicker;
         codexCliState.modelsError = "";
-        submitSettingsCommand(
+        syncCodexCliModelDiscoveryState();
+        const submitted = submitSettingsCommand(
           {
             action: "codexCliFetchModels",
             provider: codexCliState.provider,
-            requestId: typedSettingsRequestId("codex-cli-models"),
+            requestId,
           },
           "正在获取模型列表...",
           { preserveOverlay: true },
         );
+        if (!submitted) {
+          codexCliState.modelsFetching = false;
+          codexCliState.modelsRequestId = "";
+          codexCliState.reopenModelPickerAfterFetch = false;
+          codexCliState.modelsError = "模型列表获取请求未能提交。";
+          syncCodexCliModelDiscoveryState();
+        }
+        return submitted;
       }
 
       function openCodexCliDialog(provider = "") {
@@ -676,6 +747,9 @@ _TEXT_PREFIX = r"""
         codexCliState.options = null;
         codexCliState.models = [];
         codexCliState.modelsFetching = false;
+        codexCliState.modelsFetched = false;
+        codexCliState.modelsRequestId = "";
+        codexCliState.reopenModelPickerAfterFetch = false;
         codexCliState.modelsError = "";
         codexCliState.chatTestOk = false;
         codexCliState.commandEdited = false;
@@ -692,7 +766,6 @@ _TEXT_PREFIX = r"""
         dialog.appendChild(layer);
         renderCodexCliDialog();
         requestCodexCliDiscovery();
-        requestCodexCliModels();
         return true;
       }
 
@@ -714,6 +787,9 @@ _TEXT_PREFIX = r"""
         codexCliState.requestId = "";
         codexCliState.models = [];
         codexCliState.modelsFetching = false;
+        codexCliState.modelsFetched = false;
+        codexCliState.modelsRequestId = "";
+        codexCliState.reopenModelPickerAfterFetch = false;
         codexCliState.modelsError = "";
         codexCliState.chatTestOk = false;
         codexCliState.options = null;
@@ -747,6 +823,9 @@ _TEXT_PREFIX = r"""
         codexCliState.options = null;
         codexCliState.models = [];
         codexCliState.modelsFetching = false;
+        codexCliState.modelsFetched = false;
+        codexCliState.modelsRequestId = "";
+        codexCliState.reopenModelPickerAfterFetch = false;
         codexCliState.modelsError = "";
         codexCliState.chatTestOk = false;
         codexCliState.commandEdited = false;
@@ -835,11 +914,13 @@ _TEXT_PREFIX = r"""
         codexCliState.options = null;
         codexCliState.models = [];
         codexCliState.modelsFetching = false;
+        codexCliState.modelsFetched = false;
+        codexCliState.modelsRequestId = "";
+        codexCliState.reopenModelPickerAfterFetch = false;
         codexCliState.modelsError = "";
         codexCliState.chatTestOk = false;
         renderCodexCliDialog();
         requestCodexCliDiscovery();
-        requestCodexCliModels();
       }
 
       function codexCliCopyCommand() {
@@ -1041,18 +1122,25 @@ _TEXT_PREFIX = r"""
           return;
         }
         if (action === "codexCliFetchModels" && codexCliState.open && !codexCliIsQuickLaunch()) {
+          const expected = String(codexCliState.modelsRequestId || "");
+          const received = String(status.requestId || "");
+          if (!expected || !received || expected !== received) return;
+          const reopenPicker = codexCliState.reopenModelPickerAfterFetch;
           codexCliState.modelsFetching = false;
+          codexCliState.modelsRequestId = "";
+          codexCliState.reopenModelPickerAfterFetch = false;
           const payload = status.codexCliModels;
           if (String(status.kind || "") === "error" || !payload) {
+            codexCliState.modelsFetched = false;
             codexCliState.modelsError = status?.message || "模型列表获取失败。";
-            codexCliState.models = [];
           } else {
+            codexCliState.modelsFetched = true;
             codexCliState.modelsError = "";
             codexCliState.models = Array.isArray(payload.models)
               ? payload.models.filter(Boolean).map(String)
               : [];
           }
-          renderCodexCliDialog();
+          syncCodexCliModelDiscoveryState({ syncOptions: true, reopenPicker });
           return;
         }
         if (action === "codexCliChatTest" && codexCliState.open && !codexCliIsQuickLaunch()) {
@@ -5406,6 +5494,7 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
       openCodexCliDialog,
       closeCodexCliDialog,
       refreshCodexCliDialog,
+      requestCodexCliModels,
       codexCliCopyCommand,
       codexCliFieldInput,
       codexCliFieldChange,
@@ -5542,6 +5631,7 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
     openCodexCliDialog,
     closeCodexCliDialog,
     refreshCodexCliDialog,
+    requestCodexCliModels,
     codexCliCopyCommand,
     codexCliFieldInput,
     codexCliFieldChange,

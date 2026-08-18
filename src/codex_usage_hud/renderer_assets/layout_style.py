@@ -2766,7 +2766,6 @@ TEXT = r"""
             letter-spacing: .14em;
           }
           #${rootId} .codex-usage-hud-codex-cli-loading,
-          #${rootId} .codex-usage-hud-codex-cli-meta,
           #${rootId} .codex-usage-hud-codex-cli-notice,
           #${rootId} .codex-usage-hud-codex-cli-danger {
             color: var(--codex-usage-hud-muted, #a9bcd2);
@@ -2854,6 +2853,22 @@ TEXT = r"""
             min-height: 30px;
             padding: 5px 7px;
           }
+          #${rootId} .codex-usage-hud-codex-cli-model-control {
+            min-width: 0;
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) 30px;
+            gap: 6px;
+            align-items: center;
+          }
+          #${rootId} .codex-usage-hud-codex-cli-model-refresh {
+            width: 30px;
+            height: 30px;
+            border-color: var(--codex-usage-hud-divider, #273241);
+          }
+          #${rootId} .codex-usage-hud-codex-cli-model-refresh:disabled {
+            opacity: .45;
+            cursor: wait;
+          }
           #${rootId} .codex-usage-hud-codex-cli-field input:focus,
           #${rootId} .codex-usage-hud-codex-cli-field select:focus,
           #${rootId} .codex-usage-hud-codex-cli-command:focus {
@@ -2895,12 +2910,6 @@ TEXT = r"""
             color: var(--codex-usage-hud-muted, #8492a6);
             font-size: 10px;
           }
-          #${rootId} .codex-usage-hud-codex-cli-model-note {
-            margin-top: 4px;
-            color: var(--codex-usage-hud-muted, #8492a6);
-            font-size: 10px;
-            line-height: 1.4;
-          }
           #${rootId} .codex-usage-hud-codex-cli-chat-test {
             min-width: 0;
             margin: 0;
@@ -2910,11 +2919,15 @@ TEXT = r"""
             line-height: 1.4;
           }
           #${rootId} .codex-usage-hud-codex-cli-chat-test > summary {
-            width: fit-content;
+            box-sizing: border-box;
+            width: 100%;
+            overflow: hidden;
             cursor: pointer;
             color: inherit;
             font-weight: 700;
             list-style-position: inside;
+            text-overflow: ellipsis;
+            white-space: nowrap;
           }
           #${rootId} .codex-usage-hud-codex-cli-chat-test > summary:hover,
           #${rootId} .codex-usage-hud-codex-cli-chat-test > summary:focus-visible {
