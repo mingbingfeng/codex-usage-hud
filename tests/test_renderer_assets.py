@@ -156,15 +156,19 @@ def test_provider_settings_expose_session_copy_and_transfer_workflow() -> None:
     assert 'action: "sessionTransfer"' in SETTINGS_SHELL
     assert "sessionTransferState.selectedIds" in SETTINGS_SHELL
     assert "codex-usage-hud-session-transfer-card" in LAYOUT_STYLE
-    assert 'data-action="session-transfer-refresh-desktop"' in SETTINGS_SHELL
-    assert "function refreshCodexDesktopSessionList" in SETTINGS_SHELL
-    assert "window.location.reload()" in SETTINGS_SHELL
+    assert 'data-action="session-transfer-resume"' in SETTINGS_SHELL
+    assert "function resumeSessionTransferTarget" in SETTINGS_SHELL
+    assert "      submitSessionTransfer,\n      resumeSessionTransferTarget," in SETTINGS_SHELL
+    assert "    submitSessionTransfer,\n    resumeSessionTransferTarget," in SETTINGS_SHELL
+    assert "targetVisible" in SETTINGS_SHELL
+    assert "targetResumable" in SETTINGS_SHELL
+    assert "在新终端使用目标 Provider 继续此会话" in SETTINGS_SHELL
+    assert "refreshCodexDesktopSessionList" not in SETTINGS_SHELL
+    assert "restartCodexDesktop" not in SETTINGS_SHELL
     assert "const sessionTransferPageSize = 50" in SETTINGS_SHELL
     assert 'data-action="session-transfer-page"' in SETTINGS_SHELL
     assert "function moveSessionTransferPage" in SETTINGS_SHELL
-    assert 'data-action="session-transfer-restart-codex"' in SETTINGS_SHELL
-    assert "Codex Desktop 不会实时更新对应工作目录" in SETTINGS_SHELL
-    assert "function restartCodexDesktop" in SETTINGS_SHELL
+    assert "目标 Provider 的会话列表确认落盘" in SETTINGS_SHELL
     assert 'parts.push("Codex App · 必选")' not in SETTINGS_SHELL
 
 
@@ -189,13 +193,13 @@ def test_session_transfer_reuses_session_management_scan_state_and_controls() ->
     assert 'rootScope.listen(document, "click"' in script
     assert 'rootScope.listen(document, "change"' in script
     assert "sessionTransferState.mode = sessionTransferModeValue(sessionTransferMode);" in script
-    assert 'action.dataset.action === "session-transfer-restart-codex"' in script
+    assert 'action.dataset.action === "session-transfer-resume"' in script
     assert "for (const id of sessionTransferSelectableIds())" in script
     assert "function sessionTransferModeValue" in script
     assert 'const sessionTransferMode = event.target?.closest?.(\'[data-session-transfer-mode]\');' in script
     assert "Radio input events fire as soon as the native selection changes." in script
     assert "if (sessionTransferState.open) applySessionTransferPayload(payload);" in script
-    assert 'action.dataset.action === "session-transfer-refresh-desktop"' in script
+    assert "sessionTransferResumeId" in SETTINGS_SHELL
     assert "function scheduleSessionCleanupScanWatchdog(requestId)" in script
     assert 'const bindingAvailable = !!ctx.bindings?.available?.(settingsCommandBindingName);' in SETTINGS_SHELL
     assert "sessionCleanupScanWatchdogTimer" in script

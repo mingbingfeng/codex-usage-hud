@@ -3306,31 +3306,38 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
         }
         const mode = String(operation?.mode || "copy").toLowerCase() === "migrate" ? "迁移" : "复制";
         const copied = Math.max(0, Number(operation?.copiedCount || 0));
+        const targetReady = Math.max(0, Number(operation?.targetReadyCount ?? copied));
         const migrated = Math.max(0, Number(operation?.migratedCount || 0));
-        const failed = Math.max(0, Number(operation?.failedCount || 0));
+        const targetFailed = Math.max(0, Number(operation?.targetFailedCount ?? operation?.failedCount ?? 0));
+        const retained = mode === "迁移"
+          ? Math.max(0, Number(operation?.sourceRetainedCount || 0))
+          : 0;
         const headline = state === "completed"
-          ? `${mode}完成：${mode === "迁移" ? migrated : copied} 个会话已处理`
+          ? `${mode}完成：${mode === "迁移" ? migrated : targetReady} 个会话已处理`
           : `${mode}${state === "partial" ? "部分完成" : "失败"}`;
         const details = mode === "迁移"
-          ? `已复制 ${copied} · 已删除源会话 ${migrated} · 失败 ${failed}`
-          : `已复制 ${copied} · 失败 ${failed}`;
+          ? `目标可见可续聊 ${targetReady} · 源已删除 ${migrated} · 源保留 ${retained} · 目标未就绪 ${targetFailed}`
+          : `目标可见可续聊 ${targetReady} · 目标未就绪 ${targetFailed}`;
         const operationError = String(operation?.error || "").trim();
         const targetProvider = String(operation?.targetProvider || "").trim().toLowerCase();
-        const appProvider = String(hudSettingsFromPayload()?.app_provider || "").trim().toLowerCase();
-        const hasTargetSession = Array.isArray(operation?.results)
-          && operation.results.some((item) => String(item?.targetSessionId || "").trim());
-        const isCodexDesktopTarget = state !== "failed"
-          && !!targetProvider
-          && targetProvider === appProvider
-          && hasTargetSession;
-        const targetNotice = isCodexDesktopTarget
-          ? '<span class="codex-usage-hud-session-transfer-target-notice">Codex Desktop 不会实时更新对应工作目录的会话列表。可刷新列表，或立即重启 Codex Desktop 使会话显示。</span>'
+        const readyResults = (Array.isArray(operation?.results) ? operation.results : [])
+          .filter((item) => item?.targetVisible === true && item?.targetResumable === true)
+          .filter((item) => String(item?.targetSessionId || "").trim());
+        const resumeState = String(sessionTransferState.resumeState || "").toLowerCase();
+        const resumeRequestId = String(sessionTransferState.resumeRequestId || "").trim();
+        const targetNotice = readyResults.length
+          ? '<span class="codex-usage-hud-session-transfer-target-notice">已按目标 Provider 的会话列表确认落盘，并通过续聊校验。可在新终端直接打开指定会话继续聊天。</span>'
           : "";
-        const refreshAction = isCodexDesktopTarget
-          ? '<button type="button" class="codex-usage-hud-settings-action" data-action="session-transfer-refresh-desktop">刷新 Codex 会话列表</button>'
-          : "";
-        const restartAction = isCodexDesktopTarget
-          ? '<button type="button" class="codex-usage-hud-settings-action" data-action="session-transfer-restart-codex" data-primary="true">立即重启 Codex Desktop</button>'
+        const resumeActions = readyResults.map((item) => {
+          const targetId = String(item?.targetSessionId || "").trim();
+          const busy = !!resumeRequestId && String(sessionTransferState.resumeSessionId || "") === targetId;
+          const label = busy && resumeState === "starting"
+            ? "正在打开..."
+            : `在 ${escapeHtml(targetProvider || "目标 Provider")} 中继续`;
+          return `<button type="button" class="codex-usage-hud-settings-action" data-action="session-transfer-resume" title="在新终端使用目标 Provider 继续此会话" data-session-transfer-resume-id="${escapeHtml(targetId)}" data-session-transfer-resume-provider="${escapeHtml(targetProvider)}" ${busy ? "disabled" : ""}>${label}</button>`;
+        }).join("");
+        const resumeStatus = resumeState && sessionTransferState.resumeMessage
+          ? `<span class="codex-usage-hud-session-transfer-target-notice">${escapeHtml(sessionTransferState.resumeMessage)}</span>`
           : "";
         const errors = [
           operationError
@@ -3341,24 +3348,7 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
           .slice(0, 4)
           .map((item) => `<div class="codex-usage-hud-session-transfer-error">${escapeHtml(item?.title || "会话")}：${escapeHtml(item?.error || "未知错误")}</div>`),
         ].join("");
-        return `<div class="codex-usage-hud-session-transfer-result" data-kind="${state === "completed" ? "success" : "error"}"><strong>${escapeHtml(headline)}</strong><span>${escapeHtml(details)}</span>${targetNotice}${refreshAction}${restartAction}${errors}</div>`;
-      }
-
-      function refreshCodexDesktopSessionList() {
-        try {
-          window.location.reload();
-          return true;
-        } catch (_) {
-          return false;
-        }
-      }
-
-      function restartCodexDesktop() {
-        return submitSettingsCommand(
-          { action: "restartCodex" },
-          "正在重启 Codex Desktop，HUD 将在重启后重新连接...",
-          { preserveOverlay: true },
-        );
+        return `<div class="codex-usage-hud-session-transfer-result" data-kind="${state === "completed" ? "success" : "error"}"><strong>${escapeHtml(headline)}</strong><span>${escapeHtml(details)}</span>${targetNotice}${resumeStatus}${resumeActions}${errors}</div>`;
       }
 
       function syncSessionTransferDialogControls(data = sessionCleanupFromPayload(), viewOverride = null) {
@@ -3534,6 +3524,10 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
         sessionTransferState.selectedIds.clear();
         sessionTransferState.scanRequestId = "";
         sessionTransferState.requestId = "";
+        sessionTransferState.resumeRequestId = "";
+        sessionTransferState.resumeSessionId = "";
+        sessionTransferState.resumeState = "";
+        sessionTransferState.resumeMessage = "";
         sessionTransferState.data = null;
         sessionTransferState.operation = null;
       }
@@ -3632,6 +3626,50 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
         return submitted;
       }
 
+      function resumeSessionTransferTarget(button) {
+        if (!sessionTransferState.open || sessionTransferState.resumeRequestId) return false;
+        const targetId = String(button?.dataset?.sessionTransferResumeId || "").trim();
+        const targetProvider = String(
+          button?.dataset?.sessionTransferResumeProvider
+          || sessionTransferState.targetProvider
+          || "",
+        ).trim().toLowerCase();
+        if (!targetId || !targetProvider) return false;
+        const operation = sessionTransferOperation();
+        const result = Array.isArray(operation?.results)
+          ? operation.results.find((item) => String(item?.targetSessionId || "").trim() === targetId)
+          : null;
+        if (result?.targetVisible !== true || result?.targetResumable !== true) {
+          setSettingsStatus("目标会话尚未通过可见和续聊校验，未启动。", "error");
+          return false;
+        }
+        const requestId = typedSettingsRequestId("session-transfer-resume");
+        sessionTransferState.resumeRequestId = requestId;
+        sessionTransferState.resumeSessionId = targetId;
+        sessionTransferState.resumeState = "starting";
+        sessionTransferState.resumeMessage = "正在打开目标 Provider 会话...";
+        if (button) button.disabled = true;
+        renderSessionTransferDialog();
+        const submitted = submitSettingsCommand(
+          {
+            action: "codexCliLaunch",
+            requestId,
+            provider: targetProvider,
+            sessionTransferResumeId: targetId,
+          },
+          "正在打开目标 Provider 会话...",
+          { preserveOverlay: true },
+        );
+        if (!submitted) {
+          sessionTransferState.resumeRequestId = "";
+          sessionTransferState.resumeSessionId = "";
+          sessionTransferState.resumeState = "error";
+          sessionTransferState.resumeMessage = "续聊启动请求未能提交，请重试。";
+          renderSessionTransferDialog();
+        }
+        return submitted;
+      }
+
       function applySessionTransferPayload(payload) {
         const incoming = payload?.sessionCleanup;
         if (!incoming || typeof incoming !== "object") return;
@@ -3682,6 +3720,34 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
           // Quick launch is intentionally independent from the Settings modal.
           // Consume its request-scoped statuses even while Settings stays hidden.
           applyCodexCliCommandStatus(status);
+        }
+        if (
+          sessionTransferState.open
+          && sessionTransferState.resumeRequestId
+          && status
+          && typeof status === "object"
+        ) {
+          const statusAction = String(status.action || "");
+          const statusRequestId = String(status.requestId || "");
+          if (
+            statusRequestId === String(sessionTransferState.resumeRequestId)
+            && new Set(["codexCliLaunchPending", "codexCliLaunch"]).has(statusAction)
+          ) {
+            if (statusAction === "codexCliLaunchPending") {
+              sessionTransferState.resumeState = "starting";
+              sessionTransferState.resumeMessage = "正在打开目标 Provider 会话...";
+            } else {
+              const failed = String(status.kind || "").toLowerCase() === "error"
+                || !status.codexCliLaunch;
+              sessionTransferState.resumeState = failed ? "error" : "completed";
+              sessionTransferState.resumeMessage = String(
+                status.message
+                || (failed ? "目标 Provider 会话启动失败。" : "已打开目标 Provider 会话，可继续聊天。"),
+              );
+              sessionTransferState.resumeRequestId = "";
+            }
+            renderSessionTransferDialog();
+          }
         }
         const modal = document.getElementById(settingsModalId);
         if (!modal || modal.hidden) return;
@@ -5399,13 +5465,12 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
       closeSessionTransferDialog,
       requestSessionTransferScan,
       submitSessionTransfer,
+      resumeSessionTransferTarget,
       sessionTransferSelectableIds,
       syncSessionTransferSelection,
       syncSessionTransferSelectAll,
       moveSessionTransferPage,
       applySessionTransferPayload,
-      refreshCodexDesktopSessionList,
-      restartCodexDesktop,
       submitSettingsCommand,
       settingsDialogRoot,
       closeSettingsConfirm,
@@ -5536,13 +5601,12 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
     closeSessionTransferDialog,
     requestSessionTransferScan,
     submitSessionTransfer,
+    resumeSessionTransferTarget,
     sessionTransferSelectableIds,
     syncSessionTransferSelection,
     syncSessionTransferSelectAll,
     moveSessionTransferPage,
     applySessionTransferPayload,
-    refreshCodexDesktopSessionList,
-    restartCodexDesktop,
     submitSettingsCommand,
     settingsDialogRoot,
     closeSettingsConfirm,

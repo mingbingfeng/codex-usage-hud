@@ -652,16 +652,10 @@ TEXT = r"""
         moveSessionTransferPage(action.dataset.direction === "prev" ? -1 : 1);
         return;
       }
-      if (action.dataset.action === "session-transfer-refresh-desktop") {
+      if (action.dataset.action === "session-transfer-resume") {
         event.preventDefault();
         event.stopPropagation();
-        refreshCodexDesktopSessionList();
-        return;
-      }
-      if (action.dataset.action === "session-transfer-restart-codex") {
-        event.preventDefault();
-        event.stopPropagation();
-        restartCodexDesktop();
+        resumeSessionTransferTarget(action);
         return;
       }
       if (action.dataset.action === "session-cleanup-date-toggle") {

@@ -9,7 +9,7 @@ source deletion remain in ``SessionCleanupManager``.
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 import json
 import os
 from pathlib import Path
@@ -28,6 +28,27 @@ _DEFAULT_TIMEOUT_SECONDS = 30.0
 # App Server's ThreadSource enum accepts `custom`; an arbitrary HUD label would
 # be rejected by newer native servers even though the field is optional.
 _THREAD_SOURCE = "custom"
+# A fork acknowledgement alone is not durable evidence that a target session
+# will be shown by the provider's session list.  The short retry window handles
+# the App Server's asynchronous state-db/index writer without turning HUD
+# refreshes into a background polling loop.
+_TARGET_VISIBILITY_RETRY_DELAYS_SECONDS = (0.0, 0.1, 0.25, 0.5, 0.75, 1.25)
+# ``thread/list`` defaults to interactive sources when omitted.  A fork made by
+# this App Server can be classified as ``appServer`` on newer Codex versions,
+# so explicitly include every current source kind when checking persistence.
+_THREAD_LIST_SOURCE_KINDS = (
+    "cli",
+    "vscode",
+    "exec",
+    "appServer",
+    "subAgent",
+    "subAgentReview",
+    "subAgentCompact",
+    "subAgentThreadSpawn",
+    "subAgentOther",
+    "unknown",
+)
+_MAX_TARGET_LIST_PAGES = 64
 
 
 class SessionTransferError(RuntimeError):
@@ -131,11 +152,18 @@ class CodexAppServerClient:
         codex_home: str | Path | None = None,
         timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
         process_factory: Callable[..., Any] = subprocess.Popen,
+        target_visibility_retry_delays: Sequence[float] = _TARGET_VISIBILITY_RETRY_DELAYS_SECONDS,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self.executable = str(executable or _codex_executable()).strip()
         self.codex_home = str(codex_home or "").strip()
         self.timeout_seconds = max(1.0, float(timeout_seconds))
         self.process_factory = process_factory
+        self.target_visibility_retry_delays = tuple(
+            max(0.0, float(delay))
+            for delay in target_visibility_retry_delays
+        ) or (0.0,)
+        self._sleep = sleep
         self._process: Any | None = None
         self._messages: queue.Queue[object] = queue.Queue()
         self._stdout_thread: Thread | None = None
@@ -356,13 +384,13 @@ class CodexAppServerClient:
         session_id: str,
         target_provider: str,
     ) -> bool:
-        """Confirm a fork is durable before reporting success or deleting source.
+        """Confirm a fork is durable and listed under its target Provider.
 
-        ``thread/fork`` returning an id proves creation was accepted, but a
-        destructive migration also needs evidence that the resulting thread is
-        in Codex's persistent store.  ``thread/read`` is the supported read path
-        used by Desktop, and the returned rollout path must already exist on
-        this local machine.
+        ``thread/fork`` returning an id only proves creation was accepted.  A
+        transfer is ready only after ``thread/read`` can read its durable local
+        rollout, ``thread/list`` finds that id under the selected Provider from
+        the state database that backs Codex's session list, and ``thread/resume``
+        can rehydrate it with that Provider without sending a user turn.
         """
         thread_id = _canonical_uuid(session_id)
         provider = _provider_id(target_provider)
@@ -370,6 +398,27 @@ class CodexAppServerClient:
             raise SessionTransferError("目标会话标识无效。")
         if not provider:
             raise SessionTransferError("目标 Provider 标识无效。")
+        last_error = ""
+        for index, delay in enumerate(self.target_visibility_retry_delays):
+            if index and delay:
+                self._sleep(delay)
+            try:
+                thread_payload = self._verify_persistent_thread_read(thread_id, provider)
+                if self._target_is_visible_in_provider_list(thread_id, provider):
+                    self._verify_target_resume(thread_id, provider, thread_payload)
+                    return True
+                last_error = "Codex 目标会话尚未出现在目标 Provider 的会话列表中。"
+            except SessionTransferError as exc:
+                last_error = str(exc) or type(exc).__name__
+        raise SessionTransferError(
+            last_error or "Codex 目标会话尚未通过持久化和列表可见性验证。"
+        )
+
+    def _verify_persistent_thread_read(
+        self,
+        thread_id: str,
+        provider: str,
+    ) -> Mapping[str, object]:
         result = self.request(
             "thread/read",
             {"threadId": thread_id, "includeTurns": True},
@@ -398,7 +447,96 @@ class CodexAppServerClient:
             persisted = False
         if not persisted:
             raise SessionTransferError("Codex 目标会话的本地记录尚不可用。")
-        return True
+        return thread_payload
+
+    def _verify_target_resume(
+        self,
+        thread_id: str,
+        provider: str,
+        thread_payload: Mapping[str, object],
+    ) -> None:
+        """Prove that the target can be resumed under its selected Provider.
+
+        ``thread/read`` and ``thread/list`` establish durable visibility, but
+        they do not prove that Codex will rehydrate the conversation with the
+        target Provider. ``thread/resume`` performs that local App Server
+        validation without submitting a user turn or contacting a model.
+        """
+        params: dict[str, object] = {
+            "threadId": thread_id,
+            "modelProvider": provider,
+        }
+        cwd = str(thread_payload.get("cwd") or "").strip()
+        try:
+            if cwd and Path(cwd).is_absolute():
+                params["cwd"] = cwd
+        except (OSError, ValueError):
+            pass
+        result = self.request("thread/resume", params)
+        if not isinstance(result, Mapping):
+            raise SessionTransferError("Codex 目标会话续聊校验返回了无效结果。")
+        resumed = result.get("thread")
+        resumed_thread = resumed if isinstance(resumed, Mapping) else {}
+        resumed_id = _canonical_uuid(resumed_thread.get("id"))
+        if resumed_id != thread_id:
+            raise SessionTransferError("Codex 目标会话无法以目标 Provider 续聊。")
+        resumed_provider = _provider_id(
+            resumed_thread.get("modelProvider")
+            or resumed_thread.get("model_provider")
+        )
+        if resumed_provider != provider:
+            raise SessionTransferError(
+                f"Codex 目标会话续聊 Provider 不匹配：{resumed_provider or 'unknown'}。"
+            )
+        if resumed_thread.get("ephemeral") is True:
+            raise SessionTransferError("Codex 目标会话续聊仍是临时会话。")
+
+    def _target_is_visible_in_provider_list(
+        self,
+        thread_id: str,
+        provider: str,
+    ) -> bool:
+        """Return whether the target is indexed by the filtered session list."""
+        params: dict[str, object] = {
+            "modelProviders": [provider],
+            "sourceKinds": list(_THREAD_LIST_SOURCE_KINDS),
+            "limit": 100,
+            "sortKey": "updated_at",
+            "sortDirection": "desc",
+            # This intentionally checks the persisted session-list index,
+            # not an in-process JSONL repair that could mask a missing DB
+            # registration just before a source deletion.
+            "useStateDbOnly": True,
+        }
+        seen_cursors: set[str] = set()
+        for _page in range(_MAX_TARGET_LIST_PAGES):
+            result = self.request("thread/list", params)
+            if not isinstance(result, Mapping):
+                raise SessionTransferError(
+                    "Codex 目标 Provider 会话列表返回了无效结果。"
+                )
+            threads = result.get("data")
+            if not isinstance(threads, Sequence) or isinstance(
+                threads, (str, bytes, bytearray)
+            ):
+                raise SessionTransferError(
+                    "Codex 目标 Provider 会话列表返回了无效数据。"
+                )
+            for candidate in threads:
+                if not isinstance(candidate, Mapping):
+                    continue
+                candidate_id = _canonical_uuid(candidate.get("id"))
+                candidate_provider = _provider_id(
+                    candidate.get("modelProvider") or candidate.get("model_provider")
+                )
+                if candidate_id == thread_id and candidate_provider == provider:
+                    return True
+            next_cursor = str(result.get("nextCursor") or "").strip()
+            if not next_cursor or next_cursor in seen_cursors:
+                break
+            seen_cursors.add(next_cursor)
+            params["cursor"] = next_cursor
+        return False
 
     def _write(self, payload: Mapping[str, object]) -> None:
         process = self._process

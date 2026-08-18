@@ -208,6 +208,10 @@ scanStartedAt: 0,
       requestId: "",
       data: null,
       operation: null,
+      resumeRequestId: "",
+      resumeSessionId: "",
+      resumeState: "",
+      resumeMessage: "",
       page: 0,
     };
   sessionTransferState.open = sessionTransferState.open === true;

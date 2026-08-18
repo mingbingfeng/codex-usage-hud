@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import logging
@@ -23,7 +23,11 @@ from .codex_provider_config import (
     send_cli_chat_probe,
     send_provider_chat_probe,
 )
-from .codex_cli_launcher import discover_codex_cli_options, launch_codex_cli
+from .codex_cli_launcher import (
+    build_codex_cli_command,
+    discover_codex_cli_options,
+    launch_codex_cli,
+)
 from .config import (
     DEFAULT_WORK_OVERLAY_MAX_ITEMS,
     ModelPrice,
@@ -1530,20 +1534,100 @@ def _handle_renderer_settings_command(
         )
 
     def launch_cli(command: Mapping[str, object]) -> Mapping[str, object]:
-        cancel_requested = command.get("_codexCliCancelRequested")
-        commit_spawn = command.get("_codexCliCommitSpawn")
-        return launch_codex_cli(
-            terminal_id=str(command.get("terminalId") or "").strip(),
-            command=str(command.get("command") or ""),
-            workdir=str(command.get("workdir") or "").strip(),
-            provider=str(
-                command.get("provider")
-                or getattr(context, "app_provider", "")
-                or ""
-            ).strip(),
-            cancel_requested=cancel_requested if callable(cancel_requested) else None,
-            commit_spawn=commit_spawn if callable(commit_spawn) else None,
+        provider = str(
+            command.get("provider")
+            or getattr(context, "app_provider", "")
+            or ""
+        ).strip().lower()
+        transfer_session_id = str(
+            command.get("sessionTransferResumeId")
+            or command.get("session_transfer_resume_id")
+            or ""
+        ).strip()
+        workdir = str(command.get("workdir") or "").strip()
+        launch_command = str(command.get("command") or "")
+        terminal_id = str(command.get("terminalId") or "").strip()
+        codex_home: Path | None = None
+        if transfer_session_id:
+            manager = getattr(context, "session_cleanup_manager", None)
+            resolve_target = getattr(manager, "workdir_for_transfer_target", None)
+            if not callable(resolve_target):
+                raise ValueError("目标 Provider 会话续聊校验当前不可用。")
+            target_path = resolve_target(transfer_session_id, provider)
+            if not isinstance(target_path, Path):
+                raise ValueError(
+                    "目标 Provider 会话未能重新验证，未启动续聊命令。"
+                )
+            sessions_root = getattr(context, "sessions_root", None)
+            state_db_path = getattr(context, "state_db_path", None)
+            codex_home = (
+                Path(sessions_root).parent
+                if sessions_root is not None
+                else None
+            )
+            options = discover_codex_cli_options(
+                provider=provider,
+                sessions_root=sessions_root,
+                state_db_path=state_db_path,
+                current_workdir=target_path,
+                codex_home=codex_home,
+            )
+            proxy = options.get("proxy")
+            proxy_values = proxy if isinstance(proxy, Mapping) else {}
+            terminal_options = options.get("terminals")
+            selected_terminal = next(
+                (
+                    item
+                    for item in terminal_options
+                    if isinstance(item, Mapping)
+                    and str(item.get("id") or "") == str(
+                        options.get("defaultTerminal") or ""
+                    ).strip()
+                ),
+                {},
+            ) if isinstance(terminal_options, Sequence) and not isinstance(
+                terminal_options, (str, bytes, bytearray)
+            ) else {}
+            shell = str(selected_terminal.get("shell") or "powershell").strip().lower()
+            if shell not in {"powershell", "cmd", "bash", "zsh"}:
+                shell = "powershell"
+            launch_command = build_codex_cli_command(
+                provider=provider,
+                profile=str(options.get("profile") or ""),
+                default_provider=str(options.get("defaultProvider") or ""),
+                permission="workspace-write",
+                resume=True,
+                resume_session_id=transfer_session_id,
+                use_proxy=bool(proxy_values.get("enabled")),
+                proxy_port=proxy_values.get("port", 7897),
+                workdir=str(target_path),
+                shell=shell,
+            )
+            workdir = str(target_path)
+            terminal_id = str(options.get("defaultTerminal") or "").strip()
+        result = dict(
+            launch_codex_cli(
+                terminal_id=terminal_id,
+                command=launch_command,
+                workdir=workdir,
+                provider=provider,
+                codex_home=codex_home,
+                cancel_requested=(
+                    command.get("_codexCliCancelRequested")
+                    if callable(command.get("_codexCliCancelRequested"))
+                    else None
+                ),
+                commit_spawn=(
+                    command.get("_codexCliCommitSpawn")
+                    if callable(command.get("_codexCliCommitSpawn"))
+                    else None
+                ),
+            )
         )
+        if transfer_session_id:
+            result["sessionTransferResumeId"] = transfer_session_id
+            result["provider"] = provider
+        return result
 
     def fetch_cli_provider_models(provider: str) -> Mapping[str, object]:
         return fetch_provider_models_for_cli(provider)

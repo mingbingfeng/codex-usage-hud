@@ -25,6 +25,10 @@ from .session_materializer import (
 
 DEFAULT_CONFIRMATION_TTL_SECONDS = 300.0
 _ACTIVE_EDGE_STATES = {"active", "in_progress", "pending", "running", "starting"}
+# Fork writers can take a short moment to create both the rollout and the
+# state-db record.  Transfer-only retries are bounded and never run as HUD
+# background polling.
+_TRANSFER_READY_RETRY_DELAYS_SECONDS = (0.0, 0.1, 0.25, 0.5, 0.75, 1.25)
 
 
 class SessionCleanupError(RuntimeError):
@@ -119,6 +123,21 @@ def _canonical_uuid(value: object) -> str:
     except (AttributeError, TypeError, ValueError):
         return ""
     return canonical if candidate.casefold() == canonical else ""
+
+
+def _normalise_fork_target_uuid(value: object) -> str:
+    """Canonicalise an App Server-generated target id before collision checks.
+
+    Renderer-provided ids remain strict via :func:`_canonical_uuid`, but a
+    successful App Server may serialize a UUID with uppercase hex.  Treat that
+    trusted response as the same opaque id so it cannot evade either the
+    existing-store or same-batch collision gates.
+    """
+    candidate = str(value or "").strip()
+    try:
+        return str(uuid.UUID(candidate))
+    except (AttributeError, TypeError, ValueError):
+        return ""
 
 
 def _read_only_connection(path: Path) -> sqlite3.Connection:
@@ -270,6 +289,8 @@ class SessionCleanupManager:
         clock: Callable[[], float] = time.time,
         token_factory: Callable[[], str] | None = None,
         confirmation_ttl_seconds: float = DEFAULT_CONFIRMATION_TTL_SECONDS,
+        transfer_ready_retry_delays: Sequence[float] = _TRANSFER_READY_RETRY_DELAYS_SECONDS,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self.state_db_path = Path(state_db_path)
         self.sessions_root = Path(sessions_root)
@@ -282,6 +303,10 @@ class SessionCleanupManager:
         self.clock = clock
         self.token_factory = token_factory or (lambda: secrets.token_urlsafe(24))
         self.confirmation_ttl_seconds = max(1.0, float(confirmation_ttl_seconds))
+        self.transfer_ready_retry_delays = tuple(
+            max(0.0, float(delay)) for delay in transfer_ready_retry_delays
+        ) or (0.0,)
+        self._sleep = sleep
         self._revision_counter = 0
         self._revision = ""
         self._generated_at = 0.0
@@ -345,6 +370,40 @@ class SessionCleanupManager:
             return None
         record = records.get(item._session_id)
         raw_path = str(record.cwd or "").strip() if record is not None else ""
+        if not raw_path or "\x00" in raw_path:
+            return None
+        try:
+            path = Path(raw_path)
+            return path if path.is_absolute() and path.is_dir() else None
+        except OSError:
+            return None
+
+    def workdir_for_transfer_target(
+        self,
+        session_id: object,
+        target_provider: object,
+    ) -> Path | None:
+        """Resolve a verified transfer target to an existing launch directory.
+
+        The renderer only receives the opaque target id.  Re-read its current
+        local rollout and metadata before launching ``codex resume`` so a stale
+        result card cannot resume an unrelated Provider or arbitrary path.
+        """
+        canonical = _canonical_uuid(session_id)
+        provider = str(target_provider or "").strip().casefold()
+        if not canonical or not provider:
+            return None
+        records, _parents, _edge_states, _unsafe_ids, _unresolved = self._load_state()
+        record = records.get(canonical)
+        if (
+            record is None
+            or record.rollout_path is None
+            or not _path_under(record.rollout_path, self._allowed_rollout_roots())
+            or not record.rollout_path.is_file()
+            or _session_metadata(record.rollout_path).model_provider.casefold() != provider
+        ):
+            return None
+        raw_path = str(record.cwd or "").strip()
         if not raw_path or "\x00" in raw_path:
             return None
         try:
@@ -669,34 +728,43 @@ class SessionCleanupManager:
         canonical_source = _canonical_uuid(source_id)
         if not canonical_target or not canonical_source:
             raise SessionCleanupError("目标或源会话标识无效。")
-        records, _parents, _edge_states, _unsafe_ids, _unresolved = self._load_state()
-        target = records.get(canonical_target)
-        allowed_roots = self._allowed_rollout_roots()
-        if (
-            target is None
-            or target.rollout_path is None
-            or not _path_under(target.rollout_path, allowed_roots)
-            or not target.rollout_path.is_file()
-        ):
-            raise SessionCleanupError("Codex 目标会话 rollout 尚不可用。")
-        rollout_paths = {
-            session_id: record.rollout_path
-            for session_id, record in records.items()
-            if (
-                record.rollout_path is not None
-                and _path_under(record.rollout_path, allowed_roots)
-                and record.rollout_path.is_file()
-            )
-        }
-        try:
-            materialize_forked_rollout(
-                target_id=canonical_target,
-                source_id=canonical_source,
-                target_path=target.rollout_path,
-                rollout_paths=rollout_paths,
-            )
-        except SessionMaterializationError as exc:
-            raise SessionCleanupError(str(exc)) from exc
+        last_error = ""
+        for index, delay in enumerate(self.transfer_ready_retry_delays):
+            if index and delay:
+                self._sleep(delay)
+            try:
+                records, _parents, _edge_states, _unsafe_ids, _unresolved = self._load_state()
+                target = records.get(canonical_target)
+                allowed_roots = self._allowed_rollout_roots()
+                if (
+                    target is None
+                    or target.rollout_path is None
+                    or not _path_under(target.rollout_path, allowed_roots)
+                    or not target.rollout_path.is_file()
+                ):
+                    raise SessionCleanupError("Codex 目标会话 rollout 尚不可用。")
+                rollout_paths = {
+                    session_id: record.rollout_path
+                    for session_id, record in records.items()
+                    if (
+                        record.rollout_path is not None
+                        and _path_under(record.rollout_path, allowed_roots)
+                        and record.rollout_path.is_file()
+                    )
+                }
+                materialize_forked_rollout(
+                    target_id=canonical_target,
+                    source_id=canonical_source,
+                    target_path=target.rollout_path,
+                    rollout_paths=rollout_paths,
+                )
+                return
+            except (SessionCleanupError, SessionMaterializationError) as exc:
+                # A missing freshly-forked target and a transient Windows file
+                # handle are both expected just after fork.  The source remains
+                # untouched until this bounded materialization succeeds.
+                last_error = str(exc) or type(exc).__name__
+        raise SessionCleanupError(last_error or "Codex 目标会话历史物化未完成。")
 
     def _register_session_index(self, session_id: str, title: str) -> None:
         """Make a newly forked thread discoverable by ``codex resume``."""
@@ -772,7 +840,7 @@ class SessionCleanupManager:
             raise SessionCleanupError("不支持的会话迁移模式。")
         if not callable(fork):
             raise SessionCleanupError("Codex fork 服务当前不可用。")
-        if not callable(materialize):
+        if normalized_mode == "migrate" and not callable(materialize):
             raise SessionCleanupError("Codex 目标会话物化服务当前不可用。")
         if not callable(verify):
             raise SessionCleanupError("Codex 目标会话持久化验证当前不可用。")
@@ -789,13 +857,12 @@ class SessionCleanupManager:
                 "所选会话的分页历史源无法验证，不能复制或迁移。"
             )
         results: list[dict[str, object]] = []
-        forked_items: list[SessionCleanupItem] = []
+        migration_candidates: list[tuple[SessionCleanupItem, dict[str, object]]] = []
+        existing_session_ids = set(self._load_state()[0])
+        created_target_ids: set[str] = set()
         publisher = getattr(self, "progress_publisher", None)
         total = len(items)
         last_progress_publish = 0.0
-        copied_count = 0
-        migrated_count = 0
-        failed_count = 0
 
         def publish_progress(*, force: bool = False) -> None:
             nonlocal last_progress_publish
@@ -805,6 +872,13 @@ class SessionCleanupManager:
             # coalescing bursts from fast local forks.
             if not force and last_progress_publish and now - last_progress_publish < 0.075:
                 return
+            target_ready_count = sum(
+                bool(result.get("targetVisible"))
+                and bool(result.get("targetResumable"))
+                for result in results
+            )
+            target_failed_count = len(results) - target_ready_count
+            migrated_count = sum(bool(result.get("sourceDeleted")) for result in results)
             self.mark_operation(
                 request_id=request_id,
                 action="sessionTransfer",
@@ -815,9 +889,23 @@ class SessionCleanupManager:
                 mode=normalized_mode,
                 selectedIds=[item.id for item in items],
                 completedCount=len(results),
-                copiedCount=copied_count,
+                copiedCount=target_ready_count,
+                targetReadyCount=target_ready_count,
                 migratedCount=migrated_count,
-                failedCount=failed_count,
+                sourceRetainedCount=sum(
+                    bool(result.get("sourceRetained")) for result in results
+                ),
+                targetFailedCount=target_failed_count,
+                unmigratedCount=(
+                    len(results) - migrated_count
+                    if normalized_mode == "migrate"
+                    else 0
+                ),
+                # A migration is not terminal until its shared safe-delete
+                # transaction finishes; do not label ready targets as failed
+                # while that gate is still running. Already-known fork or
+                # verification failures are still reported immediately.
+                failedCount=target_failed_count,
             )
             if callable(publisher):
                 publisher(self.snapshot(include_sessions=False))
@@ -826,128 +914,228 @@ class SessionCleanupManager:
         for item in items:
             forked = False
             target_ready = False
+            history_materialized = False
             new_session_id = ""
+            index_warning = ""
             try:
-                new_session_id = str(
-                    fork(item._session_id, normalized_target, item._cwd) or ""
-                ).strip()
-                if not _canonical_uuid(new_session_id) or new_session_id == item._session_id:
+                new_session_id = _normalise_fork_target_uuid(
+                    fork(item._session_id, normalized_target, item._cwd)
+                )
+                if not new_session_id or new_session_id == item._session_id:
                     raise SessionCleanupError(
                         "Codex fork 未返回新的目标会话。"
-                )
+                    )
+                if (
+                    new_session_id in existing_session_ids
+                    or new_session_id in created_target_ids
+                ):
+                    raise SessionCleanupError(
+                        "Codex fork 返回了与现有目标会话冲突的标识。"
+                    )
+                created_target_ids.add(new_session_id)
                 forked = True
-                materialized = materialize(new_session_id, item._session_id)
-                if materialized is False:
-                    raise SessionCleanupError("Codex 目标会话历史物化未完成。")
+                # Verify the target before any migration-only rewrite.  This
+                # separates a usable copy from a later source-deletion gate.
                 if verify(new_session_id, normalized_target) is not True:
                     raise SessionCleanupError(
-                        "目标会话已创建，但持久化验证未通过。"
+                        "目标会话已创建，但未通过目标 Provider 可见和续聊验证。"
                     )
-                self._register_session_index(new_session_id, item.title)
                 target_ready = True
-                copied_count += 1
+                # The state-db/list proof above is authoritative.  The legacy
+                # CLI index is only a best-effort convenience for older CLI
+                # builds and must not turn a usable target into a false failure.
+                try:
+                    self._register_session_index(new_session_id, item.title)
+                except SessionCleanupError as exc:
+                    index_warning = str(exc) or type(exc).__name__
                 if normalized_mode == "migrate":
-                    forked_items.append(item)
+                    assert callable(materialize)
+                    materialized = materialize(new_session_id, item._session_id)
+                    if materialized is False:
+                        raise SessionCleanupError("Codex 目标会话历史物化未完成。")
+                    # Materialization rewrites the target rollout; prove that
+                    # the rewritten target is still readable and listed before
+                    # making its source eligible for deletion.
+                    if verify(new_session_id, normalized_target) is not True:
+                        raise SessionCleanupError(
+                            "目标会话历史已准备，但重新验证未通过。"
+                        )
+                    history_materialized = True
+                result = {
+                    "id": item.id,
+                    "title": item.title,
+                    "targetSessionId": new_session_id,
+                    "state": "copied",
+                    "forked": True,
+                    "targetCreated": True,
+                    "targetVisible": True,
+                    "targetResumable": True,
+                    "historyMaterialized": history_materialized,
+                    "sourceDeleted": False,
+                    "sourceRetained": normalized_mode == "migrate",
+                    "indexWarning": index_warning,
+                    "error": "",
+                }
+                results.append(result)
+                if normalized_mode == "migrate":
+                    migration_candidates.append((item, result))
+            except Exception as exc:
+                error_text = str(exc) or type(exc).__name__
                 results.append(
                     {
                         "id": item.id,
                         "title": item.title,
                         "targetSessionId": new_session_id,
-                        "state": "copied",
-                        "forked": True,
+                        "state": "copied" if target_ready else (
+                            "targetCreated" if forked else "failed"
+                        ),
+                        "forked": forked,
+                        "targetCreated": forked,
+                        "targetVisible": target_ready,
+                        "targetResumable": target_ready,
+                        "historyMaterialized": history_materialized,
                         "sourceDeleted": False,
-                        "error": "",
-                    }
-                )
-            except Exception as exc:
-                error_text = str(exc) or type(exc).__name__
-                if forked:
-                    failed_count += 1
-                    results.append(
-                        {
-                            "id": item.id,
-                            "title": item.title,
-                            "targetSessionId": new_session_id,
-                            "state": "copied"
-                            if normalized_mode == "migrate" and target_ready
-                            else "failed",
-                            "forked": True,
-                            "sourceDeleted": False,
-                            "error": error_text,
-                        }
-                    )
-                    publish_progress()
-                    continue
-                results.append(
-                    {
-                        "id": item.id,
-                        "title": item.title,
-                        "targetSessionId": "",
-                        "state": "failed",
-                        "forked": False,
-                        "sourceDeleted": False,
+                        "sourceRetained": normalized_mode == "migrate",
+                        "indexWarning": index_warning,
                         "error": error_text,
                     }
                 )
-                failed_count += 1
             publish_progress()
 
-        if normalized_mode == "migrate" and forked_items:
-            successful_ids = [item.id for item in forked_items]
-            deletion_error = ""
-            deleted_ids: set[str] = set()
-            try:
-                # All forks are created first, then the source trees are
-                # removed in one local transaction. This keeps the original
-                # safety ordering while avoiding one scan/preview/execute
-                # round-trip per selected session.
-                preview = self.preview(
-                    successful_ids,
-                    self._revision,
-                    request_id=request_id,
-                )
-                preview_operation = preview.get("operation")
-                confirmation_token = str(
-                    preview_operation.get("confirmationToken")
-                    if isinstance(preview_operation, Mapping)
-                    else ""
-                )
-                if not confirmation_token:
-                    raise SessionCleanupError("源会话删除确认令牌生成失败。")
-                deleted = self.execute(
-                    successful_ids,
-                    self._revision,
-                    confirmation_token,
-                    request_id=request_id,
-                )
-                deleted_operation = deleted.get("operation")
-                deleted_rows = (
-                    deleted_operation.get("results")
-                    if isinstance(deleted_operation, Mapping)
-                    else []
-                )
-                deleted_ids = {
-                    str(row.get("id") or "")
-                    for row in (deleted_rows if isinstance(deleted_rows, Sequence) else [])
-                    if isinstance(row, Mapping) and str(row.get("state") or "") == "deleted"
+        if normalized_mode == "migrate":
+            if len(migration_candidates) != total:
+                # Multi-select migration is all-or-none for source deletion.
+                # A usable target remains available, but retaining every source
+                # avoids silently producing a mixed migration.
+                for _item, result in migration_candidates:
+                    if not str(result.get("error") or "").strip():
+                        result["error"] = (
+                            "源会话已保留：至少一个目标会话尚未通过迁移就绪验证。"
+                        )
+            elif migration_candidates:
+                fresh_candidates: list[tuple[SessionCleanupItem, dict[str, object]]] = []
+                blockers: dict[str, str] = {}
+                target_session_ids = {
+                    _canonical_uuid(result.get("targetSessionId"))
+                    for _original, result in migration_candidates
+                    if _canonical_uuid(result.get("targetSessionId"))
                 }
-                if len(deleted_ids) != len(successful_ids):
-                    raise SessionCleanupError("目标会话已创建，但源会话未能安全删除。")
-            except Exception as exc:
-                deletion_error = str(exc) or type(exc).__name__
+                try:
+                    # The pre-fork opaque inventory is stale after App Server
+                    # work. Re-scan before preview/execute and map by the
+                    # private source id, never by the old renderer id.
+                    self.scan(request_id=request_id)
+                    current_by_session = {
+                        candidate._session_id: candidate
+                        for candidate in self._items.values()
+                    }
+                    for original, result in migration_candidates:
+                        current = current_by_session.get(original._session_id)
+                        if current is None:
+                            blockers[original.id] = "源会话在删除前已改变或不再可用。"
+                        elif set(current._descendant_ids) & target_session_ids:
+                            # A future App Server may model ``thread/fork`` as
+                            # a spawn edge. The normal source-tree delete would
+                            # then stage the freshly-created target alongside
+                            # its source, so retain every source instead of
+                            # risking deletion of a usable target conversation.
+                            blockers[original.id] = (
+                                "目标会话仍属于源会话子树，无法安全删除源会话。"
+                            )
+                        elif current.model_provider.casefold() != normalized_source:
+                            blockers[original.id] = "源会话的 Provider 在删除前已改变。"
+                        elif not current.selectable:
+                            blockers[original.id] = (
+                                current.blocked_reason
+                                or "源会话当前不允许安全删除。"
+                            )
+                        elif not current.transferable:
+                            blockers[original.id] = (
+                                current.transfer_blocked_reason
+                                or "源会话的分页历史当前无法验证。"
+                            )
+                        else:
+                            fresh_candidates.append((current, result))
+                except Exception as exc:
+                    detail = str(exc) or type(exc).__name__
+                    blockers = {
+                        original.id: f"删除前刷新源会话失败：{detail}"
+                        for original, _result in migration_candidates
+                    }
 
-            for result in results:
-                result_id = str(result.get("id") or "")
-                if result_id not in successful_ids:
-                    continue
-                if result_id in deleted_ids:
-                    result["state"] = "migrated"
-                    result["sourceDeleted"] = True
+                if blockers:
+                    for original, result in migration_candidates:
+                        result["error"] = blockers.get(
+                            original.id,
+                            "源会话已保留：同一批次中另一个源会话未满足安全删除条件。",
+                        )
+                elif len(fresh_candidates) != total:
+                    for _original, result in migration_candidates:
+                        result["error"] = "源会话已保留：删除前会话清单不完整。"
                 else:
-                    result["error"] = deletion_error or "目标会话已创建，但源会话未能安全删除。"
-            migrated_count = len(deleted_ids)
-            failed_count = max(0, total - migrated_count)
-            publish_progress(force=True)
+                    successful_ids = [
+                        candidate.id for candidate, _result in fresh_candidates
+                    ]
+                    deletion_error = ""
+                    deleted_rows_by_id: dict[str, Mapping[str, object]] = {}
+                    try:
+                        preview = self.preview(
+                            successful_ids,
+                            self._revision,
+                            request_id=request_id,
+                        )
+                        preview_operation = preview.get("operation")
+                        confirmation_token = str(
+                            preview_operation.get("confirmationToken")
+                            if isinstance(preview_operation, Mapping)
+                            else ""
+                        )
+                        if not confirmation_token:
+                            raise SessionCleanupError("源会话删除确认令牌生成失败。")
+                        deleted = self.execute(
+                            successful_ids,
+                            self._revision,
+                            confirmation_token,
+                            request_id=request_id,
+                        )
+                        deleted_operation = deleted.get("operation")
+                        deleted_rows = (
+                            deleted_operation.get("results")
+                            if isinstance(deleted_operation, Mapping)
+                            else []
+                        )
+                        if isinstance(deleted_rows, Sequence) and not isinstance(
+                            deleted_rows, (str, bytes, bytearray)
+                        ):
+                            deleted_rows_by_id = {
+                                str(row.get("id") or ""): row
+                                for row in deleted_rows
+                                if isinstance(row, Mapping)
+                                and str(row.get("id") or "")
+                            }
+                        deletion_error = str(
+                            deleted_operation.get("error")
+                            if isinstance(deleted_operation, Mapping)
+                            else ""
+                        ).strip()
+                    except Exception as exc:
+                        deletion_error = str(exc) or type(exc).__name__
+
+                    for current, result in fresh_candidates:
+                        row = deleted_rows_by_id.get(current.id, {})
+                        if str(row.get("state") or "") == "deleted":
+                            result["state"] = "migrated"
+                            result["sourceDeleted"] = True
+                            result["sourceRetained"] = False
+                            result["error"] = ""
+                            continue
+                        row_error = str(row.get("error") or "").strip()
+                        result["error"] = (
+                            row_error
+                            or deletion_error
+                            or "源会话未通过安全删除验证，已保留。"
+                        )
+                publish_progress(force=True)
 
         if any(bool(result.get("forked")) for result in results):
             try:
@@ -957,20 +1145,22 @@ class SessionCleanupManager:
                 # inventory refresh is unavailable; the next manual scan will
                 # reconcile the list.
                 pass
-        copied_count = (
-            sum(bool(result.get("forked")) for result in results)
-            if normalized_mode == "migrate"
-            else sum(
-                bool(result.get("forked")) and not str(result.get("error") or "").strip()
-                for result in results
-            )
+        copied_count = sum(
+            bool(result.get("targetVisible"))
+            and bool(result.get("targetResumable"))
+            for result in results
         )
         migrated_count = sum(result.get("state") == "migrated" for result in results)
+        source_retained_count = sum(
+            bool(result.get("sourceRetained")) for result in results
+        )
         failed_count = (
             total - migrated_count
             if normalized_mode == "migrate"
             else total - copied_count
         )
+        target_failed_count = total - copied_count
+        unmigrated_count = total - migrated_count if normalized_mode == "migrate" else 0
         completed = (
             migrated_count == total
             if normalized_mode == "migrate"
@@ -991,6 +1181,9 @@ class SessionCleanupManager:
             sessionCount=total,
             copiedCount=copied_count,
             migratedCount=migrated_count,
+            sourceRetainedCount=source_retained_count,
+            targetFailedCount=max(0, target_failed_count),
+            unmigratedCount=max(0, unmigrated_count),
             failedCount=max(0, failed_count),
         )
 

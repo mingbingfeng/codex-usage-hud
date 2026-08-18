@@ -8,6 +8,7 @@ from unittest.mock import patch
 from codex_usage_hud.runtime_commands import (
     GeneralCommandPorts,
     RuntimeCommandPorts,
+    _handle_renderer_settings_command,
     handle_background_command,
     handle_active_session_command,
     handle_cleanup_command,
@@ -15,6 +16,75 @@ from codex_usage_hud.runtime_commands import (
     dispatch_command,
 )
 from codex_usage_hud.config import UserConfig
+
+
+TARGET_ID = "10000000-0000-4000-8000-000000000012"
+
+
+def test_renderer_resume_transfer_target_builds_verified_resume_launch(
+    tmp_path: Path,
+) -> None:
+    workdir = tmp_path / "project"
+    workdir.mkdir()
+    (tmp_path / "sessions").mkdir()
+    manager = MagicMock()
+    manager.workdir_for_transfer_target.return_value = workdir
+    context = SimpleNamespace(
+        app_provider="custom",
+        sessions_root=tmp_path / "sessions",
+        state_db_path=tmp_path / "state_5.sqlite",
+        session_cleanup_manager=manager,
+    )
+
+    with (
+        patch(
+            "codex_usage_hud.runtime_commands.discover_codex_cli_options",
+            return_value={
+                "profile": "routin",
+                "defaultProvider": "custom",
+                "defaultTerminal": "windows-terminal",
+                "terminals": [
+                    {
+                        "id": "windows-terminal",
+                        "shell": "cmd",
+                    }
+                ],
+                "proxy": {"enabled": False, "port": 7897},
+            },
+        ) as discover,
+        patch(
+            "codex_usage_hud.runtime_commands.build_codex_cli_command",
+            return_value="codex --profile routin resume " + TARGET_ID,
+        ) as build,
+        patch(
+            "codex_usage_hud.runtime_commands.launch_codex_cli",
+            return_value={"pid": 42, "terminal": "Windows Terminal"},
+        ) as launch,
+    ):
+        status = _handle_renderer_settings_command(
+            {
+                "action": "codexCliLaunch",
+                "requestId": "resume-1",
+                "provider": "routin",
+                "sessionTransferResumeId": TARGET_ID,
+            },
+            context,
+            MagicMock(),
+            MagicMock(),
+        )
+
+    manager.workdir_for_transfer_target.assert_called_once_with(TARGET_ID, "routin")
+    discover.assert_called_once()
+    build.assert_called_once()
+    build_kwargs = build.call_args.kwargs
+    assert build_kwargs["resume"] is True
+    assert build_kwargs["resume_session_id"] == TARGET_ID
+    assert build_kwargs["provider"] == "routin"
+    assert build_kwargs["shell"] == "cmd"
+    launch.assert_called_once()
+    assert launch.call_args.kwargs["codex_home"] == tmp_path
+    assert status["kind"] == ""
+    assert status["codexCliLaunch"]["sessionTransferResumeId"] == TARGET_ID
 
 
 @pytest.mark.parametrize(

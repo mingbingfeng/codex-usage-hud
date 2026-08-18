@@ -325,7 +325,7 @@ class SessionCleanupManagerTests(unittest.TestCase):
         self.assertEqual(operation["state"], "partial")
         self.assertEqual(operation["copiedCount"], 0)
         self.assertEqual(operation["failedCount"], 1)
-        self.assertIn("持久化验证未通过", operation["results"][0]["error"])
+        self.assertIn("目标 Provider 可见和续聊验证", operation["results"][0]["error"])
         self.assertTrue(rollouts[ROOT_ID].exists())
 
     def test_session_transfer_migrate_deletes_source_only_after_fork(self) -> None:
@@ -448,9 +448,9 @@ class SessionCleanupManagerTests(unittest.TestCase):
 
         operation = result["operation"]
         self.assertEqual(operation["state"], "partial")
-        self.assertEqual(operation["copiedCount"], 1)
+        self.assertEqual(operation["copiedCount"], 0)
         self.assertEqual(operation["migratedCount"], 0)
-        self.assertIn("持久化验证未通过", operation["results"][0]["error"])
+        self.assertIn("目标 Provider 可见和续聊验证", operation["results"][0]["error"])
         self.assertTrue(rollouts[ROOT_ID].exists())
         self.assertTrue(rollouts[CHILD_ID].exists())
 
@@ -477,9 +477,198 @@ class SessionCleanupManagerTests(unittest.TestCase):
 
         operation = result["operation"]
         self.assertEqual(operation["state"], "partial")
+        self.assertEqual(operation["copiedCount"], 1)
         self.assertEqual(operation["migratedCount"], 0)
+        self.assertIn("source rollout unavailable", operation["results"][0]["error"])
         self.assertTrue(rollouts[ROOT_ID].exists())
         self.assertTrue(rollouts[CHILD_ID].exists())
+
+    def test_session_transfer_rejects_a_target_id_that_already_exists(self) -> None:
+        fixture = self._fixture()
+        temporary, _root, _state, _index, rollouts, manager = fixture
+        self.addCleanup(temporary.cleanup)
+
+        payload = manager.scan(request_id="transfer-scan")
+        root_row = next(row for row in payload["sessions"] if row["title"] == "Root")
+        verify = MagicMock(return_value=True)
+        result = manager.transfer(
+            [root_row["id"]],
+            payload["revision"],
+            "openai-custom",
+            "routin",
+            "copy",
+            fork=lambda *_args: CHILD_ID.upper(),
+            verify=verify,
+            request_id="transfer-collision",
+        )
+
+        operation = result["operation"]
+        self.assertEqual(operation["state"], "failed")
+        self.assertEqual(operation["copiedCount"], 0)
+        self.assertEqual(operation["targetFailedCount"], 1)
+        self.assertIn("目标会话冲突", operation["results"][0]["error"])
+        verify.assert_not_called()
+        self.assertTrue(rollouts[ROOT_ID].exists())
+
+    def test_session_transfer_rejects_case_variant_duplicate_target_in_batch(self) -> None:
+        fixture = self._fixture()
+        temporary, _root, _state, _index, rollouts, manager = fixture
+        self.addCleanup(temporary.cleanup)
+        rollouts[SECOND_ID].write_text(
+            json.dumps(
+                {
+                    "type": "session_meta",
+                    "payload": {
+                        "model_provider": "openai-custom",
+                        "originator": "Codex Desktop",
+                        "source": "vscode",
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        payload = manager.scan(request_id="transfer-scan")
+        selected = [
+            row["id"]
+            for row in payload["sessions"]
+            if row["title"] in {"Root", "Archived"}
+        ]
+        target_id = "10000000-0000-4000-8000-000000000014"
+        returned_ids = iter((target_id, target_id.upper()))
+
+        result = manager.transfer(
+            selected,
+            payload["revision"],
+            "openai-custom",
+            "routin",
+            "copy",
+            fork=lambda *_args: next(returned_ids),
+            verify=lambda *_args: True,
+            request_id="transfer-duplicate-target",
+        )
+
+        operation = result["operation"]
+        self.assertEqual(operation["state"], "partial")
+        self.assertEqual(operation["copiedCount"], 1)
+        self.assertEqual(operation["targetFailedCount"], 1)
+        self.assertEqual(operation["failedCount"], 1)
+        self.assertTrue(
+            any("目标会话冲突" in row["error"] for row in operation["results"])
+        )
+
+    def test_session_transfer_reports_source_delete_error_and_retains_source(self) -> None:
+        fixture = self._fixture()
+        temporary, _root, _state, _index, rollouts, manager = fixture
+        self.addCleanup(temporary.cleanup)
+
+        payload = manager.scan(request_id="transfer-scan")
+        root_row = next(row for row in payload["sessions"] if row["title"] == "Root")
+        def execute_with_error(item_ids, _revision, _token, *, request_id=""):
+            return {
+                "operation": {
+                    "state": "failed",
+                    "results": [
+                        {
+                            "id": item_ids[0],
+                            "state": "failed",
+                            "error": "源会话文件被占用。",
+                        }
+                    ],
+                }
+            }
+
+        with patch.object(
+            manager,
+            "preview",
+            return_value={"operation": {"confirmationToken": "token"}},
+        ), patch.object(manager, "execute", side_effect=execute_with_error):
+            result = manager.transfer(
+                [root_row["id"]],
+                payload["revision"],
+                "openai-custom",
+                "routin",
+                "migrate",
+                fork=lambda *_args: "10000000-0000-4000-8000-000000000012",
+                materialize=lambda *_args: None,
+                verify=lambda *_args: True,
+                request_id="transfer-delete-error",
+            )
+
+        operation = result["operation"]
+        row = operation["results"][0]
+        self.assertEqual(operation["state"], "partial")
+        self.assertEqual(operation["copiedCount"], 1)
+        self.assertEqual(operation["migratedCount"], 0)
+        self.assertEqual(operation["sourceRetainedCount"], 1)
+        self.assertEqual(operation["targetFailedCount"], 0)
+        self.assertEqual(operation["unmigratedCount"], 1)
+        self.assertEqual(row["sourceDeleted"], False)
+        self.assertEqual(row["sourceRetained"], True)
+        self.assertIn("源会话文件被占用", row["error"])
+        self.assertTrue(rollouts[ROOT_ID].exists())
+
+    def test_session_transfer_keeps_source_if_fork_is_registered_as_a_child(self) -> None:
+        fixture = self._fixture()
+        temporary, root, state, _index, rollouts, manager = fixture
+        self.addCleanup(temporary.cleanup)
+        target_id = "10000000-0000-4000-8000-000000000013"
+        target_path = root / "sessions" / f"rollout-{target_id}.jsonl"
+
+        payload = manager.scan(request_id="transfer-scan")
+        root_row = next(row for row in payload["sessions"] if row["title"] == "Root")
+
+        def fork(_session_id: str, _provider: str, cwd: str) -> str:
+            target_path.write_text(
+                json.dumps(
+                    {
+                        "type": "session_meta",
+                        "payload": {
+                            "model_provider": "routin",
+                            "originator": "codex-tui",
+                            "source": "cli",
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            with closing(sqlite3.connect(state)) as connection, connection:
+                connection.execute(
+                    "INSERT INTO threads(id, rollout_path, title, cwd, archived, updated_at_ms) "
+                    "VALUES(?, ?, ?, ?, ?, ?)",
+                    (target_id, str(target_path), "Target", cwd, 0, 1_800_000_000_000),
+                )
+                connection.execute(
+                    "INSERT INTO thread_spawn_edges VALUES(?, ?, ?)",
+                    (ROOT_ID, target_id, "closed"),
+                )
+            return target_id
+
+        result = manager.transfer(
+            [root_row["id"]],
+            payload["revision"],
+            "openai-custom",
+            "routin",
+            "migrate",
+            fork=fork,
+            materialize=lambda *_args: None,
+            verify=lambda *_args: True,
+            request_id="transfer-child-target",
+        )
+
+        operation = result["operation"]
+        row = operation["results"][0]
+        self.assertEqual(operation["state"], "partial")
+        self.assertEqual(operation["copiedCount"], 1)
+        self.assertEqual(operation["migratedCount"], 0)
+        self.assertEqual(operation["sourceRetainedCount"], 1)
+        self.assertTrue(row["targetVisible"])
+        self.assertFalse(row["sourceDeleted"])
+        self.assertTrue(row["sourceRetained"])
+        self.assertIn("目标会话仍属于源会话子树", row["error"])
+        self.assertTrue(rollouts[ROOT_ID].exists())
+        self.assertTrue(target_path.exists())
 
     def test_ambiguous_spawn_relation_blocks_every_affected_root(self) -> None:
         fixture = self._fixture()

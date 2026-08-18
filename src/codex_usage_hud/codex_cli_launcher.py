@@ -15,6 +15,7 @@ import re
 import shutil
 import subprocess
 import sys
+import uuid
 
 
 POWERSHELL_INSTALL_URL = (
@@ -29,6 +30,17 @@ _MODEL_PROVIDER_PATTERN = re.compile(
 _PROXY_PORT_PATTERN = re.compile(
     r"(?i)https?://(?:[^@/\s]+@)?127\.0\.0\.1:(?P<port>\d{1,5})"
 )
+
+
+def _canonical_session_id(value: object) -> str:
+    candidate = str(value or "").strip()
+    if not candidate:
+        return ""
+    try:
+        canonical = str(uuid.UUID(candidate))
+    except (AttributeError, TypeError, ValueError):
+        return ""
+    return canonical if candidate.casefold() == canonical else ""
 
 
 def _platform_name(value: str | None = None) -> str:
@@ -72,8 +84,20 @@ def _windows_registry_environment() -> dict[str, str]:
     return values
 
 
-def _launch_environment(*, platform_name: str | None = None) -> dict[str, str]:
+def _launch_environment(
+    *,
+    platform_name: str | None = None,
+    codex_home: str | Path | None = None,
+) -> dict[str, str]:
     environment = os.environ.copy()
+    if codex_home is not None:
+        home = _normalise_existing_path(codex_home)
+        if home is None:
+            raise ValueError("Codex 会话主目录不存在或不可访问。")
+        # A transfer target is verified against this exact local store.  The
+        # spawned terminal must inherit the same store or ``codex resume`` can
+        # silently open a different profile's history.
+        environment["CODEX_HOME"] = str(home)
     if _platform_name(platform_name) != "windows":
         return environment
 
@@ -470,6 +494,7 @@ def build_codex_cli_args(
     default_provider: str = "",
     permission: str = "full",
     resume: bool = False,
+    resume_session_id: str = "",
     model: str = "",
 ) -> list[str]:
     args: list[str] = []
@@ -486,6 +511,11 @@ def build_codex_cli_args(
     args.extend(_permission_args(permission))
     if resume:
         args.append("resume")
+        normalized_session_id = _canonical_session_id(resume_session_id)
+        if resume_session_id and not normalized_session_id:
+            raise ValueError("Codex 会话标识无效。")
+        if normalized_session_id:
+            args.append(normalized_session_id)
     return args
 
 
@@ -529,6 +559,7 @@ def build_codex_cli_command(
     default_provider: str = "",
     permission: str = "full",
     resume: bool = False,
+    resume_session_id: str = "",
     model: str = "",
     use_proxy: bool = False,
     proxy_port: int | str = DEFAULT_PROXY_PORT,
@@ -545,6 +576,7 @@ def build_codex_cli_command(
         default_provider=default_provider,
         permission=permission,
         resume=resume,
+        resume_session_id=resume_session_id,
         model=model,
     )]
     command = " ".join(
@@ -792,6 +824,32 @@ def _terminal_process_command(
     ]
 
 
+def _command_with_codex_home(
+    command: str,
+    *,
+    codex_home: Path | None,
+    shell: object,
+) -> str:
+    """Set the verified store inside the launched shell as well as its env.
+
+    Reusing an already-running Windows Terminal can create the tab through its
+    existing host process.  Prefixing the shell command makes the selected
+    ``CODEX_HOME`` explicit even when that host does not propagate the client
+    process environment to the new tab.
+    """
+    if codex_home is None:
+        return str(command or "")
+    shell_name = str(shell or "powershell").strip().lower()
+    home_text = str(codex_home)
+    if shell_name == "powershell":
+        prefix = f"$env:CODEX_HOME = {_shell_quote(home_text, shell_name)}"
+    elif shell_name == "cmd":
+        prefix = f'set "CODEX_HOME={home_text}"'
+    else:
+        prefix = f"export CODEX_HOME={_shell_quote(home_text, shell_name)}"
+    return f"{prefix}\n{str(command or '')}"
+
+
 def _terminal_process_probe(
     command: list[str],
     *,
@@ -881,6 +939,7 @@ def launch_codex_cli(
     command: str,
     workdir: str,
     provider: str = "",
+    codex_home: str | Path | None = None,
     platform_name: str | None = None,
     cancel_requested: Callable[[], bool] | None = None,
     commit_spawn: Callable[[], bool] | None = None,
@@ -907,6 +966,11 @@ def launch_codex_cli(
     path = _normalise_existing_path(workdir)
     if path is None:
         raise ValueError("工作目录不存在或不可访问。")
+    resolved_codex_home = (
+        _normalise_existing_path(codex_home) if codex_home is not None else None
+    )
+    if codex_home is not None and resolved_codex_home is None:
+        raise ValueError("Codex 会话主目录不存在或不可访问。")
     if cancelled():
         return cancelled_result()
     terminals = discover_terminals(platform_name=platform_name)
@@ -956,16 +1020,24 @@ def launch_codex_cli(
         return cancelled_result()
     # Redirected stdio makes PowerShell treat -NoExit as non-interactive and
     # exit after -Command completes. Let the new terminal own its stdio.
+    terminal_command = _command_with_codex_home(
+        command_text,
+        codex_home=resolved_codex_home,
+        shell=launch_terminal.get("shell"),
+    )
     process = subprocess.Popen(
         _terminal_process_command(
             launch_terminal,
-            command_text,
+            terminal_command,
             str(path),
             open_as_tab=opened_as_tab,
             title=title,
         ),
         cwd=str(path),
-        env=_launch_environment(platform_name=platform_name),
+        env=_launch_environment(
+            platform_name=platform_name,
+            codex_home=resolved_codex_home,
+        ),
         creationflags=creationflags,
     )
     return {

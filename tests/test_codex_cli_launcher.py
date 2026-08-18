@@ -26,6 +26,19 @@ def test_build_codex_cli_command_matches_reference_profile_shape(tmp_path: Path)
     assert "codex --profile cunai --dangerously-bypass-approvals-and-sandbox resume" in command
 
 
+def test_build_codex_cli_command_can_resume_a_specific_session(tmp_path: Path) -> None:
+    command = launcher.build_codex_cli_command(
+        provider="cunai",
+        profile="cunai",
+        permission="workspace-write",
+        resume=True,
+        resume_session_id="10000000-0000-4000-8000-000000000001",
+        workdir=str(tmp_path),
+    )
+
+    assert "codex --profile cunai --sandbox workspace-write --ask-for-approval on-request resume 10000000-0000-4000-8000-000000000001" in command
+
+
 def test_build_codex_cli_args_appends_model_override() -> None:
     assert launcher.build_codex_cli_args(
         provider="custom", default_provider="custom", permission="full"
@@ -251,11 +264,14 @@ def test_launch_codex_cli_uses_selected_terminal_and_workdir(tmp_path: Path, mon
         ],
     )
     monkeypatch.setattr(launcher.subprocess, "Popen", fake_popen)
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
 
     result = launcher.launch_codex_cli(
         terminal_id="powershell7",
         command="codex --help",
         workdir=str(tmp_path),
+        codex_home=codex_home,
         platform_name="linux",
     )
 
@@ -265,12 +281,13 @@ def test_launch_codex_cli_uses_selected_terminal_and_workdir(tmp_path: Path, mon
         "-NoLogo",
         "-NoExit",
         "-Command",
-        "codex --help",
+        f"$env:CODEX_HOME = {launcher._shell_quote(str(codex_home), 'powershell')}\ncodex --help",
     ]
     assert process_calls[0]["cwd"] == str(tmp_path)
     assert "stdin" not in process_calls[0]
     assert "stdout" not in process_calls[0]
     assert "stderr" not in process_calls[0]
+    assert process_calls[0]["env"]["CODEX_HOME"] == str(codex_home)
 
 
 def test_launch_codex_cli_cancel_gate_prevents_popen(tmp_path: Path, monkeypatch) -> None:
@@ -392,11 +409,14 @@ def test_launch_codex_cli_uses_new_windows_terminal_tab_when_host_is_open(
         ),
     )
     monkeypatch.setattr(launcher.subprocess, "Popen", fake_popen)
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
 
     result = launcher.launch_codex_cli(
         terminal_id="windows-terminal",
         command="codex --help",
         workdir=str(tmp_path),
+        codex_home=codex_home,
         platform_name="windows",
     )
 
@@ -411,8 +431,9 @@ def test_launch_codex_cli_uses_new_windows_terminal_tab_when_host_is_open(
         "-NoLogo",
         "-NoExit",
         "-Command",
-        "codex --help",
+        f"$env:CODEX_HOME = {launcher._shell_quote(str(codex_home), 'powershell')}\ncodex --help",
     ]
+    assert process_calls[0]["env"]["CODEX_HOME"] == str(codex_home)
     assert result["openedAsTab"] is True
     assert result["launchMode"] == "new-tab"
 
