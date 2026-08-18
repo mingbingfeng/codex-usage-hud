@@ -445,6 +445,18 @@ def _work_item_from_snapshot(
     if status is None:
         return None
     status_value, status_label, pending_accounting = status
+    if status_value == "recent":
+        completion_at = snapshot.task_completed_at or snapshot.final_answer_at
+        session_started_at = snapshot.session_started_at
+        if (
+            completion_at is not None
+            and session_started_at is not None
+            and _datetime_age_seconds(completion_at, session_started_at) > 0
+        ):
+            # Fork/copy materialization keeps the source transcript's terminal
+            # event but gives the target a newer session metadata timestamp.
+            # That inherited completion is history, not a newly finished task.
+            return None
     if _work_item_model_startup_timed_out(snapshot, now=current_time):
         # A task_started/user_message pair can be left behind when a CLI resume
         # exits before model work begins. It has no terminal event, but must not

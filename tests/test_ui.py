@@ -2886,6 +2886,55 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertEqual(len(items), 2)
         self.assertEqual([item.id for item in items], ["session-worker-b", "session-worker-a"])
 
+    def test_work_overlay_hides_inherited_completion_from_copied_session(self) -> None:
+        now = datetime.now().astimezone()
+        session_started_at = now
+        inherited_completion = session_started_at - timedelta(minutes=5)
+        snapshot = ParsedSession(
+            session_id="copied-session",
+            session_title="Copied session",
+            model_provider="custom",
+            client_kind="app",
+            session_started_at=session_started_at,
+            task_started_at=inherited_completion - timedelta(minutes=1),
+            task_completed_at=inherited_completion,
+        )
+        snapshot.request.started_at = snapshot.task_started_at
+        snapshot.request.updated_at = inherited_completion
+
+        self.assertIsNone(
+            active_work._work_item_from_snapshot(
+                snapshot,
+                current=False,
+                now=now,
+            )
+        )
+
+    def test_work_overlay_keeps_new_completion_in_copied_session(self) -> None:
+        now = datetime.now().astimezone()
+        session_started_at = now - timedelta(minutes=5)
+        completion = now
+        snapshot = ParsedSession(
+            session_id="copied-session",
+            session_title="Copied session",
+            model_provider="custom",
+            client_kind="app",
+            session_started_at=session_started_at,
+            task_started_at=session_started_at,
+            task_completed_at=completion,
+        )
+        snapshot.request.started_at = session_started_at
+        snapshot.request.updated_at = completion
+
+        item = active_work._work_item_from_snapshot(
+            snapshot,
+            current=False,
+            now=now,
+        )
+
+        self.assertIsNotNone(item)
+        self.assertEqual(item.status, "recent")
+
     def test_published_work_overlay_stabilizes_stale_snapshot_until_terminal(self) -> None:
         now = datetime.now().astimezone()
         older = WorkStatusItem(
