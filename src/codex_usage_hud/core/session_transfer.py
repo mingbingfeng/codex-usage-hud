@@ -25,9 +25,9 @@ import uuid
 
 _PROVIDER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 _DEFAULT_TIMEOUT_SECONDS = 30.0
-# App Server's ThreadSource enum accepts `custom`; an arbitrary HUD label would
-# be rejected by newer native servers even though the field is optional.
-_THREAD_SOURCE = "custom"
+# Classify copied conversations as normal user threads.  The target rollout is
+# materialized before verification so Codex can list and resume the copy.
+_THREAD_SOURCE = "user"
 # A fork acknowledgement alone is not durable evidence that a target session
 # will be shown by the provider's session list.  The short retry window handles
 # the App Server's asynchronous state-db/index writer without turning HUD
@@ -388,9 +388,9 @@ class CodexAppServerClient:
 
         ``thread/fork`` returning an id only proves creation was accepted.  A
         transfer is ready only after ``thread/read`` can read its durable local
-        rollout, ``thread/list`` finds that id under the selected Provider from
-        the state database that backs Codex's session list, and ``thread/resume``
-        can rehydrate it with that Provider without sending a user turn.
+        rollout, ``thread/list`` finds that id under the selected Provider, and
+        ``thread/resume`` can rehydrate it with that Provider without sending a
+        user turn.
         """
         thread_id = _canonical_uuid(session_id)
         provider = _provider_id(target_provider)
@@ -503,10 +503,12 @@ class CodexAppServerClient:
             "limit": 100,
             "sortKey": "updated_at",
             "sortDirection": "desc",
-            # This intentionally checks the persisted session-list index,
-            # not an in-process JSONL repair that could mask a missing DB
-            # registration just before a source deletion.
-            "useStateDbOnly": True,
+            # Fresh forks have no direct user event, so Codex's state-db row
+            # remains hidden from the interactive list even after the target
+            # rollout has been flattened.  Allow the App Server's supported
+            # rollout fallback; migration still requires this list check and a
+            # successful resume before its source can be deleted.
+            "useStateDbOnly": False,
         }
         seen_cursors: set[str] = set()
         for _page in range(_MAX_TARGET_LIST_PAGES):

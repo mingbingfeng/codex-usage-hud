@@ -860,7 +860,7 @@ class SessionCleanupManager:
             raise SessionCleanupError("不支持的会话迁移模式。")
         if not callable(fork):
             raise SessionCleanupError("Codex fork 服务当前不可用。")
-        if normalized_mode == "migrate" and not callable(materialize):
+        if not callable(materialize):
             raise SessionCleanupError("Codex 目标会话物化服务当前不可用。")
         if not callable(verify):
             raise SessionCleanupError("Codex 目标会话持久化验证当前不可用。")
@@ -953,8 +953,15 @@ class SessionCleanupManager:
                     )
                 created_target_ids.add(new_session_id)
                 forked = True
-                # Verify the target before any migration-only rewrite.  This
-                # separates a usable copy from a later source-deletion gate.
+                # App Server forks initially contain only lineage metadata.
+                # Flatten the source history for both copy and migration so
+                # thread/list can discover the target through its rollout
+                # fallback before we claim that it is visible and resumable.
+                assert callable(materialize)
+                materialized = materialize(new_session_id, item._session_id)
+                if materialized is False:
+                    raise SessionCleanupError("Codex 目标会话历史物化未完成。")
+                history_materialized = True
                 if verify(new_session_id, normalized_target) is not True:
                     raise SessionCleanupError(
                         "目标会话已创建，但未通过目标 Provider 可见和续聊验证。"
@@ -967,19 +974,6 @@ class SessionCleanupManager:
                     self._register_session_index(new_session_id, item.title)
                 except SessionCleanupError as exc:
                     index_warning = str(exc) or type(exc).__name__
-                if normalized_mode == "migrate":
-                    assert callable(materialize)
-                    materialized = materialize(new_session_id, item._session_id)
-                    if materialized is False:
-                        raise SessionCleanupError("Codex 目标会话历史物化未完成。")
-                    # Materialization rewrites the target rollout; prove that
-                    # the rewritten target is still readable and listed before
-                    # making its source eligible for deletion.
-                    if verify(new_session_id, normalized_target) is not True:
-                        raise SessionCleanupError(
-                            "目标会话历史已准备，但重新验证未通过。"
-                        )
-                    history_materialized = True
                 result = {
                     "id": item.id,
                     "title": item.title,

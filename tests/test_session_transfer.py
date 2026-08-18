@@ -20,7 +20,7 @@ SOURCE_ID = "10000000-0000-4000-8000-000000000001"
 TARGET_ID = "10000000-0000-4000-8000-000000000002"
 
 
-def test_app_server_fork_requests_target_provider_and_validates_response() -> None:
+def test_app_server_fork_requests_interactive_target_provider_and_validates_response() -> None:
     client = CodexAppServerClient(executable="codex")
     client.request = MagicMock(
         return_value={
@@ -35,7 +35,7 @@ def test_app_server_fork_requests_target_provider_and_validates_response() -> No
         {
             "threadId": SOURCE_ID,
             "modelProvider": "routin",
-            "threadSource": "custom",
+            "threadSource": "user",
             "ephemeral": False,
             "cwd": "E:/project",
         },
@@ -119,7 +119,7 @@ def test_app_server_verifies_persistent_thread_before_source_deletion(
                 "limit": 100,
                 "sortKey": "updated_at",
                 "sortDirection": "desc",
-                "useStateDbOnly": True,
+                "useStateDbOnly": False,
             },
         ),
         call(
@@ -210,14 +210,18 @@ def test_worker_routes_session_transfer_to_app_server_and_configured_target() ->
     }
     first_app_server = MagicMock()
     first_app_server.fork.return_value = TARGET_ID
-    first_app_server.verify_persistent_thread.return_value = True
+    second_app_server = MagicMock()
+    second_app_server.verify_persistent_thread.return_value = True
     first_client = MagicMock()
     first_client.__enter__.return_value = first_app_server
-    client_factory = MagicMock(return_value=first_client)
+    second_client = MagicMock()
+    second_client.__enter__.return_value = second_app_server
+    client_factory = MagicMock(side_effect=[first_client, second_client])
     manager.materialize_target_rollout.return_value = None
 
     def transfer(*_args, **kwargs):
         assert kwargs["fork"](SOURCE_ID, "routin", "E:/project") == TARGET_ID
+        assert kwargs["materialize"](TARGET_ID, SOURCE_ID) is None
         assert kwargs["verify"](TARGET_ID, "routin") is True
         assert callable(kwargs["desktop_source_lifecycle"])
         return transfer_result
@@ -270,20 +274,22 @@ def test_worker_routes_session_transfer_to_app_server_and_configured_target() ->
             "routin",
             cwd="E:/project",
         )
-        manager.materialize_target_rollout.assert_not_called()
-        first_app_server.verify_persistent_thread.assert_called_once_with(
+        manager.materialize_target_rollout.assert_called_once_with(TARGET_ID, SOURCE_ID)
+        second_app_server.verify_persistent_thread.assert_called_once_with(
             TARGET_ID,
             "routin",
         )
         first_client.__exit__.assert_called_once_with(None, None, None)
+        second_client.__exit__.assert_called_once_with(None, None, None)
         assert client_factory.call_args_list == [
-            call(codex_home=Path("E:/AppData/Codex"))
+            call(codex_home=Path("E:/AppData/Codex")),
+            call(codex_home=Path("E:/AppData/Codex")),
         ]
     finally:
         assert worker.close()
 
 
-def test_worker_releases_fork_connection_before_migrate_materialization() -> None:
+def test_worker_releases_fork_connection_before_materialization_and_verification() -> None:
     events: list[str] = []
     manager = MagicMock()
     manager.mark_operation.side_effect = lambda **values: {
@@ -312,9 +318,6 @@ def test_worker_releases_fork_connection_before_migrate_materialization() -> Non
     first_app_server = MagicMock()
     first_app_server.fork.side_effect = lambda *_args, **_kwargs: (
         events.append("first-fork") or TARGET_ID
-    )
-    first_app_server.verify_persistent_thread.side_effect = lambda *_args: (
-        events.append("first-verify") or True
     )
     second_app_server = MagicMock()
     second_app_server.verify_persistent_thread.side_effect = lambda *_args: (
@@ -351,7 +354,6 @@ def test_worker_releases_fork_connection_before_migrate_materialization() -> Non
 
     def transfer(*_args, **kwargs):
         assert kwargs["fork"](SOURCE_ID, "routin", "E:/project") == TARGET_ID
-        assert kwargs["verify"](TARGET_ID, "routin") is True
         assert kwargs["materialize"](TARGET_ID, SOURCE_ID) is None
         assert kwargs["verify"](TARGET_ID, "routin") is True
         assert kwargs["desktop_source_lifecycle"](SOURCE_ID, "E:/project") == {
@@ -403,7 +405,6 @@ def test_worker_releases_fork_connection_before_migrate_materialization() -> Non
         assert events == [
             "first-enter",
             "first-fork",
-            "first-verify",
             "first-close",
             "materialize",
             "second-enter",

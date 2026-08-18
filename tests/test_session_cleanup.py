@@ -519,6 +519,15 @@ class SessionCleanupManagerTests(unittest.TestCase):
         payload = manager.scan(request_id="transfer-scan")
         root_row = next(row for row in payload["sessions"] if row["title"] == "Root")
         lifecycle = MagicMock()
+        events: list[str] = []
+
+        def materialize(*_args: object) -> None:
+            events.append("materialize")
+
+        def verify(*_args: object) -> bool:
+            self.assertEqual(events, ["materialize"])
+            events.append("verify")
+            return True
 
         result = manager.transfer(
             [root_row["id"]],
@@ -527,12 +536,15 @@ class SessionCleanupManagerTests(unittest.TestCase):
             "routin",
             "copy",
             fork=lambda *_args: "10000000-0000-4000-8000-000000000017",
-            verify=lambda *_args: True,
+            materialize=materialize,
+            verify=verify,
             desktop_source_lifecycle=lifecycle,
             request_id="transfer-copy-desktop-lifecycle",
         )
 
         self.assertEqual(result["operation"]["state"], "completed")
+        self.assertEqual(events, ["materialize", "verify"])
+        self.assertTrue(result["operation"]["results"][0]["historyMaterialized"])
         lifecycle.assert_not_called()
         self.assertTrue(rollouts[ROOT_ID].exists())
 
@@ -750,8 +762,9 @@ class SessionCleanupManagerTests(unittest.TestCase):
 
         operation = result["operation"]
         self.assertEqual(operation["state"], "partial")
-        self.assertEqual(operation["copiedCount"], 1)
+        self.assertEqual(operation["copiedCount"], 0)
         self.assertEqual(operation["migratedCount"], 0)
+        self.assertEqual(operation["targetFailedCount"], 1)
         self.assertIn("source rollout unavailable", operation["results"][0]["error"])
         self.assertTrue(rollouts[ROOT_ID].exists())
         self.assertTrue(rollouts[CHILD_ID].exists())
@@ -763,6 +776,7 @@ class SessionCleanupManagerTests(unittest.TestCase):
 
         payload = manager.scan(request_id="transfer-scan")
         root_row = next(row for row in payload["sessions"] if row["title"] == "Root")
+        materialize = MagicMock()
         verify = MagicMock(return_value=True)
         result = manager.transfer(
             [root_row["id"]],
@@ -771,6 +785,7 @@ class SessionCleanupManagerTests(unittest.TestCase):
             "routin",
             "copy",
             fork=lambda *_args: CHILD_ID.upper(),
+            materialize=materialize,
             verify=verify,
             request_id="transfer-collision",
         )
@@ -780,6 +795,7 @@ class SessionCleanupManagerTests(unittest.TestCase):
         self.assertEqual(operation["copiedCount"], 0)
         self.assertEqual(operation["targetFailedCount"], 1)
         self.assertIn("目标会话冲突", operation["results"][0]["error"])
+        materialize.assert_not_called()
         verify.assert_not_called()
         self.assertTrue(rollouts[ROOT_ID].exists())
 
@@ -819,6 +835,7 @@ class SessionCleanupManagerTests(unittest.TestCase):
             "routin",
             "copy",
             fork=lambda *_args: next(returned_ids),
+            materialize=lambda *_args: None,
             verify=lambda *_args: True,
             request_id="transfer-duplicate-target",
         )
