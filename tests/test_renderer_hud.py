@@ -455,7 +455,7 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("function refreshLayoutObservers()", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("window[mutationObserverName].observe(headerNode", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("window[mutationObserverName].observe(composerNode", renderer_hud.RENDERER_HUD_SCRIPT)
-        self.assertIn("new ResizeObserver", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn('window[resizeObserverName] = { disconnect() {} };', renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("function startBootstrapObserver()", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("window[bootstrapObserverName].observe(document.body", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn('"layout_bootstrap"', renderer_hud.RENDERER_HUD_SCRIPT)
@@ -469,6 +469,18 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn('"currentSession" in domains && "budget" in domains', renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("const renderedDomains = root === previousRoot ? domains : retainedDomains;", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("applyPayloadDomains(root, nextPayload, renderedDomains);", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn('if ("sessionSwitch" in domains && wasReady)', renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("invalidateHeaderAnchor();", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("invalidateComposerAnchor();", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn(
+            'scheduleForPanels(Object.keys(PANEL), { invalidateTop: true, forceAutoFit: true });',
+            renderer_hud.RENDERER_HUD_SCRIPT,
+        )
+        self.assertIn(
+            'syncPositionSettled(Object.keys(PANEL), { forceAutoFit: true });',
+            renderer_hud.RENDERER_HUD_SCRIPT,
+        )
+        self.assertIn("if (state.manual && !forceAutoFit)", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("function positionStartupBubble", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("top: 72px;", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("bottom: auto;", renderer_hud.RENDERER_HUD_SCRIPT)
@@ -491,6 +503,23 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("pointer-events: none;", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("function headerLeftControlEdge(headerNode, header", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("function headerRightControlStart(headerNode, header", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("function headerTitleScopeSelector()", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("function mutationTouchesHeaderTitleScope(mutation)", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn('const titleButton = element.closest?.("button");', renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("titleButton?.matches?.(selector)", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("function mutationTouchesComposerModeControl(mutation)", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn(
+            "if (!layoutMutationTouchesTextInput(mutation) && mutationTouchesComposerModeControl(mutation))",
+            renderer_hud.RENDERER_HUD_SCRIPT,
+        )
+        self.assertIn(
+            'scheduleForPanels(["top"], { invalidateTop: true });',
+            renderer_hud.RENDERER_HUD_SCRIPT,
+        )
+        self.assertIn(
+            'scheduleForPanels(["request"]);',
+            renderer_hud.RENDERER_HUD_SCRIPT,
+        )
         self.assertIn("chat actions", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("open in", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("codex-usage-hud-line-inner", renderer_hud.RENDERER_HUD_SCRIPT)
@@ -578,6 +607,8 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("headerRightControlStart", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("manualTopRect", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("footerGapSlot", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("Automatic top HUD geometry owns the whole title-bar slot", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("widthOverride == null ? slot.width : widthOverride", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("codexUsageHudPanelState:v5", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("grid-template-rows: auto minmax(0, 1fr) auto", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertLess(

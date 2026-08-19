@@ -3375,6 +3375,16 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
         });
       }
 
+      function normaliseSessionTransferTargetProvider(settings, sourceProvider) {
+        const targets = sessionTransferProviderTargets(settings, sourceProvider);
+        const current = String(sessionTransferState.targetProvider || "").trim().toLowerCase();
+        const next = targets.find((provider) => (
+          String(provider || "").trim().toLowerCase() === current
+        )) || targets[0] || "";
+        sessionTransferState.targetProvider = String(next || "").trim();
+        return targets;
+      }
+
       function sessionTransferDataFromPayload() {
         return sessionCleanupFromPayload();
       }
@@ -3470,11 +3480,23 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
       }
 
       function sessionTransferOperation() {
-        if (sessionTransferState.operation && typeof sessionTransferState.operation === "object") {
-          return sessionTransferState.operation;
-        }
-        const operation = sessionTransferState.data?.operation;
-        return operation && typeof operation === "object" ? operation : {};
+        const operation = sessionTransferState.operation && typeof sessionTransferState.operation === "object"
+          ? sessionTransferState.operation
+          : sessionTransferState.data?.operation;
+        if (!operation || typeof operation !== "object") return {};
+        if (String(operation?.action || "").toLowerCase() !== "sessiontransfer") return operation;
+        if (!sessionTransferOperationMatchesCurrentPair(operation)) return {};
+        return operation;
+      }
+
+      function sessionTransferOperationMatchesCurrentPair(operation) {
+        const source = String(sessionTransferState.sourceProvider || "").trim().toLowerCase();
+        const target = String(sessionTransferState.targetProvider || "").trim().toLowerCase();
+        const operationSource = String(operation?.sourceProvider || "").trim().toLowerCase();
+        const operationTarget = String(operation?.targetProvider || "").trim().toLowerCase();
+        return !!source && !!target && !!operationSource && !!operationTarget
+          && operationSource === source
+          && operationTarget === target;
       }
 
       function sessionTransferBusy(operation = sessionTransferOperation()) {
@@ -3533,10 +3555,12 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
           ? Math.max(0, Number(operation?.sourceRetainedCount || 0))
           : 0;
         const headline = state === "completed"
-          ? `${mode}完成：${mode === "迁移" ? migrated : targetReady} 个会话已处理`
+          ? `${mode}完成：${targetReady} 个会话已可在目标 Provider 继续工作`
           : `${mode}${state === "partial" ? "部分完成" : "失败"}`;
-        const details = mode === "迁移"
+        const details = mode === "迁移" && state !== "completed"
           ? `目标可见可续聊 ${targetReady} · 源已删除 ${migrated} · 源保留 ${retained} · 目标未就绪 ${targetFailed}`
+          : mode === "迁移"
+            ? `目标可见可续聊 ${targetReady}`
           : `目标可见可续聊 ${targetReady} · 目标未就绪 ${targetFailed}`;
         const operationError = String(operation?.error || "").trim();
         const targetProvider = String(operation?.targetProvider || "").trim().toLowerCase();
@@ -3547,7 +3571,7 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
           operationError
             ? `<div class="codex-usage-hud-session-transfer-error">${escapeHtml(operationError)}</div>`
             : "",
-          ...(Array.isArray(operation?.results) ? operation.results : [])
+          ...(Array.isArray(operation?.results) && state !== "completed" ? operation.results : [])
           .filter((item) => String(item?.error || "").trim())
           .slice(0, 4)
           .map((item) => `<div class="codex-usage-hud-session-transfer-error">${escapeHtml(item?.title || "会话")}：${escapeHtml(item?.error || "未知错误")}</div>`),
@@ -3561,15 +3585,12 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
         syncSessionTransferModeFromDialog();
         const dataValue = data && typeof data === "object" ? data : {};
         const view = viewOverride || sessionTransferView(dataValue);
+        const source = String(sessionTransferState.sourceProvider || "").trim().toLowerCase();
+        const settings = hudSettingsFromPayload();
+        const targets = normaliseSessionTransferTargetProvider(settings, source);
         const operation = sessionTransferOperation();
         const operationState = String(operation?.state || "").toLowerCase();
         const busy = sessionTransferBusy(operation);
-        const source = String(sessionTransferState.sourceProvider || "").trim().toLowerCase();
-        const settings = hudSettingsFromPayload();
-        const targets = sessionTransferProviderTargets(settings, source);
-        if (targets.length && !targets.includes(sessionTransferState.targetProvider)) {
-          sessionTransferState.targetProvider = targets[0];
-        }
         const selected = view.selected;
         const selectableIds = view.selectableIds;
         const allSelected = selectableIds.length > 0 && selectableIds.every((id) => selected.has(id));
@@ -3641,13 +3662,10 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
         const data = dataOverride && typeof dataOverride === "object"
           ? dataOverride
           : (sessionCleanupFromPayload() || sessionTransferState.data || {});
-        const operation = sessionTransferOperation();
         const source = String(sessionTransferState.sourceProvider || "").trim().toLowerCase();
         const settings = hudSettingsFromPayload();
-        const targets = sessionTransferProviderTargets(settings, source);
-        if (targets.length && !targets.includes(sessionTransferState.targetProvider)) {
-          sessionTransferState.targetProvider = targets[0];
-        }
+        const targets = normaliseSessionTransferTargetProvider(settings, source);
+        const operation = sessionTransferOperation();
         const view = sessionTransferView(data);
         const rows = view.rows;
         const selectableIds = view.selectableIds;
@@ -3768,7 +3786,13 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
         sessionTransferState.page = 0;
         const data = sessionTransferDataFromPayload();
         sessionTransferState.data = data && typeof data === "object" ? data : null;
-        sessionTransferState.operation = sessionTransferState.data?.operation || null;
+        const operation = sessionTransferState.data?.operation;
+        sessionTransferState.operation = operation && typeof operation === "object"
+          && String(operation?.action || "").toLowerCase() === "sessiontransfer"
+          && String(operation?.sourceProvider || "").trim().toLowerCase() === source
+          && String(operation?.targetProvider || "").trim().toLowerCase() === String(targets[0] || "").trim().toLowerCase()
+          ? operation
+          : null;
         const sharedScanRequestId = activeSessionCleanupScanRequestId(sessionTransferState.data);
         if (sharedScanRequestId) sessionTransferState.scanRequestId = sharedScanRequestId;
         const layer = document.createElement("div");
@@ -3854,7 +3878,13 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
             if (terminal) sessionTransferState.scanRequestId = "";
           }
         } else if (action === "sessiontransfer") {
-          if (!sessionTransferState.requestId || responseRequestId === sessionTransferState.requestId) {
+          if (sessionTransferState.open) {
+            const source = String(sessionTransferState.sourceProvider || "").trim().toLowerCase();
+            normaliseSessionTransferTargetProvider(hudSettingsFromPayload(), source);
+          }
+          const pairMatches = !sessionTransferState.open
+            || sessionTransferOperationMatchesCurrentPair(operation);
+          if (pairMatches && (!sessionTransferState.requestId || responseRequestId === sessionTransferState.requestId)) {
             sessionTransferState.operation = operation;
             if (terminal) {
               codexCliPersistTransferWorkdirs(operation);

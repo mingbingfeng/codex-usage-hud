@@ -1,7 +1,7 @@
 """Static raw Renderer layout asset fragment."""
 
 TEXT = r"""
-      function syncPosition(names = Object.keys(PANEL)) {
+      function syncPosition(names = Object.keys(PANEL), { forceAutoFit = false } = {}) {
         const root = document.getElementById(rootId);
         if (!root) return;
         positionStartupBubble(root);
@@ -14,14 +14,16 @@ TEXT = r"""
           const state = getPanelState(name);
           const expanded = panel.dataset.expanded === "true";
           const height = desiredHeight(name, state, expanded);
-          const widthOverride = name === "request" && state.anchorSource === "footer-gap" && state.widthRatio
+          const widthOverride = forceAutoFit
+            ? null
+            : name === "request" && state.anchorSource === "footer-gap" && state.widthRatio
             ? null
             : state.width;
           const anchor = name === "top"
             ? topAnchor(height, widthOverride)
             : requestAnchor(height, widthOverride);
           let { left, top, width } = anchor;
-          if (state.manual) {
+          if (state.manual && !forceAutoFit) {
             const relativeRequest = name === "request"
               ? manualRequestRect(state, anchor, expanded, height)
               : null;
@@ -44,25 +46,28 @@ TEXT = r"""
         startBootstrapObserver();
       }
 
-      function syncPositionSettled(names = Object.keys(PANEL)) {
+      function syncPositionSettled(names = Object.keys(PANEL), options = {}) {
         for (const timer of (window[settleTimerName] || [])) ctx.lifecycle.clearTimeout(timer);
         window[settleTimerName] = [
-          ctx.lifecycle.timeout("layout_settle", () => syncPosition(names), 50),
-          ctx.lifecycle.timeout("layout_settle", () => syncPosition(names), 140),
-          ctx.lifecycle.timeout("layout_settle", () => syncPosition(names), 260),
+          ctx.lifecycle.timeout("layout_settle", () => syncPosition(names, options), 50),
+          ctx.lifecycle.timeout("layout_settle", () => syncPosition(names, options), 140),
+          ctx.lifecycle.timeout("layout_settle", () => syncPosition(names, options), 260),
         ];
       }
 
-      function scheduleForPanels(names = Object.keys(PANEL), { invalidateTop = false } = {}) {
+      function scheduleForPanels(names = Object.keys(PANEL), { invalidateTop = false, forceAutoFit = false } = {}) {
         const panelNames = Array.isArray(names) ? names.filter((name) => PANEL[name]) : Object.keys(PANEL);
         if (invalidateTop || panelNames.includes("top")) topSlotCache = null;
+        pendingForceAutoFit = pendingForceAutoFit || forceAutoFit;
         if (!pendingSyncPanels) pendingSyncPanels = new Set();
         for (const name of panelNames) pendingSyncPanels.add(name);
         ctx.frames.cancel("layout");
         window[rafName] = ctx.frames.schedule("layout", () => {
           const nextPanels = Array.from(pendingSyncPanels || Object.keys(PANEL));
           pendingSyncPanels = null;
-          syncPosition(nextPanels);
+          const nextForceAutoFit = pendingForceAutoFit;
+          pendingForceAutoFit = false;
+          syncPosition(nextPanels, { forceAutoFit: nextForceAutoFit });
         });
       }
 
@@ -79,6 +84,67 @@ TEXT = r"""
         return !!element?.closest?.("textarea, [contenteditable='true'], [role='textbox']");
       }
 
+      function headerTitleScopeSelector() {
+        return [
+          "[data-thread-title]",
+          "[data-testid*='thread-title' i]",
+          "[data-testid*='conversation-title' i]",
+          // Codex Desktop's current title button is nested under the title
+          // row. Keep this structural fallback narrow so arbitrary header
+          // headings and truncation changes do not retrigger layout.
+          ".text-md > .flex > .min-w-0.truncate > span > button",
+        ].join(", ");
+      }
+
+      function nodeTouchesHeaderTitleScope(node) {
+        const element = elementFromMutationNode(node);
+        if (!element || element.closest?.(`#${rootId}`)) return false;
+        const selector = headerTitleScopeSelector();
+        const titleButton = element.closest?.("button");
+        return !!(
+          element.matches?.(selector)
+          || element.closest?.(selector)
+          // A characterData mutation can target a node inside the title
+          // button, so test that button against the narrow title structure.
+          || titleButton?.matches?.(selector)
+        );
+      }
+
+      function mutationTouchesHeaderTitleScope(mutation) {
+        if (nodeTouchesHeaderTitleScope(mutation.target)) return true;
+        const selector = headerTitleScopeSelector();
+        for (const node of [...(mutation.addedNodes || []), ...(mutation.removedNodes || [])]) {
+          if (nodeTouchesHeaderTitleScope(node)) return true;
+          const element = elementFromMutationNode(node);
+          if (element?.querySelector?.(selector)) return true;
+        }
+        return false;
+      }
+
+      function isComposerModeControl(element) {
+        const control = element?.closest?.("button, [role='button'], [role='radio'], input[type='radio']");
+        if (!control || control.closest?.(`#${rootId}`)) return false;
+        const identity = [
+          control.getAttribute?.("data-testid"),
+          control.getAttribute?.("aria-label"),
+          control.getAttribute?.("title"),
+          control.dataset?.mode,
+          control.dataset?.composerMode,
+          control.textContent,
+        ].filter(Boolean).join(" ").trim();
+        return /(?:^|[\\s_-])(plan|goal)(?:$|[\\s_-])|计划|目标/i.test(identity);
+      }
+
+      function mutationTouchesComposerModeControl(mutation) {
+        if (isComposerModeControl(elementFromMutationNode(mutation.target))) return true;
+        for (const node of [...(mutation.addedNodes || []), ...(mutation.removedNodes || [])]) {
+          const element = elementFromMutationNode(node);
+          if (isComposerModeControl(element)) return true;
+          if (element?.querySelector?.("[data-testid*='plan' i], [data-testid*='goal' i], [data-mode*='plan' i], [data-mode*='goal' i], [data-composer-mode]")) return true;
+        }
+        return false;
+      }
+
       function layoutMutationTarget(mutation, headerNode, composerNode) {
         const element = elementFromMutationNode(mutation.target);
         if (!element || element.closest?.(`#${rootId}`)) return "";
@@ -90,29 +156,31 @@ TEXT = r"""
       function handleLayoutMutations(mutations) {
         const headerNode = cachedHeaderNode;
         const composerNode = cachedComposerNode;
-        let touchesHeader = false;
-        let touchesComposer = false;
-        let touchesTextInput = false;
+        let touchesHeaderTitle = false;
+        let touchesComposerMode = false;
         for (const mutation of mutations) {
           const target = layoutMutationTarget(mutation, headerNode, composerNode);
-          if (target === "header") touchesHeader = true;
+          if (target === "header" && mutationTouchesHeaderTitleScope(mutation)) {
+            touchesHeaderTitle = true;
+          }
           if (target === "composer") {
-            touchesComposer = true;
-            if (layoutMutationTouchesTextInput(mutation)) touchesTextInput = true;
+            // Typing in the active conversation must not repeatedly measure
+            // HUD geometry. Non-text composer mutations still cover mode
+            // controls such as Plan/Goal, whose footer layout can change.
+            if (!layoutMutationTouchesTextInput(mutation) && mutationTouchesComposerModeControl(mutation)) {
+              touchesComposerMode = true;
+            }
           }
         }
-        if (touchesHeader) {
+        if (touchesHeaderTitle) {
           invalidateHeaderAnchor();
-          scheduleForPanels(Object.keys(PANEL), { invalidateTop: true });
-          return;
+          scheduleForPanels(["top"], { invalidateTop: true });
+          syncPositionSettled(["top"]);
         }
-        if (!touchesComposer) return;
-        if (touchesTextInput) {
-          scheduleRequestAfterComposerSettles();
-          return;
+        if (touchesComposerMode) {
+          invalidateComposerAnchor();
+          scheduleForPanels(["request"]);
         }
-        invalidateComposerAnchor();
-        scheduleForPanels(["request"]);
       }
 
       function refreshLayoutObservers() {
@@ -138,13 +206,11 @@ TEXT = r"""
         };
         if (headerNode) window[mutationObserverName].observe(headerNode, mutationOptions);
         if (composerNode && composerNode !== headerNode) window[mutationObserverName].observe(composerNode, mutationOptions);
-        if (typeof ResizeObserver === "function") {
-          window[resizeObserverName] = ctx.observers.set("layout_resize", new ResizeObserver(() => scheduleForPanels(Object.keys(PANEL), { invalidateTop: true })));
-          if (headerNode) window[resizeObserverName].observe(headerNode);
-          if (composerNode && composerNode !== headerNode) window[resizeObserverName].observe(composerNode);
-        } else {
-          window[resizeObserverName] = { disconnect() {} };
-        }
+        // Session switch, async title completion, and Plan/Goal selection
+        // are handled by the targeted observers above. A generic resize
+        // observer also fires while typing, which violates the per-session
+        // no-relayout contract.
+        window[resizeObserverName] = { disconnect() {} };
         ensureComposerInputWatchers();
       }
 
@@ -312,6 +378,11 @@ TEXT = r"""
       scheduleForPanels,
       scheduleRequestAfterComposerSettles,
       layoutMutationTouchesTextInput,
+      headerTitleScopeSelector,
+      nodeTouchesHeaderTitleScope,
+      mutationTouchesHeaderTitleScope,
+      isComposerModeControl,
+      mutationTouchesComposerModeControl,
       layoutMutationTarget,
       handleLayoutMutations,
       refreshLayoutObservers,
@@ -378,6 +449,11 @@ TEXT = r"""
     scheduleForPanels,
     scheduleRequestAfterComposerSettles,
     layoutMutationTouchesTextInput,
+    headerTitleScopeSelector,
+    nodeTouchesHeaderTitleScope,
+    mutationTouchesHeaderTitleScope,
+    isComposerModeControl,
+    mutationTouchesComposerModeControl,
     layoutMutationTarget,
     handleLayoutMutations,
     refreshLayoutObservers,

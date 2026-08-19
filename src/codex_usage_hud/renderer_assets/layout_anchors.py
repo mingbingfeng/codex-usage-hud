@@ -301,8 +301,14 @@ TEXT = r"""
         }
         const slot = topHeaderSlot(headerNode, header);
         const fitMinWidth = Math.min(minWidth, Math.max(1, slot.width));
-        const defaultWidth = Math.min(PANEL.top.fallbackWidth, slot.width);
-        const width = clamp(widthOverride || defaultWidth, fitMinWidth, Math.max(fitMinWidth, slot.width));
+        // Automatic top HUD geometry owns the whole title-bar slot. The
+        // fallback width is only for the no-header path; keeping it here would
+        // leave a large unused gap when the title bar is wider than 520px.
+        const width = clamp(
+          widthOverride == null ? slot.width : widthOverride,
+          fitMinWidth,
+          Math.max(fitMinWidth, slot.width),
+        );
         const left = clamp(slot.left, 8, Math.max(8, slot.right - width));
         const top = clamp(header.top + Math.max(0, (header.height - PANEL.top.collapsedHeight) / 2), 8, Math.max(8, innerHeight - height - 8));
         return {

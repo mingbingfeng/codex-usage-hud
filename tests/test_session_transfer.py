@@ -269,6 +269,9 @@ def test_worker_routes_session_transfer_to_app_server_and_configured_target() ->
             "routin",
             "copy",
         )
+        accepted_operation = manager.mark_operation.call_args_list[0].kwargs
+        assert accepted_operation["sourceProvider"] == "codex"
+        assert accepted_operation["targetProvider"] == "routin"
         first_app_server.fork.assert_called_once_with(
             SOURCE_ID,
             "routin",
@@ -285,6 +288,55 @@ def test_worker_routes_session_transfer_to_app_server_and_configured_target() ->
             call(codex_home=Path("E:/AppData/Codex")),
             call(codex_home=Path("E:/AppData/Codex")),
         ]
+    finally:
+        assert worker.close()
+
+
+def test_worker_keeps_provider_pair_on_failed_session_transfer() -> None:
+    manager = MagicMock()
+    manager.mark_operation.side_effect = lambda **values: {
+        "revision": "revision-1",
+        "operation": {
+            "requestId": str(values["request_id"]),
+            "action": str(values["action"]),
+            "state": str(values["state"]),
+            **{
+                key: value
+                for key, value in values.items()
+                if key not in {"request_id", "action", "state"}
+            },
+        },
+    }
+    context = SimpleNamespace(
+        app_provider="codex",
+        sessions_root=Path("E:/AppData/Codex/sessions"),
+        provider_registry=SimpleNamespace(entries={}),
+        session_cleanup_payload={},
+        runtime_events=RuntimeEventBus(),
+    )
+    worker = SessionCleanupWorker(context, manager, on_deleted=lambda *_args: None)
+    try:
+        accepted = worker.enqueue(
+            {
+                "action": "sessionTransfer",
+                "requestId": "transfer-failed-1",
+                "sourceProvider": "codex",
+                "targetProvider": "codex",
+                "mode": "copy",
+                "itemIds": ["opaque-id"],
+                "inventoryRevision": "revision-1",
+            }
+        )
+        assert accepted["status"] == "accepted"
+        deadline = time.monotonic() + 2
+        while context.session_cleanup_payload["operation"]["state"] != "failed":
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+
+        operation = context.session_cleanup_payload["operation"]
+        assert operation["sourceProvider"] == "codex"
+        assert operation["targetProvider"] == "codex"
+        assert "不能相同" in operation["error"]
     finally:
         assert worker.close()
 
@@ -351,11 +403,20 @@ def test_worker_releases_fork_connection_before_materialization_and_verification
     desktop_lifecycle.archive_then_delete.side_effect = lambda *_args, **_kwargs: (
         events.append("desktop-lifecycle") or desktop_report
     )
+    desktop_lifecycle.preflight.side_effect = lambda *_args, **_kwargs: (
+        events.append("desktop-preflight")
+        or {"verified": True, "threadIds": [SOURCE_ID], "error": ""}
+    )
 
     def transfer(*_args, **kwargs):
         assert kwargs["fork"](SOURCE_ID, "routin", "E:/project") == TARGET_ID
         assert kwargs["materialize"](TARGET_ID, SOURCE_ID) is None
         assert kwargs["verify"](TARGET_ID, "routin") is True
+        assert kwargs["desktop_source_preflight"]([SOURCE_ID], "E:/project") == {
+            "verified": True,
+            "threadIds": [SOURCE_ID],
+            "error": "",
+        }
         assert kwargs["desktop_source_lifecycle"](SOURCE_ID, "E:/project") == {
             "threadId": SOURCE_ID,
             "archived": True,
@@ -410,6 +471,7 @@ def test_worker_releases_fork_connection_before_materialization_and_verification
             "second-enter",
             "second-verify",
             "second-close",
+            "desktop-preflight",
             "desktop-lifecycle",
         ]
         assert client_factory.call_args_list == [
@@ -419,6 +481,10 @@ def test_worker_releases_fork_connection_before_materialization_and_verification
         manager.materialize_target_rollout.assert_called_once_with(TARGET_ID, SOURCE_ID)
         desktop_lifecycle.archive_then_delete.assert_called_once_with(
             SOURCE_ID,
+            cwd="E:/project",
+        )
+        desktop_lifecycle.preflight.assert_called_once_with(
+            [SOURCE_ID],
             cwd="E:/project",
         )
     finally:

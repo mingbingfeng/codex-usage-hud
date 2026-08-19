@@ -168,7 +168,24 @@ def test_provider_settings_expose_session_copy_and_transfer_workflow() -> None:
     assert 'data-action="session-transfer-page"' in SETTINGS_SHELL
     assert "function moveSessionTransferPage" in SETTINGS_SHELL
     assert "目标 Provider 的会话列表确认落盘" in SETTINGS_SHELL
+    assert "operationSource" in SETTINGS_SHELL
+    assert "return !!source && !!target && !!operationSource && !!operationTarget" in SETTINGS_SHELL
+    assert "function normaliseSessionTransferTargetProvider" in SETTINGS_SHELL
+    assert "function sessionTransferOperationMatchesCurrentPair" in SETTINGS_SHELL
+    assert "const pairMatches = !sessionTransferState.open" in SETTINGS_SHELL
+    assert "已可在目标 Provider 继续工作" in SETTINGS_SHELL
     assert 'parts.push("Codex App · 必选")' not in SETTINGS_SHELL
+
+    for function_name in (
+        "syncSessionTransferDialogControls",
+        "sessionTransferDialogHtml",
+    ):
+        function_start = SETTINGS_SHELL.index(f"function {function_name}")
+        function_end = SETTINGS_SHELL.index("\n      function ", function_start + 1)
+        function_source = SETTINGS_SHELL[function_start:function_end]
+        assert function_source.index(
+            "normaliseSessionTransferTargetProvider(settings, source)"
+        ) < function_source.index("const operation = sessionTransferOperation();")
 
 
 def test_session_transfer_reuses_session_management_scan_state_and_controls() -> None:

@@ -72,6 +72,23 @@ def cleanup_string_list(value: object) -> list[str]:
     return [str(item) for item in value if str(item or "").strip()]
 
 
+def _session_transfer_provider_values(
+    command: Mapping[str, object],
+) -> dict[str, str]:
+    return {
+        "sourceProvider": str(
+            command.get("sourceProvider") or command.get("source_provider") or ""
+        )
+        .strip()
+        .casefold(),
+        "targetProvider": str(
+            command.get("targetProvider") or command.get("target_provider") or ""
+        )
+        .strip()
+        .casefold(),
+    }
+
+
 class SessionCleanupWorker:
     _ACTIONS = {
         "sessionCleanupScan",
@@ -120,12 +137,18 @@ class SessionCleanupWorker:
         if action == "sessionCleanupCancel":
             self._publish(self.manager.cancel(request_id=request_id))
         else:
+            accepted_values = (
+                _session_transfer_provider_values(payload)
+                if action == "sessionTransfer"
+                else {}
+            )
             self._publish(
                 self.manager.mark_operation(
                     request_id=request_id,
                     action=action,
                     state="scanning" if action == "sessionCleanupScan" else "accepted",
                     progress=0,
+                    **accepted_values,
                 )
             )
             self._queue.put_nowait(payload)
@@ -148,6 +171,11 @@ class SessionCleanupWorker:
             action = str(command.get("action") or "")
             request_id = str(command.get("requestId") or "")
             refresh_after_delete = False
+            transfer_values = (
+                _session_transfer_provider_values(command)
+                if action == "sessionTransfer"
+                else {}
+            )
             try:
                 if action == "sessionCleanupScan":
                     previous_publisher = getattr(
@@ -217,24 +245,8 @@ class SessionCleanupWorker:
                     )
                     refresh_after_delete = history_deleted > 0
                 elif action == "sessionTransfer":
-                    source_provider = (
-                        str(
-                            command.get("sourceProvider")
-                            or command.get("source_provider")
-                            or ""
-                        )
-                        .strip()
-                        .casefold()
-                    )
-                    target_provider = (
-                        str(
-                            command.get("targetProvider")
-                            or command.get("target_provider")
-                            or ""
-                        )
-                        .strip()
-                        .casefold()
-                    )
+                    source_provider = transfer_values["sourceProvider"]
+                    target_provider = transfer_values["targetProvider"]
                     mode = str(command.get("mode") or "copy").strip().casefold()
                     self._validate_transfer_provider(
                         source_provider,
@@ -315,6 +327,16 @@ class SessionCleanupWorker:
                                 cwd=cwd,
                             ).to_payload()
 
+                        def preflight_source_family(
+                            source_ids: Sequence[str],
+                            cwd: str,
+                        ) -> Mapping[str, object]:
+                            close_app_server()
+                            return self._desktop_thread_lifecycle.preflight(
+                                source_ids,
+                                cwd=cwd,
+                            )
+
                         open_app_server()
                         try:
                             snapshot = self.manager.transfer(
@@ -338,6 +360,7 @@ class SessionCleanupWorker:
                                     )
                                 ),
                                 desktop_source_lifecycle=archive_and_delete_source,
+                                desktop_source_preflight=preflight_source_family,
                                 request_id=request_id,
                             )
                         finally:
@@ -372,6 +395,8 @@ class SessionCleanupWorker:
                         .strip()
                         .lower()
                     )
+                elif action == "sessionTransfer":
+                    failure_values.update(transfer_values)
                 snapshot = self.manager.mark_operation(
                     request_id=request_id,
                     action=action,

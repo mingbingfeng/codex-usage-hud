@@ -9,7 +9,7 @@ Desktop notifications before reporting a source as deleted.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 import json
 import uuid
@@ -206,6 +206,112 @@ def _desktop_thread_lifecycle_script(
 """
 
 
+def _desktop_thread_preflight_script(
+    thread_ids: Sequence[str],
+    cwd: str,
+    *,
+    timeout_ms: int,
+) -> str:
+    """Build a read-only Desktop rollout preflight for a complete source tree."""
+    payload = json.dumps(
+        {
+            "threadIds": [str(value) for value in thread_ids],
+            "cwd": str(cwd or "").strip() or "/",
+        },
+        ensure_ascii=False,
+    )
+    return f"""
+(async () => {{
+  const input = {payload};
+  const timeoutMs = {max(500, int(timeout_ms))};
+  const bridge = window.electronBridge;
+  if (!bridge || typeof bridge.sendMessageFromView !== "function") {{
+    return {{ ok: false, verified: false, error: "desktop-bridge-unavailable" }};
+  }}
+  const pending = new Map();
+  const messageText = (value) => {{
+    if (typeof value === "string") return value;
+    if (value && typeof value === "object") {{
+      return String(value.message || value.detail || value.error || "");
+    }}
+    return "";
+  }};
+  const onMessage = (event) => {{
+    const data = event?.data;
+    if (data?.hostId !== "local" || data.type !== "mcp-response") return;
+    const id = data.message?.id;
+    const waiter = pending.get(id);
+    if (!waiter) return;
+    pending.delete(id);
+    window.clearTimeout(waiter.timer);
+    const error = messageText(data.message?.error);
+    waiter.resolve({{ ok: !error, error, result: data.message?.result }});
+  }};
+  const request = (method, params) => new Promise((resolve) => {{
+    const id = `hud-desktop-thread-preflight-${{crypto.randomUUID()}}`;
+    const timer = window.setTimeout(() => {{
+      if (pending.delete(id)) resolve({{ ok: false, error: "desktop-response-timeout" }});
+    }}, timeoutMs);
+    pending.set(id, {{ resolve, timer }});
+    Promise.resolve(bridge.sendMessageFromView({{
+      type: "mcp-request",
+      hostId: "local",
+      request: {{ id, method, params }},
+      priority: "critical",
+      source: "hud-session-migration-preflight",
+      timeoutMs,
+      expiresAtMs: Date.now() + timeoutMs,
+    }})).catch((error) => {{
+      const waiter = pending.get(id);
+      if (!waiter) return;
+      pending.delete(id);
+      window.clearTimeout(waiter.timer);
+      resolve({{ ok: false, error: `desktop-send-failed: ${{String(error)}}` }});
+    }});
+  }});
+  window.addEventListener("message", onMessage);
+  try {{
+    for (const threadId of input.threadIds) {{
+      const response = await request("thread/read", {{
+        threadId,
+        includeTurns: false,
+      }});
+      if (!response.ok) {{
+        return {{
+          ok: false,
+          verified: false,
+          threadId,
+          error: response.error || "desktop-thread-read-failed",
+        }};
+      }}
+      const thread = response.result?.thread;
+      if (!thread || String(thread.id || "").toLowerCase() !== String(threadId).toLowerCase()) {{
+        return {{
+          ok: false,
+          verified: false,
+          threadId,
+          error: "desktop-thread-rollout-unavailable",
+        }};
+      }}
+    }}
+    return {{
+      ok: true,
+      verified: true,
+      threadIds: input.threadIds,
+      error: "",
+    }};
+  }} finally {{
+    for (const waiter of pending.values()) {{
+      window.clearTimeout(waiter.timer);
+      waiter.resolve({{ ok: false, error: "desktop-preflight-cancelled" }});
+    }}
+    pending.clear();
+    window.removeEventListener("message", onMessage);
+  }}
+}})()
+"""
+
+
 @dataclass(frozen=True)
 class DesktopThreadLifecycleReport:
     """Verified result for one source thread."""
@@ -263,17 +369,7 @@ class CodexDesktopThreadLifecycle:
         self._target_picker = target_picker
         self._command_sender = command_sender
 
-    def archive_then_delete(
-        self,
-        thread_id: str,
-        *,
-        cwd: str = "",
-    ) -> DesktopThreadLifecycleReport:
-        normalized_id = _canonical_uuid(thread_id)
-        if not normalized_id:
-            raise CodexDesktopThreadLifecycleError("Codex Desktop 源会话标识无效。")
-        if not self.enabled:
-            raise CodexDesktopThreadLifecycleError("Codex Desktop CDP 当前不可用。")
+    def _evaluate(self, expression: str) -> Mapping[str, object]:
         try:
             target = self._target_picker(
                 self._target_lister(self.port, self.timeout_seconds)
@@ -285,17 +381,9 @@ class CodexDesktopThreadLifecycle:
                 websocket_url,
                 "Runtime.evaluate",
                 runtime_evaluate_params(
-                    _desktop_thread_lifecycle_script(
-                        normalized_id,
-                        cwd,
-                        timeout_ms=max(500, int(self.timeout_seconds * 1000) - 250),
-                    ),
+                    expression,
                     await_promise=True,
                 ),
-                # The renderer waits independently for archive response,
-                # archive notification, delete response, and delete
-                # notification.  Leave enough CDP time for the full bounded
-                # lifecycle instead of cutting it off after its first phase.
                 self.timeout_seconds * 4 + 0.5,
             )
         except CodexDesktopThreadLifecycleError:
@@ -313,6 +401,50 @@ class CodexDesktopThreadLifecycle:
             raise CodexDesktopThreadLifecycleError(
                 "Codex Desktop 归档/删除通道返回了无效结果。"
             )
+        return value
+
+    def preflight(
+        self,
+        thread_ids: Sequence[str],
+        *,
+        cwd: str = "",
+    ) -> Mapping[str, object]:
+        """Read each source rollout through Desktop before any deletion."""
+        normalized_ids = tuple(
+            normalized
+            for value in thread_ids
+            if (normalized := _canonical_uuid(value))
+        )
+        if not normalized_ids or len(normalized_ids) != len(thread_ids):
+            raise CodexDesktopThreadLifecycleError("Codex Desktop 源会话标识无效。")
+        if not self.enabled:
+            raise CodexDesktopThreadLifecycleError("Codex Desktop CDP 当前不可用。")
+        return self._evaluate(
+            _desktop_thread_preflight_script(
+                normalized_ids,
+                cwd,
+                timeout_ms=max(500, int(self.timeout_seconds * 1000) - 250),
+            )
+        )
+
+    def archive_then_delete(
+        self,
+        thread_id: str,
+        *,
+        cwd: str = "",
+    ) -> DesktopThreadLifecycleReport:
+        normalized_id = _canonical_uuid(thread_id)
+        if not normalized_id:
+            raise CodexDesktopThreadLifecycleError("Codex Desktop 源会话标识无效。")
+        if not self.enabled:
+            raise CodexDesktopThreadLifecycleError("Codex Desktop CDP 当前不可用。")
+        value = self._evaluate(
+            _desktop_thread_lifecycle_script(
+                normalized_id,
+                cwd,
+                timeout_ms=max(500, int(self.timeout_seconds * 1000) - 250),
+            )
+        )
         reported_id = _canonical_uuid(value.get("threadId"))
         if reported_id != normalized_id:
             raise CodexDesktopThreadLifecycleError(

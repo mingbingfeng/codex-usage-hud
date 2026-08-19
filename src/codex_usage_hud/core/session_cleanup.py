@@ -115,6 +115,7 @@ UsageSnapshotPrepare = Callable[[SessionCleanupItem], object]
 UsageSnapshotCommit = Callable[[object], None]
 UsageSnapshotDiscard = Callable[[object], None]
 DesktopSourceLifecycle = Callable[[str, str], Mapping[str, object]]
+DesktopSourcePreflight = Callable[[Sequence[str], str], Mapping[str, object]]
 
 
 def _canonical_uuid(value: object) -> str:
@@ -840,6 +841,7 @@ class SessionCleanupManager:
         materialize: Callable[[str, str], object] | None = None,
         verify: Callable[[str, str], bool] | None = None,
         desktop_source_lifecycle: DesktopSourceLifecycle | None = None,
+        desktop_source_preflight: DesktopSourcePreflight | None = None,
         request_id: str = "",
     ) -> dict[str, object]:
         """Fork selected sessions to another Provider, optionally removing sources.
@@ -919,13 +921,17 @@ class SessionCleanupManager:
                 sourceArchivedCount=sum(
                     bool(result.get("sourceArchived")) for result in results
                 ),
+                sourceCleanupPendingCount=sum(
+                    bool(result.get("sourceCleanupPending")) for result in results
+                ),
                 targetFailedCount=target_failed_count,
                 unmigratedCount=(
-                    len(results) - migrated_count if normalized_mode == "migrate" else 0
+                    len(results) - target_ready_count
+                    if normalized_mode == "migrate"
+                    else 0
                 ),
-                # A migration is not terminal until Desktop has confirmed both
-                # source lifecycle notifications.  Do not label ready targets
-                # as failed while that gate is still running.
+                # Source cleanup is best effort after target readiness; only
+                # target visibility/resumability contributes to transfer failure.
                 failedCount=target_failed_count,
             )
             if callable(publisher):
@@ -988,6 +994,9 @@ class SessionCleanupManager:
                     "sourceDeleted": False,
                     "sourceRetained": normalized_mode == "migrate",
                     "sourceArchived": False,
+                    "sourceCleanupPending": normalized_mode == "migrate",
+                    "sourceCleanupPreflighted": False,
+                    "sourceCleanupError": "",
                     "desktopLifecycleVerified": normalized_mode != "migrate",
                     "indexWarning": index_warning,
                     "error": "",
@@ -1014,6 +1023,9 @@ class SessionCleanupManager:
                         "sourceDeleted": False,
                         "sourceRetained": normalized_mode == "migrate",
                         "sourceArchived": False,
+                        "sourceCleanupPending": normalized_mode == "migrate",
+                        "sourceCleanupPreflighted": False,
+                        "sourceCleanupError": "",
                         "desktopLifecycleVerified": False,
                         "indexWarning": index_warning,
                         "error": error_text,
@@ -1028,8 +1040,9 @@ class SessionCleanupManager:
                 # avoids silently producing a mixed migration.
                 for _item, result in migration_candidates:
                     if not str(result.get("error") or "").strip():
-                        result["error"] = (
-                            "源会话已保留：至少一个目标会话尚未通过迁移就绪验证。"
+                        result["sourceCleanupPending"] = True
+                        result["sourceCleanupError"] = (
+                            "至少一个目标会话尚未通过迁移就绪验证。"
                         )
             elif migration_candidates:
                 fresh_candidates: list[
@@ -1085,29 +1098,92 @@ class SessionCleanupManager:
 
                 if blockers:
                     for original, result in migration_candidates:
-                        result["error"] = blockers.get(
+                        result["sourceCleanupPending"] = True
+                        result["sourceCleanupError"] = blockers.get(
                             original.id,
                             "源会话已保留：同一批次中另一个源会话未满足安全删除条件。",
                         )
+                        if not str(result.get("error") or "").strip():
+                            result["error"] = ""
                 elif len(fresh_candidates) != total:
                     for _original, result in migration_candidates:
-                        result["error"] = "源会话已保留：删除前会话清单不完整。"
+                        result["sourceCleanupPending"] = True
+                        result["sourceCleanupError"] = "删除前会话清单不完整。"
+                        if not str(result.get("error") or "").strip():
+                            result["error"] = ""
                 else:
-                    if not callable(desktop_source_lifecycle):
-                        for _current, result in fresh_candidates:
-                            result["error"] = (
-                                "Codex Desktop 归档/删除通道当前不可用，源会话已保留。"
-                            )
-                    else:
-                        for current, result in fresh_candidates:
-                            source_family_ids = tuple(
+                    source_families = [
+                        (
+                            current,
+                            result,
+                            tuple(
                                 dict.fromkeys(
                                     (
                                         current._session_id,
                                         *current._descendant_ids,
                                     )
                                 )
+                            ),
+                        )
+                        for current, result in fresh_candidates
+                    ]
+                    preflight_errors: dict[str, str] = {}
+                    if callable(desktop_source_preflight):
+                        # This is a batch barrier: do not send archive/delete
+                        # for an earlier root while a later root can still fail
+                        # the Desktop rollout check.
+                        for current, result, source_family_ids in source_families:
+                            try:
+                                preflight = desktop_source_preflight(
+                                    source_family_ids,
+                                    current._cwd,
+                                )
+                                if not isinstance(preflight, Mapping):
+                                    raise SessionCleanupError(
+                                        "Codex Desktop 源会话预检返回了无效结果。"
+                                    )
+                                if preflight.get("verified") is not True:
+                                    raise SessionCleanupError(
+                                        str(
+                                            preflight.get("error")
+                                            or "Codex Desktop 源会话预检未通过。"
+                                        ).strip()
+                                    )
+                            except Exception as exc:
+                                preflight_errors[result["id"]] = (
+                                    str(exc) or type(exc).__name__
+                                )
+
+                    if not callable(desktop_source_lifecycle):
+                        for _current, result, _source_family_ids in source_families:
+                            result["sourceCleanupPending"] = True
+                            result["sourceCleanupError"] = (
+                                "Codex Desktop 归档/删除通道当前不可用，源会话已保留。"
                             )
+                            result["error"] = ""
+                    elif not callable(desktop_source_preflight):
+                        # Source deletion is never permitted without a
+                        # completed batch preflight.  Keep the verified target
+                        # usable and retain every source until Desktop can
+                        # read the full source tree.
+                        for _current, result, _source_family_ids in source_families:
+                            result["sourceCleanupPending"] = True
+                            result["sourceCleanupError"] = (
+                                "Codex Desktop 源会话预检通道当前不可用，源会话已保留。"
+                            )
+                            result["error"] = ""
+                    elif preflight_errors:
+                        for _current, result, _source_family_ids in source_families:
+                            result["sourceCleanupPending"] = True
+                            result["sourceCleanupPreflighted"] = False
+                            result["sourceCleanupError"] = preflight_errors.get(
+                                result["id"],
+                                "同一批次中另一个源会话未通过 Codex Desktop 预检。",
+                            )
+                            result["error"] = ""
+                    else:
+                        for current, result, source_family_ids in source_families:
+                            result["sourceCleanupPreflighted"] = True
                             usage_receipt: object | None = None
                             reports: list[Mapping[str, object]] = []
                             lifecycle_error = ""
@@ -1161,6 +1237,8 @@ class SessionCleanupManager:
                                 result["sourceDeleted"] = True
                                 result["sourceRetained"] = False
                                 result["sourceArchived"] = True
+                                result["sourceCleanupPending"] = False
+                                result["sourceCleanupError"] = ""
                                 result["desktopLifecycleVerified"] = True
                                 result["error"] = ""
                                 if (
@@ -1188,16 +1266,13 @@ class SessionCleanupManager:
                             result["sourceArchived"] = archived
                             result["desktopLifecycleVerified"] = False
                             result["sourceRetained"] = True
-                            if archived:
-                                result["error"] = (
-                                    "源会话已由 Codex Desktop 归档，但永久删除未完成；"
-                                    "已保留归档副本。" + (f"{detail}" if detail else "")
-                                )
-                            else:
-                                result["error"] = (
-                                    "Codex Desktop 未确认源会话已归档，源会话已保留。"
-                                    + (f"{detail}" if detail else "")
-                                )
+                            result["sourceCleanupPending"] = True
+                            result["sourceCleanupError"] = detail
+                            # The destination has already passed the durable
+                            # visibility and resume checks.  Source cleanup is
+                            # best effort and must not turn a usable migration
+                            # into a user-visible transfer error.
+                            result["error"] = ""
                 publish_progress(force=True)
 
         if any(bool(result.get("forked")) for result in results):
@@ -1213,29 +1288,20 @@ class SessionCleanupManager:
             for result in results
         )
         migrated_count = sum(result.get("state") == "migrated" for result in results)
-        desktop_lifecycle_failure_count = sum(
-            bool(result.get("forked"))
-            and bool(result.get("targetVisible"))
-            and bool(result.get("targetResumable"))
-            and not bool(result.get("sourceDeleted"))
-            and normalized_mode == "migrate"
+        source_cleanup_pending_count = sum(
+            bool(result.get("sourceCleanupPending"))
             for result in results
         )
         source_retained_count = sum(
             bool(result.get("sourceRetained")) for result in results
         )
-        failed_count = (
-            total - migrated_count
-            if normalized_mode == "migrate"
-            else total - copied_count
-        )
+        failed_count = total - copied_count
         target_failed_count = total - copied_count
-        unmigrated_count = total - migrated_count if normalized_mode == "migrate" else 0
-        completed = (
-            migrated_count == total
-            if normalized_mode == "migrate"
-            else copied_count == total
-        )
+        unmigrated_count = total - copied_count if normalized_mode == "migrate" else 0
+        # A transfer is successful once every destination is durable, visible,
+        # and resumable.  Source cleanup is deliberately best effort: a stale
+        # Desktop rollout must not invalidate a usable cross-provider copy.
+        completed = copied_count == total
         has_forked_result = any(bool(result.get("forked")) for result in results)
         state = (
             "completed" if completed else ("partial" if has_forked_result else "failed")
@@ -1257,7 +1323,8 @@ class SessionCleanupManager:
             sourceArchivedCount=sum(
                 bool(result.get("sourceArchived")) for result in results
             ),
-            desktopLifecycleFailureCount=desktop_lifecycle_failure_count,
+            desktopLifecycleFailureCount=source_cleanup_pending_count,
+            sourceCleanupPendingCount=source_cleanup_pending_count,
             targetFailedCount=max(0, target_failed_count),
             unmigratedCount=max(0, unmigrated_count),
             failedCount=max(0, failed_count),

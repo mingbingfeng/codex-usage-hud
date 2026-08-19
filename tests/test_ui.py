@@ -2935,6 +2935,419 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertIsNotNone(item)
         self.assertEqual(item.status, "recent")
 
+    def test_current_refresh_removes_cached_inherited_completion(self) -> None:
+        now = datetime.now().astimezone()
+        session_started_at = now
+        inherited_completion = session_started_at - timedelta(minutes=5)
+        started_at = inherited_completion - timedelta(minutes=1)
+        cached = WorkStatusItem(
+            id="copied-session",
+            session_id="copied-session",
+            title="Copied session",
+            status="recent",
+            status_label="刚完成",
+            detail="done",
+            model_provider="custom",
+            session_started_at=session_started_at,
+            task_started_at=started_at,
+            started_at=started_at,
+            updated_at=inherited_completion,
+        )
+        snapshot = ParsedSession(
+            session_id="copied-session",
+            session_title="Copied session",
+            model_provider="custom",
+            client_kind="app",
+            session_started_at=session_started_at,
+            task_started_at=started_at,
+            task_completed_at=inherited_completion,
+        )
+        snapshot.request.started_at = started_at
+        snapshot.request.updated_at = inherited_completion
+        context = SimpleNamespace(
+            user_config=UserConfig.defaults(),
+            app_provider="custom",
+            _work_overlay_terminal_item_tasks={},
+        )
+
+        self.assertEqual(
+            overlay_projection._stabilize_published_work_overlay_items(
+                context,
+                [cached],
+            ),
+            [cached],
+        )
+
+        refreshed = active_work._refresh_visible_current_work_item(
+            context,
+            [cached],
+            snapshot,
+        )
+
+        self.assertEqual(refreshed, [])
+        self.assertEqual(
+            context._work_overlay_terminal_item_tasks["copied-session"],
+            started_at.isoformat(),
+        )
+        self.assertEqual(
+            overlay_projection._stabilize_published_work_overlay_items(
+                context,
+                refreshed,
+            ),
+            [],
+        )
+
+    def test_current_refresh_suppresses_absent_cached_inherited_completion(self) -> None:
+        now = datetime.now().astimezone()
+        session_started_at = now
+        inherited_completion = session_started_at - timedelta(minutes=5)
+        started_at = inherited_completion - timedelta(minutes=1)
+        cached = WorkStatusItem(
+            id="copied-session",
+            session_id="copied-session",
+            title="Copied session",
+            status="recent",
+            status_label="刚完成",
+            detail="done",
+            model_provider="custom",
+            session_started_at=session_started_at,
+            task_started_at=started_at,
+            started_at=started_at,
+            updated_at=inherited_completion,
+        )
+        snapshot = ParsedSession(
+            session_id="copied-session",
+            session_title="Copied session",
+            model_provider="custom",
+            client_kind="app",
+            session_started_at=session_started_at,
+            task_started_at=started_at,
+            task_completed_at=inherited_completion,
+        )
+        snapshot.request.started_at = started_at
+        snapshot.request.updated_at = inherited_completion
+        context = SimpleNamespace(
+            user_config=UserConfig.defaults(),
+            app_provider="custom",
+            _work_overlay_terminal_item_tasks={},
+        )
+
+        self.assertEqual(
+            overlay_projection._stabilize_published_work_overlay_items(
+                context,
+                [cached],
+            ),
+            [cached],
+        )
+
+        refreshed = active_work._refresh_visible_current_work_item(
+            context,
+            [],
+            snapshot,
+        )
+
+        self.assertEqual(refreshed, [])
+        self.assertEqual(
+            context._work_overlay_terminal_item_tasks["copied-session"],
+            started_at.isoformat(),
+        )
+        self.assertEqual(
+            overlay_projection._stabilize_published_work_overlay_items(
+                context,
+                refreshed,
+            ),
+            [],
+        )
+
+    def test_current_refresh_keeps_absent_copy_tombstone_until_completion(self) -> None:
+        now = datetime.now().astimezone()
+        session_started_at = now - timedelta(minutes=5)
+        started_at = session_started_at - timedelta(minutes=4)
+        context = SimpleNamespace(
+            user_config=UserConfig.defaults(),
+            app_provider="custom",
+            _work_overlay_terminal_item_tasks={},
+        )
+        cached = WorkStatusItem(
+            id="copied-session",
+            session_id="copied-session",
+            title="Copied session",
+            status="recent",
+            status_label="刚完成",
+            detail="source answer",
+            model_provider="custom",
+            session_started_at=session_started_at,
+            task_started_at=started_at,
+            started_at=started_at,
+            updated_at=session_started_at - timedelta(minutes=3),
+        )
+        self.assertEqual(
+            overlay_projection._stabilize_published_work_overlay_items(
+                context,
+                [cached],
+            ),
+            [cached],
+        )
+        context._work_overlay_terminal_item_tasks["copied-session"] = (
+            started_at.isoformat()
+        )
+        steered = ParsedSession(
+            session_id="copied-session",
+            session_title="Copied session",
+            model_provider="custom",
+            client_kind="app",
+            session_started_at=session_started_at,
+            task_started_at=started_at,
+        )
+        steered.request.status = "running"
+        steered.request.started_at = now - timedelta(seconds=30)
+        steered.request.updated_at = steered.request.started_at
+        steered.activity = Activity(
+            kind="agent",
+            detail="continuing",
+            timestamp=steered.request.started_at,
+        )
+
+        refreshed = active_work._refresh_visible_current_work_item(
+            context,
+            [],
+            steered,
+        )
+
+        self.assertEqual(refreshed, [])
+        self.assertEqual(
+            context._work_overlay_terminal_item_tasks["copied-session"],
+            started_at.isoformat(),
+        )
+        self.assertEqual(
+            overlay_projection._stabilize_published_work_overlay_items(
+                context,
+                refreshed,
+            ),
+            [],
+        )
+
+    def test_work_overlay_keeps_post_copy_user_steer_completion_without_task_started(self) -> None:
+        parser = JsonlSessionParser()
+        now = datetime.now().astimezone()
+
+        def row(
+            timestamp: datetime,
+            record_type: str,
+            payload: dict[str, object],
+        ) -> dict[str, object]:
+            return {
+                "timestamp": timestamp.isoformat(),
+                "type": record_type,
+                "payload": payload,
+            }
+
+        target_started_at = now - timedelta(minutes=5)
+        source_task_started_at = target_started_at - timedelta(minutes=4)
+        source_completion_at = source_task_started_at + timedelta(minutes=1)
+        steer_at = target_started_at + timedelta(minutes=4, seconds=30)
+        later_completion_at = now - timedelta(seconds=1)
+        inherited_rows = [
+            row(
+                target_started_at,
+                "session_meta",
+                {
+                    "id": "copied-session",
+                    "source": "vscode",
+                    "model_provider": "custom",
+                },
+            ),
+            row(
+                source_task_started_at,
+                "event_msg",
+                {"type": "task_started", "turn_id": "source-turn"},
+            ),
+            row(
+                source_task_started_at + timedelta(seconds=1),
+                "event_msg",
+                {"type": "user_message", "message": "source task"},
+            ),
+            row(
+                source_completion_at,
+                "event_msg",
+                {
+                    "type": "agent_message",
+                    "phase": "final_answer",
+                    "message": "source answer",
+                },
+            ),
+            row(
+                source_completion_at + timedelta(seconds=1),
+                "event_msg",
+                {"type": "task_complete"},
+            ),
+        ]
+        continued_rows = [
+            row(
+                steer_at,
+                "event_msg",
+                {"type": "user_message", "message": "continue after copy"},
+            ),
+            row(
+                later_completion_at - timedelta(seconds=1),
+                "event_msg",
+                {
+                    "type": "agent_message",
+                    "phase": "final_answer",
+                    "message": "new answer",
+                },
+            ),
+            row(
+                later_completion_at,
+                "event_msg",
+                {"type": "task_complete"},
+            ),
+        ]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            path = root / "copied-session.jsonl"
+            context = SimpleNamespace(
+                sessions_root=root,
+                parser=parser,
+                active_session_tracker=None,
+                user_config=UserConfig.defaults(),
+                app_provider="custom",
+            )
+            path.write_text(
+                "\n".join(json.dumps(item, ensure_ascii=False) for item in inherited_rows)
+                + "\n",
+                encoding="utf-8",
+            )
+
+            inherited_snapshot = parser.parse_file(path)
+            cached_inherited = WorkStatusItem(
+                id="copied-session",
+                session_id="copied-session",
+                title="Copied session",
+                status="recent",
+                status_label="刚完成",
+                detail="source answer",
+                model_provider="custom",
+                session_started_at=target_started_at,
+                task_started_at=source_task_started_at,
+                started_at=source_task_started_at,
+                updated_at=source_completion_at + timedelta(seconds=1),
+            )
+            self.assertEqual(
+                overlay_projection._stabilize_published_work_overlay_items(
+                    context,
+                    [cached_inherited],
+                ),
+                [cached_inherited],
+            )
+            inherited_items = active_work_items_for_snapshot(
+                context,
+                inherited_snapshot,
+                path,
+            )
+
+            self.assertEqual(inherited_snapshot.session_started_at, target_started_at)
+            self.assertEqual(inherited_snapshot.task_started_at, source_task_started_at)
+            self.assertEqual(inherited_items, [])
+            self.assertEqual(
+                context._work_overlay_terminal_item_tasks["copied-session"],
+                source_task_started_at.isoformat(),
+            )
+            self.assertEqual(
+                overlay_projection._stabilize_published_work_overlay_items(
+                    context,
+                    inherited_items,
+                ),
+                [],
+            )
+
+            path.write_text(
+                "\n".join(
+                    json.dumps(item, ensure_ascii=False)
+                    for item in [*inherited_rows, *continued_rows]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            continued_snapshot = parser.parse_file(path)
+            continued_items = active_work_items_for_snapshot(
+                context,
+                continued_snapshot,
+                path,
+            )
+            published_items = overlay_projection._stabilize_published_work_overlay_items(
+                context,
+                continued_items,
+            )
+
+        self.assertEqual(continued_snapshot.task_started_at, source_task_started_at)
+        self.assertEqual(continued_snapshot.task_completed_at, later_completion_at)
+        self.assertEqual(len(continued_items), 1)
+        self.assertEqual(continued_items[0].status, "recent")
+        self.assertEqual(len(published_items), 1)
+        self.assertEqual(published_items[0].status, "recent")
+
+    def test_current_refresh_replaces_suppressed_copy_completion_after_user_steer(self) -> None:
+        now = datetime.now().astimezone()
+        target_started_at = now - timedelta(minutes=5)
+        source_task_started_at = target_started_at - timedelta(minutes=4)
+        source_completion_at = source_task_started_at + timedelta(minutes=1)
+        context = SimpleNamespace(
+            user_config=UserConfig.defaults(),
+            app_provider="custom",
+            _work_overlay_terminal_item_tasks={
+                "copied-session": source_task_started_at.isoformat(),
+            },
+        )
+        cached_inherited = WorkStatusItem(
+            id="copied-session",
+            session_id="copied-session",
+            title="Copied session",
+            status="recent",
+            status_label="刚完成",
+            detail="source answer",
+            model_provider="custom",
+            session_started_at=target_started_at,
+            task_started_at=source_task_started_at,
+            started_at=source_task_started_at,
+            updated_at=source_completion_at,
+        )
+        self.assertEqual(
+            overlay_projection._stabilize_published_work_overlay_items(
+                context,
+                [cached_inherited],
+            ),
+            [],
+        )
+
+        completed = ParsedSession(
+            session_id="copied-session",
+            session_title="Copied session",
+            model_provider="custom",
+            client_kind="app",
+            session_started_at=target_started_at,
+            task_started_at=source_task_started_at,
+            task_completed_at=now,
+        )
+        completed.request.updated_at = now
+
+        refreshed = active_work._refresh_visible_current_work_item(
+            context,
+            [],
+            completed,
+        )
+        published = overlay_projection._stabilize_published_work_overlay_items(
+            context,
+            refreshed,
+        )
+
+        self.assertEqual(context._work_overlay_terminal_item_tasks, {})
+        self.assertEqual(len(refreshed), 1)
+        self.assertEqual(refreshed[0].status, "recent")
+        self.assertEqual(len(published), 1)
+        self.assertEqual(published[0].status, "recent")
+
     def test_published_work_overlay_stabilizes_stale_snapshot_until_terminal(self) -> None:
         now = datetime.now().astimezone()
         older = WorkStatusItem(

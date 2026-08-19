@@ -1535,12 +1535,19 @@ TEXT = r"""
     // treating the absence of a session domain as a new startup state.
     if (renderedSessionPayload) root.dataset.hudReady = "true";
     else if (!wasReady && "startup" in domains) root.dataset.hudReady = "false";
-    // Session payloads only need a full anchor calculation when the HUD first
-    // becomes visible. Subsequent session switches update text in place; the
-    // targeted resize/mutation observers own later layout changes.
+    // Normal session payloads update text in place, but a session switch can
+    // change both the title-bar slot and the composer footer gap before the
+    // host DOM mutation is observable. Invalidate both cached anchors and
+    // settle the HUD against the new conversation geometry immediately.
     if (renderedSessionPayload && !wasReady) {
       syncPosition();
       if (!cachedHeaderNode || !cachedComposerNode) syncPositionSettled();
+    }
+    if ("sessionSwitch" in domains && wasReady) {
+      invalidateHeaderAnchor();
+      invalidateComposerAnchor();
+      scheduleForPanels(Object.keys(PANEL), { invalidateTop: true, forceAutoFit: true });
+      syncPositionSettled(Object.keys(PANEL), { forceAutoFit: true });
     }
     scheduleStaleGuard(nextPayload);
     return true;

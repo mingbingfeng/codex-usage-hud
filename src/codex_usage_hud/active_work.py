@@ -405,6 +405,45 @@ def _work_status_from_snapshot(
     return None
 
 
+def _is_inherited_completion(snapshot: ParsedSession | object) -> bool:
+    """Return whether the terminal event predates the target session metadata."""
+    completion_at = getattr(snapshot, "task_completed_at", None) or getattr(
+        snapshot, "final_answer_at", None
+    )
+    session_started_at = getattr(snapshot, "session_started_at", None)
+    return bool(
+        completion_at is not None
+        and session_started_at is not None
+        and _datetime_age_seconds(completion_at, session_started_at) > 0
+    )
+
+
+def _parse_task_marker(value: object) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _clear_terminal_item_task_for_new_segment(
+    context: object,
+    snapshot: ParsedSession,
+) -> None:
+    """Release inherited suppression once a later user-steer starts."""
+    session_id = str(snapshot.session_id or "").strip()
+    request_started_at = snapshot.request.started_at
+    if not session_id or request_started_at is None:
+        return
+    terminal_tasks = _work_overlay_terminal_item_tasks(context)
+    marker = terminal_tasks.get(session_id)
+    marker_at = _parse_task_marker(marker)
+    if marker_at is not None and _datetime_age_seconds(marker_at, request_started_at) > 0:
+        terminal_tasks.pop(session_id, None)
+
+
 def _work_item_model_startup_timed_out(
     snapshot: ParsedSession,
     *,
@@ -445,18 +484,11 @@ def _work_item_from_snapshot(
     if status is None:
         return None
     status_value, status_label, pending_accounting = status
-    if status_value == "recent":
-        completion_at = snapshot.task_completed_at or snapshot.final_answer_at
-        session_started_at = snapshot.session_started_at
-        if (
-            completion_at is not None
-            and session_started_at is not None
-            and _datetime_age_seconds(completion_at, session_started_at) > 0
-        ):
-            # Fork/copy materialization keeps the source transcript's terminal
-            # event but gives the target a newer session metadata timestamp.
-            # That inherited completion is history, not a newly finished task.
-            return None
+    if status_value == "recent" and _is_inherited_completion(snapshot):
+        # Fork/copy materialization keeps the source transcript's terminal
+        # event but gives the target a newer session metadata timestamp.
+        # That inherited completion is history, not a newly finished task.
+        return None
     if _work_item_model_startup_timed_out(snapshot, now=current_time):
         # A task_started/user_message pair can be left behind when a CLI resume
         # exits before model work begins. It has no terminal event, but must not
@@ -579,21 +611,45 @@ def _refresh_visible_current_work_item(
         ),
         None,
     )
-    if existing_index is None:
-        return list(items)
     refreshed = _work_item_from_snapshot(
         snapshot,
         current=True,
         title=snapshot.session_title,
         source=snapshot.selection_source,
     )
+    if existing_index is None:
+        if refreshed is not None and refreshed.status == "recent":
+            # The inherited terminal may already have removed the current item.
+            # Replace it directly when a later real completion arrives, rather
+            # than clearing the tombstone and allowing the old cache to return.
+            _work_overlay_terminal_item_tasks(context).pop(session_id, None)
+            return [*items, refreshed]
+        if _is_inherited_completion(snapshot):
+            task_key = _iso_or_empty(
+                snapshot.task_started_at or snapshot.request.started_at
+            )
+            if task_key:
+                _work_overlay_terminal_item_tasks(context)[session_id] = task_key
+        return list(items)
+    _clear_terminal_item_task_for_new_segment(context, snapshot)
     if refreshed is None:
+        if _is_inherited_completion(snapshot):
+            task_key = _iso_or_empty(
+                snapshot.task_started_at or snapshot.request.started_at
+            )
+            if task_key:
+                _work_overlay_terminal_item_tasks(context)[session_id] = task_key
+            return [item for index, item in enumerate(items) if index != existing_index]
         if snapshot.task_aborted_at is None:
             return list(items)
         task_key = _iso_or_empty(snapshot.task_started_at or snapshot.request.started_at)
         if task_key:
             _work_overlay_terminal_item_tasks(context)[session_id] = task_key
         return [item for index, item in enumerate(items) if index != existing_index]
+    if refreshed.status == "recent":
+        # A later completion is a new terminal event even when the parser
+        # reuses the inherited task_started marker after a user steer.
+        _work_overlay_terminal_item_tasks(context).pop(session_id, None)
     updated = list(items)
     updated[existing_index] = refreshed
     return updated
@@ -651,6 +707,7 @@ def active_work_items_for_snapshot(
     # Internal collaboration agents stay folded into their parent. Desktop can
     # promote a delegation to an independent visible thread; those do bubble.
     if not _hide_from_work_overlay(snapshot):
+        _clear_terminal_item_task_for_new_segment(context, snapshot)
         current_item = _work_item_from_snapshot(
             snapshot,
             current=True,
@@ -660,6 +717,12 @@ def active_work_items_for_snapshot(
         )
         if current_item is not None:
             items[str(current_item.id)] = current_item
+            if current_item.status == "recent" and snapshot.session_id:
+                terminal_item_tasks.pop(str(snapshot.session_id), None)
+        elif _is_inherited_completion(snapshot) and snapshot.session_id:
+            terminal_item_ids[str(snapshot.session_id)] = _iso_or_empty(
+                snapshot.task_started_at or snapshot.request.started_at
+            )
         elif snapshot.task_aborted_at is not None and snapshot.session_id:
             terminal_item_ids[str(snapshot.session_id)] = _iso_or_empty(
                 snapshot.task_started_at
@@ -681,6 +744,7 @@ def active_work_items_for_snapshot(
             continue
         if _hide_from_work_overlay(parsed):
             continue
+        _clear_terminal_item_task_for_new_segment(context, parsed)
         title = ""
         if context.active_session_tracker is not None:
             title = context.active_session_tracker.title_for_session(
@@ -696,6 +760,12 @@ def active_work_items_for_snapshot(
         )
         if item is not None:
             items[str(item.id)] = item
+            if item.status == "recent" and parsed.session_id:
+                terminal_item_tasks.pop(str(parsed.session_id), None)
+        elif _is_inherited_completion(parsed) and parsed.session_id:
+            terminal_item_ids[str(parsed.session_id)] = _iso_or_empty(
+                parsed.task_started_at or parsed.request.started_at
+            )
         elif parsed.task_aborted_at is not None and parsed.session_id:
             terminal_item_ids[str(parsed.session_id)] = _iso_or_empty(
                 parsed.task_started_at

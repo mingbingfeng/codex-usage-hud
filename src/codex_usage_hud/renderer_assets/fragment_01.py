@@ -93,6 +93,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
 SHARED_HEAD = r"""
   let topSlotCache = null;
   let pendingSyncPanels = null;
+  let pendingForceAutoFit = false;
   function readSettingsUiState() {
     const runtimeState = window[settingsUiStateName];
     if (runtimeState && typeof runtimeState === "object") return runtimeState;

@@ -171,6 +171,17 @@ class SessionCleanupManagerTests(unittest.TestCase):
 
         return archive_then_delete
 
+    @staticmethod
+    def _confirmed_desktop_preflight(
+        thread_ids: object,
+        _cwd: str,
+    ) -> dict[str, object]:
+        return {
+            "verified": True,
+            "threadIds": list(thread_ids),
+            "error": "",
+        }
+
     def test_scan_groups_children_and_keeps_sensitive_identifiers_private(self) -> None:
         fixture = self._fixture()
         temporary, root, _state, _index, _rollouts, manager = fixture
@@ -408,6 +419,7 @@ class SessionCleanupManagerTests(unittest.TestCase):
             fork=fork,
             materialize=lambda *_args: None,
             verify=lambda session_id, provider: bool(session_id and provider),
+            desktop_source_preflight=self._confirmed_desktop_preflight,
             desktop_source_lifecycle=self._confirmed_desktop_lifecycle(
                 state,
                 rollouts,
@@ -457,6 +469,7 @@ class SessionCleanupManagerTests(unittest.TestCase):
             fork=lambda *_args: "10000000-0000-4000-8000-000000000015",
             materialize=lambda *_args: None,
             verify=lambda *_args: True,
+            desktop_source_preflight=self._confirmed_desktop_preflight,
             desktop_source_lifecycle=self._confirmed_desktop_lifecycle(
                 state,
                 rollouts,
@@ -505,10 +518,49 @@ class SessionCleanupManagerTests(unittest.TestCase):
 
         operation = result["operation"]
         row = operation["results"][0]
-        self.assertEqual(operation["state"], "partial")
+        self.assertEqual(operation["state"], "completed")
         self.assertEqual(operation["migratedCount"], 0)
         self.assertTrue(row["sourceRetained"])
-        self.assertIn("Codex Desktop 归档/删除通道当前不可用", row["error"])
+        self.assertEqual(operation["targetFailedCount"], 0)
+        self.assertEqual(operation["failedCount"], 0)
+        self.assertIn("Codex Desktop 归档/删除通道当前不可用", row["sourceCleanupError"])
+        self.assertEqual(row["error"], "")
+        self.assertTrue(rollouts[ROOT_ID].exists())
+        self.assertTrue(rollouts[CHILD_ID].exists())
+
+    def test_session_transfer_migrate_never_deletes_without_desktop_preflight(
+        self,
+    ) -> None:
+        fixture = self._fixture()
+        temporary, _root, _state, _index, rollouts, manager = fixture
+        self.addCleanup(temporary.cleanup)
+        payload = manager.scan(request_id="transfer-scan")
+        root_row = next(row for row in payload["sessions"] if row["title"] == "Root")
+        lifecycle = MagicMock()
+
+        result = manager.transfer(
+            [root_row["id"]],
+            payload["revision"],
+            "openai-custom",
+            "routin",
+            "migrate",
+            fork=lambda *_args: "10000000-0000-4000-8000-000000000023",
+            materialize=lambda *_args: None,
+            verify=lambda *_args: True,
+            desktop_source_lifecycle=lifecycle,
+            request_id="transfer-desktop-preflight-unavailable",
+        )
+
+        operation = result["operation"]
+        row = operation["results"][0]
+        self.assertEqual(operation["state"], "completed")
+        self.assertEqual(operation["migratedCount"], 0)
+        self.assertEqual(operation["sourceCleanupPendingCount"], 1)
+        self.assertTrue(row["sourceRetained"])
+        self.assertFalse(row["sourceCleanupPreflighted"])
+        self.assertIn("源会话预检通道当前不可用", row["sourceCleanupError"])
+        self.assertEqual(row["error"], "")
+        lifecycle.assert_not_called()
         self.assertTrue(rollouts[ROOT_ID].exists())
         self.assertTrue(rollouts[CHILD_ID].exists())
 
@@ -569,18 +621,129 @@ class SessionCleanupManagerTests(unittest.TestCase):
             fork=lambda *_args: "10000000-0000-4000-8000-000000000018",
             materialize=lambda *_args: None,
             verify=lambda *_args: True,
+            desktop_source_preflight=self._confirmed_desktop_preflight,
             desktop_source_lifecycle=lifecycle,
             request_id="transfer-desktop-lifecycle-error",
         )
 
         operation = result["operation"]
-        self.assertEqual(operation["state"], "partial")
+        self.assertEqual(operation["state"], "completed")
         self.assertEqual(operation["migratedCount"], 0)
+        self.assertEqual(operation["copiedCount"], 1)
+        self.assertEqual(operation["targetFailedCount"], 0)
+        self.assertEqual(operation["failedCount"], 0)
+        self.assertEqual(operation["sourceCleanupPendingCount"], 1)
         self.assertIn(
             "Codex Desktop lifecycle is not writable",
-            operation["results"][0]["error"],
+            operation["results"][0]["sourceCleanupError"],
         )
+        self.assertEqual(operation["results"][0]["error"], "")
         self.assertTrue(rollouts[ROOT_ID].exists())
+
+    def test_session_transfer_migrate_skips_source_cleanup_when_desktop_preflight_fails(
+        self,
+    ) -> None:
+        fixture = self._fixture()
+        temporary, _root, _state, _index, rollouts, manager = fixture
+        self.addCleanup(temporary.cleanup)
+        payload = manager.scan(request_id="transfer-scan")
+        root_row = next(row for row in payload["sessions"] if row["title"] == "Root")
+        lifecycle = MagicMock()
+
+        result = manager.transfer(
+            [root_row["id"]],
+            payload["revision"],
+            "openai-custom",
+            "routin",
+            "migrate",
+            fork=lambda *_args: "10000000-0000-4000-8000-000000000020",
+            materialize=lambda *_args: None,
+            verify=lambda *_args: True,
+            desktop_source_preflight=lambda *_args: {
+                "verified": False,
+                "error": "no rollout found for thread id",
+            },
+            desktop_source_lifecycle=lifecycle,
+            request_id="transfer-desktop-preflight-error",
+        )
+
+        operation = result["operation"]
+        row = operation["results"][0]
+        self.assertEqual(operation["state"], "completed")
+        self.assertEqual(operation["copiedCount"], 1)
+        self.assertEqual(operation["targetFailedCount"], 0)
+        self.assertEqual(operation["sourceCleanupPendingCount"], 1)
+        self.assertTrue(row["sourceRetained"])
+        self.assertEqual(row["sourceCleanupError"], "no rollout found for thread id")
+        self.assertEqual(row["error"], "")
+        lifecycle.assert_not_called()
+        self.assertTrue(rollouts[ROOT_ID].exists())
+
+    def test_session_transfer_preflights_every_root_before_any_source_delete(
+        self,
+    ) -> None:
+        fixture = self._fixture()
+        temporary, _root, _state, _index, rollouts, manager = fixture
+        self.addCleanup(temporary.cleanup)
+        rollouts[SECOND_ID].write_text(
+            json.dumps(
+                {
+                    "type": "session_meta",
+                    "payload": {
+                        "model_provider": "openai-custom",
+                        "originator": "Codex Desktop",
+                        "source": "vscode",
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        payload = manager.scan(request_id="transfer-scan")
+        selected = [
+            row["id"]
+            for row in payload["sessions"]
+            if row["title"] in {"Root", "Archived"}
+        ]
+        target_ids = iter(
+            (
+                "10000000-0000-4000-8000-000000000021",
+                "10000000-0000-4000-8000-000000000022",
+            )
+        )
+        preflight_calls: list[tuple[tuple[str, ...], str]] = []
+        lifecycle = MagicMock()
+
+        def preflight(ids: tuple[str, ...], cwd: str) -> dict[str, object]:
+            preflight_calls.append((ids, cwd))
+            return {
+                "verified": SECOND_ID not in ids,
+                "error": "no rollout found for thread id" if SECOND_ID in ids else "",
+            }
+
+        result = manager.transfer(
+            selected,
+            payload["revision"],
+            "openai-custom",
+            "routin",
+            "migrate",
+            fork=lambda *_args: next(target_ids),
+            materialize=lambda *_args: None,
+            verify=lambda *_args: True,
+            desktop_source_preflight=preflight,
+            desktop_source_lifecycle=lifecycle,
+            request_id="transfer-batch-preflight-error",
+        )
+
+        operation = result["operation"]
+        self.assertEqual(operation["state"], "completed")
+        self.assertEqual(operation["copiedCount"], 2)
+        self.assertEqual(operation["sourceCleanupPendingCount"], 2)
+        self.assertEqual(len(preflight_calls), 2)
+        lifecycle.assert_not_called()
+        self.assertTrue(rollouts[ROOT_ID].exists())
+        self.assertTrue(rollouts[CHILD_ID].exists())
+        self.assertTrue(rollouts[SECOND_ID].exists())
 
     def test_session_transfer_keeps_archived_source_when_desktop_delete_is_unconfirmed(
         self,
@@ -611,20 +774,22 @@ class SessionCleanupManagerTests(unittest.TestCase):
             fork=lambda *_args: "10000000-0000-4000-8000-000000000019",
             materialize=lambda *_args: None,
             verify=lambda *_args: True,
+            desktop_source_preflight=self._confirmed_desktop_preflight,
             desktop_source_lifecycle=lifecycle,
             request_id="transfer-desktop-delete-unconfirmed",
         )
 
         operation = result["operation"]
         row = operation["results"][0]
-        self.assertEqual(operation["state"], "partial")
+        self.assertEqual(operation["state"], "completed")
         self.assertEqual(operation["migratedCount"], 0)
         self.assertEqual(operation["desktopLifecycleFailureCount"], 1)
-        self.assertEqual(operation["failedCount"], 1)
+        self.assertEqual(operation["failedCount"], 0)
         self.assertFalse(row["sourceDeleted"])
         self.assertTrue(row["sourceArchived"])
         self.assertTrue(row["sourceRetained"])
-        self.assertIn("永久删除未完成", row["error"])
+        self.assertIn("desktop-delete-failed", row["sourceCleanupError"])
+        self.assertEqual(row["error"], "")
         self.assertTrue(rollouts[ROOT_ID].exists())
         self.assertTrue(rollouts[CHILD_ID].exists())
 
@@ -691,6 +856,7 @@ class SessionCleanupManagerTests(unittest.TestCase):
             fork=fork,
             materialize=lambda *_args: None,
             verify=lambda session_id, provider: bool(session_id and provider),
+            desktop_source_preflight=self._confirmed_desktop_preflight,
             desktop_source_lifecycle=record_lifecycle,
             request_id="transfer-batch",
         )
@@ -871,21 +1037,23 @@ class SessionCleanupManagerTests(unittest.TestCase):
             fork=lambda *_args: "10000000-0000-4000-8000-000000000012",
             materialize=lambda *_args: None,
             verify=lambda *_args: True,
+            desktop_source_preflight=self._confirmed_desktop_preflight,
             desktop_source_lifecycle=lifecycle,
             request_id="transfer-desktop-delete-error",
         )
 
         operation = result["operation"]
         row = operation["results"][0]
-        self.assertEqual(operation["state"], "partial")
+        self.assertEqual(operation["state"], "completed")
         self.assertEqual(operation["copiedCount"], 1)
         self.assertEqual(operation["migratedCount"], 0)
         self.assertEqual(operation["sourceRetainedCount"], 1)
         self.assertEqual(operation["targetFailedCount"], 0)
-        self.assertEqual(operation["unmigratedCount"], 1)
+        self.assertEqual(operation["unmigratedCount"], 0)
         self.assertEqual(row["sourceDeleted"], False)
         self.assertEqual(row["sourceRetained"], True)
-        self.assertIn("Codex Desktop thread/delete failed", row["error"])
+        self.assertIn("Codex Desktop thread/delete failed", row["sourceCleanupError"])
+        self.assertEqual(row["error"], "")
         self.assertTrue(rollouts[ROOT_ID].exists())
 
     def test_session_transfer_keeps_source_if_fork_is_registered_as_a_child(
@@ -941,14 +1109,15 @@ class SessionCleanupManagerTests(unittest.TestCase):
 
         operation = result["operation"]
         row = operation["results"][0]
-        self.assertEqual(operation["state"], "partial")
+        self.assertEqual(operation["state"], "completed")
         self.assertEqual(operation["copiedCount"], 1)
         self.assertEqual(operation["migratedCount"], 0)
         self.assertEqual(operation["sourceRetainedCount"], 1)
         self.assertTrue(row["targetVisible"])
         self.assertFalse(row["sourceDeleted"])
         self.assertTrue(row["sourceRetained"])
-        self.assertIn("目标会话仍属于源会话子树", row["error"])
+        self.assertIn("目标会话仍属于源会话子树", row["sourceCleanupError"])
+        self.assertEqual(row["error"], "")
         self.assertTrue(rollouts[ROOT_ID].exists())
         self.assertTrue(target_path.exists())
 

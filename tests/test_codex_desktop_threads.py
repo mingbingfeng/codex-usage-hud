@@ -9,6 +9,7 @@ from codex_usage_hud.platforms.codex_desktop_threads import (
     CodexDesktopThreadLifecycleError,
     DesktopThreadLifecycleReport,
     _desktop_thread_lifecycle_script,
+    _desktop_thread_preflight_script,
 )
 
 
@@ -49,6 +50,42 @@ def test_lifecycle_script_uses_desktop_app_server_and_requires_notifications() -
     assert "persisted-atom-update" not in script
     assert "state_5.sqlite" not in script
     assert SOURCE_ID in script
+
+
+def test_preflight_script_reads_all_source_rollouts_without_mutation() -> None:
+    script = _desktop_thread_preflight_script(
+        [SOURCE_ID],
+        "E:/project",
+        timeout_ms=2500,
+    )
+
+    assert '"thread/read"' in script
+    assert 'includeTurns: false' in script
+    assert 'source: "hud-session-migration-preflight"' in script
+    assert '"thread/archive"' not in script
+    assert '"thread/delete"' not in script
+    assert SOURCE_ID in script
+
+
+def test_preflight_reports_a_verified_source_family() -> None:
+    sender = MagicMock(
+        return_value=_cdp_value(
+            {
+                "ok": True,
+                "verified": True,
+                "threadIds": [SOURCE_ID],
+                "error": "",
+            }
+        )
+    )
+
+    result = _lifecycle(sender).preflight([SOURCE_ID], cwd="E:/project")
+
+    assert result["verified"] is True
+    assert result["threadIds"] == [SOURCE_ID]
+    params = sender.call_args.args[2]
+    assert params["awaitPromise"] is True
+    assert '"thread/read"' in params["expression"]
 
 
 def test_lifecycle_reports_a_fully_verified_desktop_delete() -> None:
