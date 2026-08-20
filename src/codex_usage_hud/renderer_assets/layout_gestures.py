@@ -40,12 +40,18 @@ TEXT = r"""
             if (gesture.toggleOnTap) window.__codexHudDragSuppressClick = true;
           }
           if (gesture.action === "move") {
-            const width = desiredWidth(name, getPanelState(name), gesture.expanded, gesture.width, gesture.anchor.maxWidth);
+            // The rect under the pointer is authoritative during a move. A
+            // stale persisted width must not snap request back before the
+            // user can drag it.
+            const width = desiredWidth(name, {}, gesture.expanded, gesture.width, gesture.anchor.maxWidth);
             const height = desiredHeight(name, getPanelState(name), gesture.expanded, gesture.height);
             const left = clamp(gesture.left + dx, 8, Math.max(8, innerWidth - width - 8));
             const top = clamp(gesture.top + dy, 8, Math.max(8, innerHeight - height - 8));
             applyRect(panel, left, top, width, height);
-            setPanelState(name, manualPatchFor(name, left, top, width, gesture.anchor, { manual: true }));
+            setPanelState(name, manualPatchFor(name, left, top, width, gesture.anchor, {
+              manual: true,
+              width: Math.round(width),
+            }));
           } else {
             const minWidth = minWidthFor(name, gesture.expanded);
             const minHeight = minHeightFor(name, gesture.expanded);
@@ -83,7 +89,9 @@ TEXT = r"""
           gestureScope.dispose();
           // A pure tap (no movement) falls through to the click handler, which
           // toggles the panel. Only a real drag persists a new position.
-          syncPosition();
+          // A manual gesture owns only its panel. Reflowing both panels here
+          // can recalculate the unrelated top HUD width after moving request.
+          syncPosition([gesture.name]);
           if (gesture.moved) {
             scheduleLayoutReport(
               gesture.action === "resize" ? "resize" : "move",

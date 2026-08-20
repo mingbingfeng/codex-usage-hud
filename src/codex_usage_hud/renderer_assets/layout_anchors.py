@@ -345,8 +345,33 @@ TEXT = r"""
           .sort((left, right) => (left.left - right.left) || (left.top - right.top));
       }
 
+      function footerProtectedControlRects(composer) {
+        // Codex mounts both the reasoning trigger and the small context-usage
+        // ring in the footer's right-hand group. The ring is a role=img span,
+        // not a button, so footerControlRects() cannot see it.
+        const selector = [
+          "[data-codex-intelligence-trigger]",
+          "[role='img'][aria-label*='上下文']",
+          "[role='img'][aria-label*='context' i]",
+        ].join(", ");
+        return Array.from(document.querySelectorAll(selector))
+          .filter((node) => visible(node) && !node.closest?.(`#${rootId}`))
+          .map((node) => ({ ...node.getBoundingClientRect(), protectedFooterControl: true }))
+          .filter((rect) => (
+            rect.width > 0
+            && rect.height > 0
+            && rect.left >= composer.left - 2
+            && rect.right <= composer.right + 2
+            && rect.top >= composer.top - 2
+            && rect.bottom <= Math.min(innerHeight, composer.bottom + 8)
+          ));
+      }
+
       function footerGapSlot(composerNode, composer, minWidth) {
-        const controls = footerControlRects(composerNode, composer);
+        const controls = [
+          ...footerControlRects(composerNode, composer),
+          ...footerProtectedControlRects(composer),
+        ].sort((left, right) => (left.left - right.left) || (left.top - right.top));
         if (!controls.length) return null;
         const rowTop = Math.min(...controls.map((rect) => rect.top));
         const rowBottom = Math.max(...controls.map((rect) => rect.bottom));
@@ -355,11 +380,14 @@ TEXT = r"""
         const padding = 8;
         const blockers = [];
         for (const rect of controls) {
-          const left = clamp(rect.left - padding, start, end);
-          const right = clamp(rect.right + padding, start, end);
+          const protectedControl = rect.protectedFooterControl === true;
+          const safetyPadding = protectedControl ? 14 : padding;
+          const left = clamp(rect.left - safetyPadding, start, end);
+          const right = clamp(rect.right + safetyPadding, start, end);
           if (right <= left) continue;
           const previous = blockers[blockers.length - 1];
           if (previous && left <= previous.right) {
+            previous.left = Math.min(previous.left, left);
             previous.right = Math.max(previous.right, right);
           } else {
             blockers.push({ left, right });
