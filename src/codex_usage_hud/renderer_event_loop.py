@@ -90,6 +90,8 @@ class RendererLoopExecutorPorts:
     wait: Callable[[float], object]
     update_gate: Callable[[], tuple[bool, str, float]] = lambda: (True, "", 0.0)
     record_refresh_merge: Callable[[], None] = lambda: None
+    activity_suspended: Callable[[], bool] = lambda: False
+    wait_until_resumed: Callable[[], object] = lambda: None
 
 
 @dataclass(frozen=True, slots=True)
@@ -669,6 +671,15 @@ class RendererEventLoop:
 
     def run(self) -> int:
         while True:
+            # A locked Windows session can suspend Electron's renderer while
+            # CDP remains reachable. Do not issue any CDP work until unlock.
+            if self.ports.activity_suspended():
+                if self.ports.exit_requested():
+                    return 0
+                if self.ports.restart_requested():
+                    return self.ports.restart_result()
+                self.ports.wait_until_resumed()
+                continue
             daemon_result = self.ports.daemon_tick()
             if daemon_result is not None:
                 return daemon_result

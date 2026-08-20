@@ -265,6 +265,10 @@ class RendererHudClient:
         startup_payload: dict[str, object] | None = None,
     ) -> bool:
         """Install the renderer controller and ask it to report the selected session."""
+        if bool(getattr(self, "_session_suspended", False)):
+            self.last_status = "session-locked"
+            self.last_error = ""
+            return False
         if not self.enabled:
             self.last_status = "disabled"
             return False
@@ -385,6 +389,9 @@ class RendererHudClient:
         startup_retry: bool = False,
     ) -> bool:
         started = time.perf_counter()
+        if bool(getattr(self, "_session_suspended", False)):
+            self._defer_update("session-locked", 30.0)
+            return False
         if not startup_retry:
             deferred = self._update_gate_state()
             if deferred is not None:
@@ -456,6 +463,12 @@ class RendererHudClient:
         *,
         startup_retry: bool = False,
     ) -> bool:
+        # ``startup_retry`` bypasses normal retry backoff, never the Windows
+        # secure-desktop gate. No target discovery or renderer probe may run
+        # while the user is locked.
+        if bool(getattr(self, "_session_suspended", False)):
+            self._defer_update("session-locked", 30.0)
+            return False
         if not self.enabled:
             self.last_status = "disabled"
             return False
@@ -483,6 +496,9 @@ class RendererHudClient:
         *,
         startup_retry: bool = False,
     ) -> bool:
+        if bool(getattr(self, "_session_suspended", False)):
+            self._defer_update("session-locked", 30.0)
+            return False
         if not self.enabled:
             self.last_status = "disabled"
             return False
@@ -757,6 +773,8 @@ class RendererHudClient:
         return reduced, pending, len(domains) - len(changed), extras_digest
 
     def _update_gate_state(self) -> tuple[str, float] | None:
+        if bool(getattr(self, "_session_suspended", False)):
+            return ("session-locked", 30.0)
         now = time.monotonic()
         cooldown_until = float(getattr(self, "_update_cooldown_until", 0.0) or 0.0)
         if now < cooldown_until:
@@ -770,6 +788,8 @@ class RendererHudClient:
 
     def update_gate_state(self) -> tuple[bool, str, float]:
         """Inspect the local update gate without issuing a CDP command."""
+        if bool(getattr(self, "_session_suspended", False)):
+            return False, "session-locked", 30.0
         if not self.enabled:
             return False, "disabled", 5.0
         lock = getattr(self, "_update_lock", None)
@@ -780,6 +800,28 @@ class RendererHudClient:
             return True, "", 0.0
         reason, remaining = deferred
         return False, str(reason), max(0.0, float(remaining))
+
+    def suspend_for_session_lock(self) -> None:
+        """Release CDP listeners while Windows keeps the secure desktop active."""
+        if bool(getattr(self, "_session_suspended", False)):
+            return
+        self._session_suspended = True
+        for binding in (
+            self._active_session_binding,
+            self._settings_command_binding,
+            self._attachments_binding,
+            self._layout_binding,
+            self._theme_binding,
+        ):
+            if binding is not None:
+                binding.close(join_timeout=0.2)
+
+    def resume_after_session_unlock(self) -> None:
+        """Discard stale CDP target state; the next planned refresh reinstalls once."""
+        if not bool(getattr(self, "_session_suspended", False)):
+            return
+        self._session_suspended = False
+        self._clear_target_cache(clear_script=True)
 
     def record_renderer_metric(self, name: str, amount: float = 1.0) -> None:
         window = getattr(self, "_metrics_window", None)
@@ -868,6 +910,9 @@ class RendererHudClient:
         ticks avoid a fresh WebSocket handshake. Falls back to one ephemeral
         Runtime.evaluate against the current page target.
         """
+        if bool(getattr(self, "_session_suspended", False)):
+            self.last_status = "session-locked"
+            return False
         if not self.enabled:
             self.last_status = "disabled"
             return False
@@ -929,6 +974,9 @@ class RendererHudClient:
 
         Used by session-follow self-heal after sticky new-session or binding loss.
         """
+        if bool(getattr(self, "_session_suspended", False)):
+            self.last_status = "session-locked"
+            return False
         if not self.enabled:
             self.last_status = "disabled"
             return False
@@ -985,7 +1033,11 @@ class RendererHudClient:
 
     def rebind_active_session_channel(self) -> bool:
         """Restart the active-session CDP binding for the current page target."""
-        if not self.enabled or self._active_session_binding is None:
+        if (
+            bool(getattr(self, "_session_suspended", False))
+            or not self.enabled
+            or self._active_session_binding is None
+        ):
             return False
         try:
             target = self._page_target(force=True)

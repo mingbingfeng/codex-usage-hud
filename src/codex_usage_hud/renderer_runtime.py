@@ -68,6 +68,7 @@ from .renderer_pre_refresh import (
     RendererPreRefreshExecutor,
     RendererPreRefreshPorts,
 )
+from .session_activity import RendererActivityGate, WindowsSessionLockMonitor
 from . import active_work
 from .active_work import RendererActiveWorkPump
 from . import overlay_projection
@@ -452,10 +453,42 @@ def run_renderer_hud_session(args: argparse.Namespace, *, lock_already_held: boo
                     local_loading.close()
                 command_pump.start()
                 loop_state = RendererLoopState()
+                activity_gate = RendererActivityGate()
                 loop_controls = RendererSessionLoopControls(state=loop_state, monotonic=services.clock.monotonic, response_pending=ports._has_pending_background_usage_response, response_retry_delay=ports._background_usage_response_retry_delay_seconds, exit_event=exit_requested, restart_event=restart_requested, overlay=work_overlay, daemon_restart_result=ports.DAEMON_RESTART_REQUESTED if daemon_manager is not None else 0, restart_codex_event=restart_codex_requested, restart_codex_result=ports.HUD_SWITCH_TO_RENDERER_RESTART_CODEX, daemon_manager=daemon_manager, daemon_failure_exception=ProcessListenerError, unavailable_result=ports.RENDERER_HUD_UNAVAILABLE)
                 connection_manager = renderer_connection.RendererConnectionManager(client=client, tracker_provider=lambda: getattr(context, 'active_session_tracker', None), wake=command_refresh_requested.set, schedule_soft_reinstall=loop_controls.schedule_soft_reinstall, debug_enabled=ports._runtime_debug_enabled, runtime_errors=lambda: ports._runtime_errors_payload_for_context(context), health=connection_health)
                 connection_managers['manager'] = connection_manager
                 loop_controls.connection_manager = connection_manager
+
+                def suspend_for_session_lock() -> None:
+                    if not activity_gate.suspend():
+                        return
+                    suspend_client = getattr(client, 'suspend_for_session_lock', None)
+                    if callable(suspend_client):
+                        suspend_client()
+                    suspend_overlay = getattr(work_overlay, 'suspend_for_session_lock', None)
+                    if callable(suspend_overlay):
+                        suspend_overlay()
+                    ports._LOGGER.info('renderer_hud_session_locked activity_suspended=true')
+
+                def resume_after_session_unlock() -> None:
+                    if not activity_gate.resume():
+                        return
+                    resume_client = getattr(client, 'resume_after_session_unlock', None)
+                    if callable(resume_client):
+                        resume_client()
+                    resume_overlay = getattr(work_overlay, 'resume_after_session_unlock', None)
+                    if callable(resume_overlay):
+                        resume_overlay()
+                    loop_controls.schedule_soft_reinstall()
+                    command_refresh_requested.set()
+                    ports._LOGGER.info('renderer_hud_session_unlocked recovery=scheduled')
+
+                session_lock_monitor = WindowsSessionLockMonitor(
+                    on_lock=suspend_for_session_lock,
+                    on_unlock=resume_after_session_unlock,
+                )
+                resources.session_lock_monitor = session_lock_monitor
+                session_lock_monitor.start()
                 publish_rest_reminder = getattr(work_overlay, 'update_rest_reminder', None)
                 if not callable(publish_rest_reminder):
 
@@ -493,7 +526,7 @@ def run_renderer_hud_session(args: argparse.Namespace, *, lock_already_held: boo
                     return payload_from_snapshot(snapshot, settings=context.user_config, active_display_mode='renderer', settings_path=context.settings_store.path, settings_bridge_url=bridge_url, background_usage_bridge_url=background_usage_bridge_url, background_usage_revision=background_usage_runtime.store.revision() if background_usage_runtime is not None else 0, background_usage_notification=ports._background_usage_notification_for_session(context, snapshot.session_id), rest_reminder=rest_reminder.renderer_payload() if rest_reminder is not None else {'visible': False}, settings_command_status=loop_state.settings_command_status, theme=inputs.event_refresh_request.theme_payload, update_state=inputs.update_state, debug=ports._runtime_debug_enabled(), runtime_errors=ports._runtime_errors_payload_for_context(context), work_overlay_selectable_max=ports._work_overlay_screen_max_items(), desktop_overlay_dependency=ports._desktop_overlay_dependency_status(), provider_registry=ports._provider_registry_payload(context), app_provider=str(getattr(context, 'app_provider', '') or ''), usage_insights=dict(getattr(context, 'usage_insights_payload', {}) or {}), session_cleanup=dict(getattr(context, 'session_cleanup_payload', {}) or {}), connection_health=connection_health, request_rows_limit=loop_state.request_rows_limit).to_domain_json(*sorted(inputs.event_refresh_request.domains))
                 connection_manager.enable_light_push()
                 wait_planner = RendererWaitPlanner(loop_state, RendererWaitPorts(monotonic=services.clock.monotonic, base_delay=lambda snapshot, elapsed, force_fast: ports._renderer_refresh_delay_seconds(context, snapshot, elapsed, force_fast=force_fast), idle_wait_enabled=lambda snapshot, update_state, delay, force_fast: ports._renderer_event_idle_wait_enabled(file_events, snapshot, update_state, delay, force_fast=force_fast), reminder_in=lambda: getattr(getattr(context, 'rest_reminder', None), 'seconds_until_wake', lambda: None)(), keepalive_in=lambda: getattr(work_overlay, 'next_keep_alive_seconds', lambda: None)(), daemon_at=lambda: loop_state.next_daemon_check_at if daemon_manager is not None else None, failure_limit=lambda: ports._renderer_update_failure_limit(display_mode, client.last_error), background_response_pending=ports._has_pending_background_usage_response, probe_in=connection_health.seconds_until_probe, heal_in=connection_health.seconds_until_heal, idle_wait_seconds=ports.RENDERER_EVENT_IDLE_WAIT_SECONDS))
-                event_loop = RendererEventLoop(loop_state, RendererLoopExecutorPorts(sample_inputs=tick_sampler.sample, apply_inputs=pre_refresh_executor.apply, exit_requested=loop_controls.exit_requested, restart_requested=loop_controls.restart_requested, restart_result=loop_controls.restart_result, daemon_tick=loop_controls.daemon_tick, compute_force_fast=lambda inputs: bool(loop_state.latest_snapshot is None or inputs.event_refresh_request.force_fast), apply_refresh=refresh_executor.apply, current_snapshot=lambda: loop_state.latest_snapshot, apply_domain_update=refresh_executor.apply_domains, keep_alive=loop_controls.keep_overlay_alive, after_iteration=loop_controls.after_iteration, compute_wait_delay=wait_planner.compute, wait=command_refresh_requested.wait, update_gate=lambda: getattr(client, 'update_gate_state', lambda: (True, '', 0.0))(), record_refresh_merge=lambda: getattr(client, 'record_renderer_metric', lambda *_args: None)('merged_refreshes')))
+                event_loop = RendererEventLoop(loop_state, RendererLoopExecutorPorts(sample_inputs=tick_sampler.sample, apply_inputs=pre_refresh_executor.apply, exit_requested=loop_controls.exit_requested, restart_requested=loop_controls.restart_requested, restart_result=loop_controls.restart_result, daemon_tick=loop_controls.daemon_tick, compute_force_fast=lambda inputs: bool(loop_state.latest_snapshot is None or inputs.event_refresh_request.force_fast), apply_refresh=refresh_executor.apply, current_snapshot=lambda: loop_state.latest_snapshot, apply_domain_update=refresh_executor.apply_domains, keep_alive=loop_controls.keep_overlay_alive, after_iteration=loop_controls.after_iteration, compute_wait_delay=wait_planner.compute, wait=command_refresh_requested.wait, update_gate=lambda: getattr(client, 'update_gate_state', lambda: (True, '', 0.0))(), record_refresh_merge=lambda: getattr(client, 'record_renderer_metric', lambda *_args: None)('merged_refreshes'), activity_suspended=activity_gate.is_suspended, wait_until_resumed=activity_gate.wait_until_resumed))
                 session_exit_code = event_loop.run()
                 return session_exit_code
             except KeyboardInterrupt:

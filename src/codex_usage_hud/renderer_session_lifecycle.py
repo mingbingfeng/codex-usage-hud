@@ -28,6 +28,7 @@ class RendererSessionResources:
     file_events: object | None = None
     active_work_pump: object | None = None
     pre_refresh_executor: object | None = None
+    session_lock_monitor: object | None = None
     _closed: bool = field(default=False, init=False, repr=False)
 
     def release_overlay_for_handoff(self) -> object | None:
@@ -48,6 +49,7 @@ class RendererSessionResources:
             return
         self._closed = True
         for field_name, close_name in (
+            ("session_lock_monitor", "close"),
             ("pre_refresh_executor", "close"),
             ("active_work_pump", "close"),
             ("file_events", "close"),

@@ -347,6 +347,39 @@ def test_event_loop_idle_iteration_does_not_build_scan_or_push() -> None:
     }
 
 
+def test_event_loop_does_no_renderer_work_while_session_is_locked() -> None:
+    class StopLoop(Exception):
+        pass
+
+    calls: list[str] = []
+    loop = RendererEventLoop(
+        RendererLoopState(),
+        RendererLoopExecutorPorts(
+            sample_inputs=lambda: calls.append("sample"),  # type: ignore[arg-type]
+            apply_inputs=lambda value: calls.append("inputs"),
+            exit_requested=lambda: False,
+            restart_requested=lambda: False,
+            restart_result=lambda: 0,
+            daemon_tick=lambda: calls.append("daemon"),  # type: ignore[arg-type]
+            compute_force_fast=lambda value: False,
+            apply_refresh=lambda value, force: calls.append("refresh"),
+            current_snapshot=lambda: None,
+            apply_domain_update=lambda value: False,
+            keep_alive=lambda: calls.append("keepalive"),
+            after_iteration=lambda snapshot: calls.append("after"),
+            compute_wait_delay=lambda snapshot, value, force: 1.0,
+            wait=lambda delay: None,
+            activity_suspended=lambda: True,
+            wait_until_resumed=lambda: (_ for _ in ()).throw(StopLoop()),
+        ),
+    )
+
+    with pytest.raises(StopLoop):
+        loop.run()
+
+    assert calls == []
+
+
 def test_event_loop_snapshot_plan_runs_refresh_before_wait() -> None:
     class StopLoop(Exception):
         pass

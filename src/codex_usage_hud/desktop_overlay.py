@@ -156,6 +156,7 @@ class DesktopWorkOverlay:
         self._deferred_commands: deque[dict[str, object]] = deque()
         self._process: subprocess.Popen[str] | None = None
         self._closed = False
+        self._session_suspended = False
         self._available: bool | None = None
         self._unavailable_reason = ""
         self._unavailable_reported = False
@@ -210,7 +211,7 @@ class DesktopWorkOverlay:
             self._stop_runtime(permanent=False)
 
     def update(self, items: Sequence[WorkStatusItem]) -> None:
-        if self._closed:
+        if self._closed or self._session_suspended:
             return
         if (
             not self.enabled
@@ -262,7 +263,7 @@ class DesktopWorkOverlay:
 
     def update_rest_reminder(self, payload: Mapping[str, object] | None) -> bool:
         """Publish one non-session rest bubble, independently of session limits."""
-        if self._closed:
+        if self._closed or self._session_suspended:
             return False
         next_payload = (
             dict(payload)
@@ -544,6 +545,7 @@ class DesktopWorkOverlay:
         """Refresh the helper state file while renderer snapshots are unchanged."""
         if (
             self._closed
+            or self._session_suspended
             or (
                 not self.enabled
                 and self._system_action is None
@@ -645,6 +647,17 @@ class DesktopWorkOverlay:
         if self._closed:
             return
         self._stop_runtime(permanent=True)
+
+    def suspend_for_session_lock(self) -> None:
+        """Stop the independent desktop helper until the user unlocks Windows."""
+        if self._closed or self._session_suspended:
+            return
+        self._session_suspended = True
+        self._stop_runtime(permanent=False)
+
+    def resume_after_session_unlock(self) -> None:
+        if not self._closed:
+            self._session_suspended = False
 
     def take_commands(self) -> list[dict[str, object]]:
         if self._closed:
