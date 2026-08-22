@@ -16,6 +16,7 @@ import sys
 import time
 from typing import TypeAlias
 
+from .codex_cli_launcher import _windows_registry_environment
 from .instance_lock import process_exists, terminate_process
 from .platforms.cdp_probe import cdp_port_from_env
 from .runtime_paths import (
@@ -215,6 +216,31 @@ def _shell_execute_open_with_elevation_fallback(
     return False
 
 
+def _catch_up_process_environment_from_windows_registry() -> None:
+    """Refresh in-process env so shell-launched Desktop children inherit it.
+
+    ``ShellExecuteW`` cannot receive an environment block, so a Codex Desktop
+    started by the HUD inherits this process's environment snapshot.  Provider
+    API keys persisted to the user registry after the HUD was launched would
+    otherwise stay invisible to the Desktop backend and chats on those
+    providers fail at credential resolution.  Names already present always
+    win, mirroring ``codex_cli_launcher._launch_environment``.
+    """
+    if os.name != "nt":
+        return
+    existing_names = {str(name).casefold() for name in os.environ}
+    merged = 0
+    for name, value in _windows_registry_environment().items():
+        normalized_name = str(name)
+        if normalized_name.casefold() in existing_names:
+            continue
+        os.environ[normalized_name] = str(value)
+        existing_names.add(normalized_name.casefold())
+        merged += 1
+    if merged:
+        _LOGGER.info("codex_app_env_catch_up merged=%d", merged)
+
+
 def codex_app_debugger_parameters(port: int) -> str:
     value = int(port)
     return (
@@ -294,6 +320,8 @@ def launch_codex_app(
             cdp_port=cdp_port,
             on_debugger_launch=on_debugger_launch,
         )
+    # ShellExecuteW children inherit this process env; catch it up first.
+    _catch_up_process_environment_from_windows_registry()
     port = None
     if debugger:
         port = int(cdp_port) if cdp_port is not None else cdp_port_from_env()

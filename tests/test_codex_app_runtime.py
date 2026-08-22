@@ -139,6 +139,7 @@ def test_windows_debug_launch_prefers_verified_executable(
     remembered: list[int] = []
     monkeypatch.setattr(app.sys, "platform", "win32")
     monkeypatch.setattr(app, "codex_app_executable_candidates", lambda: [executable])
+    monkeypatch.setattr(app, "_windows_registry_environment", lambda: {})
     monkeypatch.setattr(
         app,
         "_shell_execute_open_with_elevation_fallback",
@@ -163,6 +164,43 @@ def test_windows_debug_launch_prefers_verified_executable(
         )
     ]
     assert remembered == [61234]
+
+
+def test_windows_launch_inherits_registry_env_for_shell_children(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable = Path("C:/Codex/ChatGPT.exe")
+    inherited: dict[str, str] = {}
+    monkeypatch.setattr(app.sys, "platform", "win32")
+    monkeypatch.setattr(app, "codex_app_executable_candidates", lambda: [executable])
+    monkeypatch.setattr(app.os, "name", "nt")
+    monkeypatch.delenv("_168661_API_KEY", raising=False)
+    monkeypatch.setenv("PATH", "C:\\existing")
+    monkeypatch.setattr(
+        app,
+        "_windows_registry_environment",
+        lambda: {"_168661_API_KEY": "registry-value", "path": "C:\\registry"},
+    )
+
+    def fake_open(
+        target: object,
+        *,
+        parameters: str,
+        working_dir: object,
+    ) -> bool:
+        inherited.update(os.environ)
+        return True
+
+    monkeypatch.setattr(
+        app,
+        "_shell_execute_open_with_elevation_fallback",
+        fake_open,
+    )
+
+    assert app.launch_codex_app(debugger=False)
+
+    assert inherited["_168661_API_KEY"] == "registry-value"
+    assert inherited["PATH"] == "C:\\existing"
 
 
 def test_windows_stop_controls_only_audited_processes() -> None:
