@@ -509,12 +509,16 @@ TEXT = r"""
             taskIndex,
           );
           sessionViewDomain.locateActivityTrailRound(root, taskIndex, roundIndex);
-          void sessionViewDomain.scrollToActivityRound(
-            copyNode.dataset.copyText || "",
-            copyNode.dataset.activityTaskPrompt || "",
-            roundIndex,
-            copyNode.dataset.activityTaskTurnId || "",
-          );
+          // 已回滚的轮次在 Codex 聊天里没有对应消息，materialize 扫描只会
+          // 白白拖动视口约 6 秒后失败，因此只复制并高亮 HUD 内轨迹。
+          if (copyNode.dataset.rolledBack !== "true") {
+            void sessionViewDomain.scrollToActivityRound(
+              copyNode.dataset.copyText || "",
+              copyNode.dataset.activityTaskPrompt || "",
+              roundIndex,
+              copyNode.dataset.activityTaskTurnId || "",
+            );
+          }
         }
         return;
       }

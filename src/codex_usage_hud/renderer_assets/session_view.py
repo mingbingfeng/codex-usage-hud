@@ -474,15 +474,18 @@ TEXT = r"""
     for (const item of items) {
       const row = document.createElement("div");
       row.className = "codex-usage-hud-heavy-round";
+      const rolledBack = item.rolledBack === true;
       const tooltip = String(item.tooltip || [item.title, item.detail].filter(Boolean).join("  "));
       if (tooltip) row.title = tooltip;
       const copyText = String(item.copyText || "");
       if (copyText) {
         row.dataset.copyable = "true";
         row.dataset.copyText = copyText;
-        row.dataset.copyTitle = tooltip
-          ? `点击定位轮次并复制内容\n${tooltip}`
-          : "点击定位轮次并复制内容";
+        row.dataset.copyTitle = rolledBack
+          ? `点击复制内容（该轮已回滚，不在聊天中）\n${tooltip}`
+          : (tooltip
+            ? `点击定位轮次并复制内容\n${tooltip}`
+            : "点击定位轮次并复制内容");
         row.dataset.copyField = "heavy";
         row.title = row.dataset.copyTitle;
       }
@@ -490,6 +493,7 @@ TEXT = r"""
       if (item.roundIndex) row.dataset.activityRoundIndex = String(item.roundIndex);
       if (item.taskPrompt) row.dataset.activityTaskPrompt = String(item.taskPrompt);
       if (item.taskTurnId) row.dataset.activityTaskTurnId = String(item.taskTurnId);
+      if (rolledBack) row.dataset.rolledBack = "true";
       const title = document.createElement("span");
       title.className = "codex-usage-hud-heavy-round-title";
       title.textContent = String(item.title || "");

@@ -456,6 +456,9 @@ class TaskHistory:
     started_at: datetime | None = None
     completed_at: datetime | None = None
     aborted_at: datetime | None = None
+    # Codex keeps rolled-back attempts in the JSONL even though the Desktop
+    # conversation no longer shows them; their token usage is still real.
+    rolled_back: bool = False
     final_answer_at: datetime | None = None
     last_event_time: datetime | None = None
     request: RequestTokens = field(default_factory=RequestTokens)
@@ -1147,6 +1150,36 @@ class JsonlSessionParser:
                 indices.append(index)
         return indices
 
+    def task_rolled_back_ordinals(
+        self, records: Sequence[Mapping[str, Any]]
+    ) -> set[int]:
+        """Replay thread rollbacks to find task ordinals no longer visible.
+
+        Every user submission (including retries and edited resends) appends a
+        task_started record, while thread_rolled_back drops trailing turns from
+        the live thread shown by Codex Desktop.  Tasks removed by any rollback
+        have no chat anchor to locate, though their token usage stays billed.
+        """
+        rolled: set[int] = set()
+        live: list[int] = []
+        ordinal = 0
+        for record in records:
+            payload = record.get("payload") or {}
+            if record.get("type") != "event_msg" or not isinstance(payload, Mapping):
+                continue
+            payload_type = payload.get("type")
+            if payload_type == "task_started":
+                ordinal += 1
+                live.append(ordinal)
+            elif payload_type == "thread_rolled_back":
+                try:
+                    num_turns = int(payload.get("num_turns") or 0)
+                except (TypeError, ValueError):
+                    num_turns = 0
+                for _ in range(max(0, min(num_turns, len(live)))):
+                    rolled.add(live.pop())
+        return rolled
+
     def task_prompt_in_range(
         self,
         records: Sequence[Mapping[str, Any]],
@@ -1274,6 +1307,7 @@ class JsonlSessionParser:
         if not starts:
             return []
         count = len(starts)
+        rolled_back_ordinals = self.task_rolled_back_ordinals(records)
         history: list[TaskHistory] = []
         for ordinal, start in enumerate(starts, 1):
             end = starts[ordinal] if ordinal < count else len(records)
@@ -1314,6 +1348,7 @@ class JsonlSessionParser:
                     index=ordinal,
                     count=count,
                     turn_id=self.task_turn_id(records, start),
+                    rolled_back=ordinal in rolled_back_ordinals,
                     prompt=self.task_prompt_in_range(
                         records,
                         segment_start,

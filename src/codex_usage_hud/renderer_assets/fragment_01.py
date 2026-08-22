@@ -1489,6 +1489,13 @@ STYLE_HEAD = r"""
         border-color: rgba(243, 210, 122, .30);
         background: rgba(243, 210, 122, .06);
       }
+      #${rootId} .codex-usage-hud-heavy-round[data-rolled-back="true"] {
+        border-style: dashed;
+        opacity: .78;
+      }
+      #${rootId} .codex-usage-hud-heavy-round[data-rolled-back="true"] .codex-usage-hud-heavy-round-title {
+        color: #b7a06a;
+      }
       #${rootId} .codex-usage-hud-heavy-round-title,
       #${rootId} .codex-usage-hud-heavy-round-detail {
         min-width: 0;

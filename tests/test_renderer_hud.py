@@ -2659,6 +2659,75 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertNotIn("gpt-5.5", heavy["detail"])
         self.assertNotIn("已确认", heavy["detail"])
 
+    def test_payload_marks_heavy_rounds_of_rolled_back_tasks(self) -> None:
+        started_at = datetime(2026, 6, 5, 13, 0, 0).astimezone()
+        completed_at = datetime(2026, 6, 5, 13, 0, 31).astimezone()
+        snapshot = ParsedSession(
+            session_id="session-rollback-123456",
+            status="parsed",
+            task_prompt="继续",
+            request=RequestTokens(status="confirmed", model="gpt-5.5"),
+        )
+        snapshot.activity_tasks = [
+            TaskHistory(
+                index=1,
+                count=2,
+                turn_id="turn-retry",
+                prompt="继续",
+                rolled_back=True,
+                started_at=started_at,
+                completed_at=completed_at,
+                request=RequestTokens(status="confirmed", model="gpt-5.5"),
+                request_history=[
+                    RequestRound(
+                        index=1,
+                        status="confirmed",
+                        model="gpt-5.5",
+                        input_tokens=208000,
+                        cached_tokens=3840,
+                        output_tokens=1232,
+                        reasoning_tokens=0,
+                        total_tokens=210000,
+                        estimated=False,
+                        cost_usd=1.06,
+                        started_at=started_at,
+                        completed_at=completed_at,
+                    )
+                ],
+            ),
+            TaskHistory(
+                index=2,
+                count=2,
+                turn_id="turn-live",
+                prompt="继续",
+                started_at=completed_at,
+                request=RequestTokens(status="confirmed", model="gpt-5.5"),
+                request_history=[
+                    RequestRound(
+                        index=1,
+                        status="confirmed",
+                        model="gpt-5.5",
+                        input_tokens=20,
+                        cached_tokens=0,
+                        output_tokens=10,
+                        reasoning_tokens=0,
+                        total_tokens=30,
+                        estimated=False,
+                        cost_usd=0.01,
+                        started_at=completed_at,
+                    )
+                ],
+            ),
+        ]
+
+        heavy = payload_from_snapshot(snapshot).to_json()["topDetails"]["heavyRounds"]
+
+        self.assertTrue(heavy[0]["rolledBack"])
+        self.assertIn("已回滚", heavy[0]["title"])
+        self.assertIn("已被回滚", heavy[0]["tooltip"])
+        self.assertFalse(heavy[1]["rolledBack"])
+        self.assertNotIn("已回滚", heavy[1]["title"])
+
     def test_payload_switches_activity_card_to_completed_task_stats(self) -> None:
         started_at = datetime(2026, 6, 5, 13, 0, 0).astimezone()
         completed_at = datetime(2026, 6, 5, 13, 0, 42).astimezone()

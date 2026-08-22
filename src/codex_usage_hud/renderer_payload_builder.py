@@ -1304,6 +1304,12 @@ def _top_heavy_rounds(snapshot: ParsedSession) -> list[dict[str, object]]:
         ).strip()
         for task in (getattr(snapshot, "activity_tasks", []) or [])
     }
+    task_rolled_back = {
+        max(1, int(getattr(task, "index", 0) or 1)): bool(
+            getattr(task, "rolled_back", False)
+        )
+        for task in (getattr(snapshot, "activity_tasks", []) or [])
+    }
     fallback_prompt = str(getattr(snapshot, "task_prompt", "") or "").strip()
     fallback_turn_id = str(getattr(snapshot, "task_turn_id", "") or "").strip()
     for task_index, item in task_rows:
@@ -1334,7 +1340,10 @@ def _top_heavy_rounds(snapshot: ParsedSession) -> list[dict[str, object]]:
             f"↓{_short_num(item.output_tokens)} "
             f"◇{_short_num(item.reasoning_tokens)}"
         )
+        rolled_back = bool(task_rolled_back.get(task_index, False))
         title = f"Req{task_index}-#{item.index} {_format_fixed_money(cost, estimated)} · ∑{_short_num(total)}"
+        if rolled_back:
+            title = f"{title} · 已回滚"
         detail = _compact(item.activity_summary or f"消耗构成：{breakdown}", 112)
         copy_text = item.copy_text or (
             f"Req{task_index}-#{item.index}\n"
@@ -1342,6 +1351,13 @@ def _top_heavy_rounds(snapshot: ParsedSession) -> list[dict[str, object]]:
             f"Tokens {total:,}\n"
             f"{breakdown}"
         )
+        tooltip = (
+            f"轮次 #{item.index} · {duration}\n"
+            f"金额 {_format_fixed_money(cost, estimated)} · Tokens {total:,}\n"
+            f"{detail}"
+        )
+        if rolled_back:
+            tooltip = f"该轮次已被回滚，聊天中不可见；点击仅复制，不滚动定位\n{tooltip}"
         details.append(
             {
                 "title": title,
@@ -1351,11 +1367,8 @@ def _top_heavy_rounds(snapshot: ParsedSession) -> list[dict[str, object]]:
                 "roundIndex": int(item.index),
                 "taskPrompt": task_prompts.get(task_index, "") or fallback_prompt,
                 "taskTurnId": task_turn_ids.get(task_index, "") or fallback_turn_id,
-                "tooltip": (
-                    f"轮次 #{item.index} · {duration}\n"
-                    f"金额 {_format_fixed_money(cost, estimated)} · Tokens {total:,}\n"
-                    f"{detail}"
-                ),
+                "rolledBack": rolled_back,
+                "tooltip": tooltip,
             }
         )
     return details

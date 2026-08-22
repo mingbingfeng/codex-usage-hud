@@ -600,6 +600,62 @@ class JsonlSessionParserTests(unittest.TestCase):
         self.assertTrue(snapshot.activity_tasks[1].completed_at)
         self.assertIsNone(snapshot.activity_tasks[2].completed_at)
 
+    def test_task_rolled_back_ordinals_replays_multi_turn_rollbacks(self) -> None:
+        parser = JsonlSessionParser()
+        records = [
+            record("2026-05-28T00:00:01Z", "event_msg", {"type": "task_started"}),
+            record("2026-05-28T00:00:02Z", "event_msg", {"type": "task_started"}),
+            record(
+                "2026-05-28T00:00:03Z",
+                "event_msg",
+                {"type": "thread_rolled_back", "num_turns": 1},
+            ),
+            record("2026-05-28T00:00:04Z", "event_msg", {"type": "task_started"}),
+            record(
+                "2026-05-28T00:00:05Z",
+                "event_msg",
+                {"type": "thread_rolled_back", "num_turns": 2},
+            ),
+            record("2026-05-28T00:00:06Z", "event_msg", {"type": "task_started"}),
+        ]
+
+        self.assertEqual(parser.task_rolled_back_ordinals(records), {1, 2, 3})
+
+    def test_parse_records_marks_rolled_back_tasks(self) -> None:
+        parser = JsonlSessionParser()
+        records = [
+            record(
+                "2026-05-28T00:00:01Z",
+                "event_msg",
+                {"type": "task_started", "turn_id": "turn-1"},
+            ),
+            token_count("2026-05-28T00:00:02Z", 20, 5, 6, 1, 26, 26),
+            record("2026-05-28T00:00:03Z", "event_msg", {"type": "task_complete"}),
+            # 用户重试：回滚上一轮后带着同一 turn_id 重新提交
+            record(
+                "2026-05-28T00:00:04Z",
+                "event_msg",
+                {"type": "thread_rolled_back", "num_turns": 1},
+            ),
+            record(
+                "2026-05-28T00:00:05Z",
+                "event_msg",
+                {"type": "task_started", "turn_id": "turn-1"},
+            ),
+            token_count("2026-05-28T00:00:06Z", 30, 7, 9, 2, 39, 65),
+            record("2026-05-28T00:00:07Z", "event_msg", {"type": "task_complete"}),
+        ]
+        for index, item in enumerate(records, 1):
+            item["_line"] = index
+            item["_dt"] = parse_timestamp(item["timestamp"])
+
+        snapshot = parser.parse_records(records)
+
+        self.assertEqual(
+            [item.rolled_back for item in snapshot.activity_tasks],
+            [True, False],
+        )
+
     def test_parse_records_extracts_prompt_for_latest_task(self) -> None:
         parser = JsonlSessionParser()
         records = [
