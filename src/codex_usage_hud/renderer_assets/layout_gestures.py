@@ -95,16 +95,18 @@ TEXT = r"""
         const done = () => {
           gestureScope.dispose();
           // A pure tap (no movement) falls through to the click handler, which
-          // toggles the panel. Only a real drag persists a new position.
+          // toggles the panel. Only a real drag persists a new position, and
+          // only a real drag re-syncs geometry — re-deriving anchors on a tap
+          // would recalculate the session-settled width/position and resurrect
+          // pre-switch manual state before the toggle even runs.
           // A manual gesture owns only its panel. Reflowing both panels here
           // can recalculate the unrelated top HUD width after moving request.
+          if (!gesture.moved) return;
           syncPosition([gesture.name]);
-          if (gesture.moved) {
-            scheduleLayoutReport(
-              gesture.action === "resize" ? "resize" : "move",
-              gesture.name,
-            );
-          }
+          scheduleLayoutReport(
+            gesture.action === "resize" ? "resize" : "move",
+            gesture.name,
+          );
         };
         gestureScope.listen(document, "pointermove", move, true);
         gestureScope.listen(document, "pointerup", done, true);

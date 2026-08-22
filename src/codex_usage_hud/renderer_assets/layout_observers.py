@@ -55,6 +55,28 @@ TEXT = r"""
         startBootstrapObserver();
       }
 
+      function applyPanelToggleGeometry(name) {
+        if (!runtimeIsCurrent() || !ctx.lifecycle.active()) return;
+        const root = document.getElementById(rootId);
+        if (!root || !PANEL[name]) return;
+        const panel = root.querySelector(`[data-panel="${name}"]`);
+        if (!panel) return;
+        const state = getPanelState(name);
+        const expanded = panel.dataset.expanded === "true";
+        const height = desiredHeight(name, state, expanded);
+        const rect = panel.getBoundingClientRect();
+        // Geometry is session-owned: expanding or collapsing changes only the
+        // panel height. Left/width keep the session-settled rect, the top
+        // panel grows downward from its title-bar slot, and the request panel
+        // grows upward with its bottom edge anchored to the footer row, so a
+        // collapse restores the exact pre-expand rect.
+        const top = name === "top"
+          ? clamp(rect.top, 8, Math.max(8, innerHeight - height - 8))
+          : clamp(rect.bottom - height, 8, Math.max(8, innerHeight - height - 8));
+        applyRect(panel, rect.left, top, rect.width, height);
+        refreshAllMarquees(root);
+      }
+
       function syncPositionSettled(names = Object.keys(PANEL), options = {}) {
         if (!runtimeIsCurrent() || !ctx.lifecycle.active()) return;
         for (const timer of (window[settleTimerName] || [])) ctx.lifecycle.clearTimeout(timer);
@@ -451,6 +473,7 @@ TEXT = r"""
       manualRequestRect,
       manualTopRect,
       syncPosition,
+      applyPanelToggleGeometry,
       syncPositionSettled,
       scheduleForPanels,
       scheduleRequestAfterComposerSettles,
@@ -524,6 +547,7 @@ TEXT = r"""
     manualRequestRect,
     manualTopRect,
     syncPosition,
+    applyPanelToggleGeometry,
     syncPositionSettled,
     scheduleForPanels,
     scheduleRequestAfterComposerSettles,

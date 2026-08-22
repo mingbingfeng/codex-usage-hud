@@ -97,6 +97,39 @@ TEXT = r"""
     } catch (_) {}
   }
 
+  function clearSessionManualGeometry() {
+    // Panel geometry is session-owned: the session switch is the one moment a
+    // fresh automatic layout is computed, so the previous session's manual
+    // drag/resize values must not survive in storage. Any later in-session
+    // sync (panel toggle, anchor refresh) would otherwise resurrect those
+    // stale coordinates against the new conversation geometry.
+    const states = loadStates();
+    let changed = false;
+    for (const name of Object.keys(PANEL)) {
+      const state = states[name];
+      if (!state) continue;
+      for (const key of [
+        "manual",
+        "x",
+        "y",
+        "width",
+        "xRatio",
+        "yOffset",
+        "bottomOffset",
+        "widthRatio",
+        "anchorSource",
+        "collapsedHeight",
+        "expandedHeight",
+      ]) {
+        if (key in state) {
+          delete state[key];
+          changed = true;
+        }
+      }
+    }
+    if (changed) saveStates(states);
+  }
+
   function getPanelState(name) {
     return { ...(loadStates()[name] || {}) };
   }
@@ -1336,8 +1369,11 @@ TEXT = r"""
       const expanded = panel.dataset.expanded !== "true";
       panel.dataset.expanded = String(expanded);
       setPanelState(name, { expanded });
-      syncPosition();
-      syncPositionSettled();
+      // Geometry is session-owned: a toggle only adjusts the panel height and
+      // keeps the settled left/width. Re-deriving anchors here (or settling
+      // again) would recalculate width/position mid-session and resurrect
+      // pre-switch manual state.
+      applyPanelToggleGeometry(name);
       scheduleLayoutReport(expanded ? "toggle-expand" : "toggle-collapse", name);
     });
     rootScope.listen(root, "pointerdown", (event) => {
@@ -1601,6 +1637,7 @@ TEXT = r"""
     if ("sessionSwitch" in domains && wasReady) {
       invalidateHeaderAnchor();
       invalidateComposerAnchor();
+      clearSessionManualGeometry();
       scheduleForPanels(Object.keys(PANEL), { invalidateTop: true, forceAutoFit: true });
       syncPositionSettled(Object.keys(PANEL), { forceAutoFit: true });
     }
