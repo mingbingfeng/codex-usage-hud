@@ -58,6 +58,20 @@ def test_overlay_side_save_uses_overlay_partial_domain() -> None:
     ) == {"settings", "overlay"}
 
 
+def test_lock_screen_stop_save_uses_settings_partial_domain() -> None:
+    previous = UserConfig.defaults()
+    current = UserConfig.from_dict(
+        {**previous.to_dict(), "stop_hud_on_lock_screen": True}
+    )
+
+    assert "stop_hud_on_lock_screen" in changed_config_keys(previous, current)
+    assert partial_domains_for_command(
+        {"action": "save"},
+        previous_config=previous,
+        current_config=current,
+    ) == {"settings"}
+
+
 def test_session_cleanup_workdir_uses_settings_partial_domain() -> None:
     current = UserConfig.defaults()
 

@@ -418,6 +418,51 @@ def _is_inherited_completion(snapshot: ParsedSession | object) -> bool:
     )
 
 
+def _transfer_inherited_session_ids(context: object | None) -> set[str]:
+    if context is None:
+        return set()
+    values = getattr(context, "_work_overlay_transfer_inherited_session_ids", None)
+    if isinstance(values, set):
+        return values
+    values = set()
+    try:
+        setattr(context, "_work_overlay_transfer_inherited_session_ids", values)
+    except Exception:
+        pass
+    return values
+
+
+def _is_transfer_inherited_completion(
+    context: object | None,
+    snapshot: ParsedSession | object,
+) -> bool:
+    session_id = str(getattr(snapshot, "session_id", "") or "").strip()
+    if not session_id or session_id not in _transfer_inherited_session_ids(context):
+        return False
+    completion_at = getattr(snapshot, "task_completed_at", None) or getattr(
+        snapshot, "final_answer_at", None
+    )
+    session_started_at = getattr(snapshot, "session_started_at", None)
+    if not isinstance(completion_at, datetime) or not isinstance(
+        session_started_at, datetime
+    ):
+        return False
+    if _datetime_age_seconds(completion_at, session_started_at) >= 0:
+        return True
+    _transfer_inherited_session_ids(context).discard(session_id)
+    return False
+
+
+def _should_suppress_inherited_completion(
+    context: object | None,
+    snapshot: ParsedSession | object,
+) -> bool:
+    return _is_inherited_completion(snapshot) or _is_transfer_inherited_completion(
+        context,
+        snapshot,
+    )
+
+
 def _parse_task_marker(value: object) -> datetime | None:
     text = str(value or "").strip()
     if not text:
@@ -477,6 +522,7 @@ def _work_item_from_snapshot(
     current: bool,
     title: str = "",
     source: str = "",
+    context: object | None = None,
     now: datetime | None = None,
 ) -> WorkStatusItem | None:
     current_time = now or datetime.now().astimezone()
@@ -484,7 +530,10 @@ def _work_item_from_snapshot(
     if status is None:
         return None
     status_value, status_label, pending_accounting = status
-    if status_value == "recent" and _is_inherited_completion(snapshot):
+    if status_value == "recent" and _should_suppress_inherited_completion(
+        context,
+        snapshot,
+    ):
         # Fork/copy materialization keeps the source transcript's terminal
         # event but gives the target a newer session metadata timestamp.
         # That inherited completion is history, not a newly finished task.
@@ -616,6 +665,7 @@ def _refresh_visible_current_work_item(
         current=True,
         title=snapshot.session_title,
         source=snapshot.selection_source,
+        context=context,
     )
     if existing_index is None:
         if refreshed is not None and refreshed.status == "recent":
@@ -624,7 +674,7 @@ def _refresh_visible_current_work_item(
             # than clearing the tombstone and allowing the old cache to return.
             _work_overlay_terminal_item_tasks(context).pop(session_id, None)
             return [*items, refreshed]
-        if _is_inherited_completion(snapshot):
+        if _should_suppress_inherited_completion(context, snapshot):
             task_key = _iso_or_empty(
                 snapshot.task_started_at or snapshot.request.started_at
             )
@@ -633,7 +683,7 @@ def _refresh_visible_current_work_item(
         return list(items)
     _clear_terminal_item_task_for_new_segment(context, snapshot)
     if refreshed is None:
-        if _is_inherited_completion(snapshot):
+        if _should_suppress_inherited_completion(context, snapshot):
             task_key = _iso_or_empty(
                 snapshot.task_started_at or snapshot.request.started_at
             )
@@ -713,13 +763,14 @@ def active_work_items_for_snapshot(
             current=True,
             title=snapshot.session_title,
             source=snapshot.selection_source,
+            context=context,
             now=now,
         )
         if current_item is not None:
             items[str(current_item.id)] = current_item
             if current_item.status == "recent" and snapshot.session_id:
                 terminal_item_tasks.pop(str(snapshot.session_id), None)
-        elif _is_inherited_completion(snapshot) and snapshot.session_id:
+        elif _should_suppress_inherited_completion(context, snapshot) and snapshot.session_id:
             terminal_item_ids[str(snapshot.session_id)] = _iso_or_empty(
                 snapshot.task_started_at or snapshot.request.started_at
             )
@@ -756,13 +807,14 @@ def active_work_items_for_snapshot(
             current=False,
             title=title,
             source="activity",
+            context=context,
             now=now,
         )
         if item is not None:
             items[str(item.id)] = item
             if item.status == "recent" and parsed.session_id:
                 terminal_item_tasks.pop(str(parsed.session_id), None)
-        elif _is_inherited_completion(parsed) and parsed.session_id:
+        elif _should_suppress_inherited_completion(context, parsed) and parsed.session_id:
             terminal_item_ids[str(parsed.session_id)] = _iso_or_empty(
                 parsed.task_started_at or parsed.request.started_at
             )

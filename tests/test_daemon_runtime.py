@@ -187,6 +187,75 @@ def test_existing_codex_replacement_after_hud_started_relaunches_automatically()
     restart_codex.assert_called_once_with()
 
 
+def test_session_lock_exit_keeps_daemon_and_restarts_renderer_after_unlock(
+    monkeypatch,
+) -> None:
+    manager = SimpleNamespace(
+        wait_for_codex=MagicMock(),
+        poll_seconds=0.1,
+    )
+    renderer = MagicMock(
+        side_effect=[daemon_runtime.HUD_SUSPEND_FOR_SESSION_LOCK, 0]
+    )
+    loading = MagicMock()
+    loading.start.return_value = loading
+    wait_for_unlock = MagicMock()
+    monkeypatch.setattr(
+        daemon_runtime,
+        "_wait_for_session_unlock",
+        wait_for_unlock,
+    )
+    services = daemon_runtime.DaemonServices(
+        manager_factory=lambda **_kwargs: manager,
+        lock_factory=MagicMock(return_value=MagicMock()),
+        configure_logging=MagicMock(),
+        attach_logger=MagicMock(),
+        hide_console=MagicMock(),
+        startup_decision=MagicMock(
+            return_value=daemon_runtime.DaemonStartupDecision(
+                daemon_runtime.DEFAULT_DAEMON_STARTUP_WAIT,
+                codex_was_running=True,
+            )
+        ),
+        create_loading=MagicMock(return_value=loading),
+        run_renderer=renderer,
+    )
+
+    result = daemon_runtime.run_daemon(
+        SimpleNamespace(daemon_poll_ms=500),
+        services=services,
+    )
+
+    assert result == 0
+    assert renderer.call_count == 2
+    assert manager.wait_for_codex.call_count == 2
+    wait_for_unlock.assert_called_once_with()
+
+
+def test_wait_for_session_unlock_uses_native_unlock_event(monkeypatch) -> None:
+    events: list[str] = []
+
+    class FakeMonitor:
+        def __init__(self, *, on_lock, on_unlock) -> None:
+            del on_lock
+            self._on_unlock = on_unlock
+
+        def start(self, *, initial_locked: bool) -> None:
+            assert initial_locked
+            events.append("start")
+            self._on_unlock()
+
+        def close(self) -> None:
+            events.append("close")
+
+    monkeypatch.setattr(daemon_runtime.sys, "platform", "win32")
+    monkeypatch.setattr(daemon_runtime, "WindowsSessionLockMonitor", FakeMonitor)
+
+    daemon_runtime._wait_for_session_unlock()
+
+    assert events == ["start", "close"]
+
+
 def test_removed_window_sessions_close_context_and_report_unavailable() -> None:
     context = SimpleNamespace(close=MagicMock())
 

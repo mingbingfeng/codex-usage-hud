@@ -137,6 +137,10 @@ def apply_to_context(
         if tracker is not None:
             tracker.cost_estimator = estimator
         ports.configure_ui_cost_estimators(estimator)
+    session_lock_monitor = getattr(context, "session_lock_monitor", None)
+    set_enabled = getattr(session_lock_monitor, "set_enabled", None)
+    if callable(set_enabled):
+        set_enabled(bool(getattr(next_config, "stop_hud_on_lock_screen", False)))
     background = getattr(context, "background_usage_runtime", None)
     reconfigure = getattr(background, "reconfigure", None)
     if callable(reconfigure):

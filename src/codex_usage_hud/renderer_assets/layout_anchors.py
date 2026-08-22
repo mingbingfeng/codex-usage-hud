@@ -145,9 +145,15 @@ TEXT = r"""
         const rect = node.getBoundingClientRect();
         let score = 0;
         if (rect.bottom > innerHeight * 0.55) score += 80;
-        if (rect.width >= 300 && rect.width <= Math.max(420, innerWidth * .82)) score += 36;
+        // The real Desktop composer commonly spans almost the whole content
+        // viewport. Penalizing widths above 82% selects an inner wrapper and
+        // makes the HUD gap artificially narrow.
+        if (rect.width >= 300) score += 36;
+        if (rect.width > innerWidth * .98) score -= 12;
         if (node.querySelector?.(".composer-footer")) score += 32;
         if (node.querySelector?.("textarea, [contenteditable='true']")) score += 48;
+        if (node.matches?.("[class*='ComposerLayoutRoot']")) score += 140;
+        if (node.querySelector?.("[class*='ComposerLayoutFooter'], button[aria-label*='权限'], button[aria-label*='模型']")) score += 70;
         if (node.matches?.(".composer-footer")) score -= 20;
         if (rect.height >= 56 && rect.height <= 190) score += 30;
         score += Math.min(18, Array.from(node.querySelectorAll?.("button, [role='button']") || []).filter(visible).length * 2);
@@ -326,8 +332,11 @@ TEXT = r"""
         if (!composerNode) return [];
         const candidates = Array.from(composerNode.querySelectorAll("button, [role='button']"))
           .filter((node) => visible(node) && !node.closest(`#${rootId}`))
-          .map((node) => node.getBoundingClientRect())
-          .filter((rect) => (
+          .map((node) => ({
+            rect: footerRectSnapshot(node.getBoundingClientRect()),
+            backgroundInfoControl: isBackgroundInfoControl(node),
+          }))
+          .filter(({ rect }) => (
             rect.width > 0
             && rect.height > 0
             && rect.left >= composer.left - 2
@@ -336,33 +345,114 @@ TEXT = r"""
             && rect.bottom <= Math.min(innerHeight, composer.bottom + 8)
           ));
         if (!candidates.length) return [];
-        const lowestBottom = Math.max(...candidates.map((rect) => rect.bottom));
+        const lowestBottom = Math.max(...candidates.map(({ rect }) => rect.bottom));
         return candidates
-          .filter((rect) => (
+          .filter(({ rect }) => (
             Math.abs(rect.bottom - lowestBottom) <= 14
             || rect.top >= lowestBottom - 40
           ))
+          .map(({ rect, backgroundInfoControl }) => ({ ...rect, backgroundInfoControl }))
           .sort((left, right) => (left.left - right.left) || (left.top - right.top));
       }
 
-      function footerProtectedControlRects(composer) {
-        // Codex mounts both the reasoning trigger and the small context-usage
-        // ring in the footer's right-hand group. The ring is a role=img span,
-        // not a button, so footerControlRects() cannot see it.
-        const selector = [
+      function footerControlIdentity(node) {
+        if (!node) return "";
+        return normalize([
+          node.getAttribute?.("aria-label"),
+          node.getAttribute?.("title"),
+          node.getAttribute?.("data-testid"),
+          node.getAttribute?.("data-tooltip-content"),
+          node.querySelector?.("svg > title, title")?.textContent,
+          node.matches?.("button, [role='button'], a") ? node.textContent : "",
+        ].filter(Boolean).join(" "));
+      }
+
+      function footerRectSnapshot(rect) {
+        if (!rect) return null;
+        return {
+          left: Number(rect.left),
+          top: Number(rect.top),
+          right: Number(rect.right),
+          bottom: Number(rect.bottom),
+          width: Number(rect.width),
+          height: Number(rect.height),
+        };
+      }
+
+      function isBackgroundInfoControl(node) {
+        const identity = footerControlIdentity(node);
+        return /(?:background|后台|背景|context|上下文)(?:[\s_-]*(?:usage|information|window|panel|task|info|用量|信息|窗口|任务))?|(?:information|info|信息)(?:[\s_-]*(?:window|panel|窗口))/i.test(identity);
+      }
+
+      function footerProtectedControlRects(composerNode, composer) {
+        // Codex mounts the reasoning trigger and context-usage ring in the
+        // footer's right-hand group. The ring is a role=img span, not a
+        // button, so footerControlRects() cannot see it. Some Desktop builds
+        // put the background information control in a sibling wrapper, so
+        // scan the page as well as the selected composer node and resolve
+        // descendants to a click target before measuring them.
+        const explicitSelector = [
           "[data-codex-intelligence-trigger]",
           "[role='img'][aria-label*='上下文']",
           "[role='img'][aria-label*='context' i]",
         ].join(", ");
-        return Array.from(document.querySelectorAll(selector))
-          .filter((node) => visible(node) && !node.closest?.(`#${rootId}`))
-          .map((node) => ({ ...node.getBoundingClientRect(), protectedFooterControl: true }))
+        const candidates = Array.from(document.querySelectorAll([
+          explicitSelector,
+          "button",
+          "[role='button']",
+          "[role='img']",
+          "svg",
+          "a",
+          "[aria-label]",
+          "[title]",
+          "[data-testid]",
+          "[data-tooltip-content]",
+        ].join(", ")));
+        // Native Desktop footer actions can be mounted beside the selected
+        // composer wrapper (permission, plan/goal, background info, model,
+        // send). This helper handles the semantic/context controls; the
+        // geometry pass in footerGapSlot handles every visible footer button.
+        const footerBandTop = Math.max(composer.top, composer.bottom - 96);
+        const controls = candidates
+          .map((node) => ({
+            node: node.closest?.("button, [role='button'], a") || node,
+            explicit: node.matches?.(explicitSelector) === true,
+            semantic: isBackgroundInfoControl(node),
+          }))
+          .filter(({ node, explicit, semantic }) => {
+            if (!visible(node) || node.closest?.(`#${rootId}`)) return false;
+            const external = !composerNode?.contains?.(node);
+            // Only protect external nodes when they are the known native
+            // context/background-information control. Treating every sibling
+            // button as a blocker can collapse the usable center gap.
+            return explicit || semantic || (!external && isBackgroundInfoControl(node));
+          });
+        const controlsByNode = new Map();
+        for (const item of controls) {
+          const previous = controlsByNode.get(item.node);
+          if (previous) {
+            previous.backgroundInfoControl = previous.backgroundInfoControl || item.semantic;
+          } else {
+            controlsByNode.set(item.node, { ...item, backgroundInfoControl: item.semantic });
+          }
+        }
+        return Array.from(controlsByNode.values())
+          .map(({ node, backgroundInfoControl }) => ({
+            ...footerRectSnapshot(node.getBoundingClientRect()),
+            protectedFooterControl: true,
+            backgroundInfoControl,
+          }))
           .filter((rect) => (
             rect.width > 0
             && rect.height > 0
-            && rect.left >= composer.left - 2
-            && rect.right <= composer.right + 2
+            && rect.width <= 96
+            && rect.height <= 96
+            // A sibling control may extend just outside the selected composer;
+            // protect the portion that actually intersects its horizontal area.
+            && rect.right > composer.left - 2
+            && rect.left < composer.right + 2
             && rect.top >= composer.top - 2
+            && rect.bottom >= footerBandTop
             && rect.bottom <= Math.min(innerHeight, composer.bottom + 8)
           ));
       }
@@ -370,18 +460,84 @@ TEXT = r"""
       function footerGapSlot(composerNode, composer, minWidth) {
         const controls = [
           ...footerControlRects(composerNode, composer),
-          ...footerProtectedControlRects(composer),
+          ...footerProtectedControlRects(composerNode, composer),
         ].sort((left, right) => (left.left - right.left) || (left.top - right.top));
-        if (!controls.length) return null;
-        const rowTop = Math.min(...controls.map((rect) => rect.top));
-        const rowBottom = Math.max(...controls.map((rect) => rect.bottom));
+        // The Desktop composer footer actions are occasionally rendered in a
+        // sibling portal, outside composerNode. Collect the visible native
+        // footer controls from the whole document by geometry as the
+        // authoritative pass. This also catches the standalone context ring.
+        const geometryFooterTop = Math.max(composer.top, composer.bottom - 64);
+        const seenControlRects = new Set(controls.map((rect) => [
+          Math.round(rect.left), Math.round(rect.top),
+          Math.round(rect.right), Math.round(rect.bottom),
+        ].join(":")));
+        for (const node of Array.from(document.querySelectorAll("button, [role='button'], [role='img'], [role='radio']"))) {
+          if (!visible(node) || node.closest?.(`#${rootId}`)) continue;
+          const rect = node.getBoundingClientRect();
+          if (rect.width <= 0 || rect.height <= 0 || rect.width > 120 || rect.height > 64) continue;
+          if (rect.left < composer.left - 4 || rect.right > composer.right + 4) continue;
+          if (rect.top < geometryFooterTop || rect.bottom > Math.min(innerHeight, composer.bottom + 8)) continue;
+          const signature = [
+            Math.round(rect.left), Math.round(rect.top),
+            Math.round(rect.right), Math.round(rect.bottom),
+          ].join(":");
+          if (seenControlRects.has(signature)) continue;
+          seenControlRects.add(signature);
+          controls.push({
+            ...footerRectSnapshot(rect),
+            protectedFooterControl: true,
+            backgroundInfoControl: node.getAttribute?.("role") === "img",
+          });
+        }
+        controls.sort((left, right) => (left.left - right.left) || (left.top - right.top));
+        const conservativeFooterSlot = () => {
+          // Keep a symmetric reserve when a host portal temporarily hides the
+          // native footer controls. The measured path above is preferred.
+          const sideReserve = Math.min(170, Math.max(132, composer.width * 0.23));
+          const left = composer.left + sideReserve;
+          const right = composer.right - sideReserve;
+          if (right <= left) return null;
+          const rowTop = Math.max(composer.top, composer.bottom - 36);
+          const rowBottom = Math.min(composer.bottom, rowTop + 28);
+          return {
+            left,
+            right,
+            width: right - left,
+            fitsMinWidth: right - left >= minWidth,
+            hasBackgroundInfoControl: true,
+            rowTop,
+            rowBottom,
+            rowHeight: Math.max(1, rowBottom - rowTop),
+            conservative: true,
+          };
+        };
+        if (!controls.length) {
+          return conservativeFooterSlot();
+        }
+        const rowControls = controls.filter((rect) => (
+          rect.top >= geometryFooterTop - 4
+          && rect.bottom <= Math.min(innerHeight, composer.bottom + 8)
+        ));
+        const rowTop = rowControls.length
+          ? Math.min(...rowControls.map((rect) => rect.top))
+          : Math.max(composer.top, composer.bottom - 36);
+        const rowBottom = rowControls.length
+          ? Math.max(...rowControls.map((rect) => rect.bottom))
+          : Math.min(composer.bottom, rowTop + 28);
+        const safeRowTop = Number.isFinite(rowTop) ? rowTop : Math.max(composer.top, composer.bottom - 36);
+        const safeRowBottom = Number.isFinite(rowBottom) ? rowBottom : Math.min(composer.bottom, safeRowTop + 28);
         const start = composer.left + 8;
         const end = composer.right - 8;
         const padding = 8;
         const blockers = [];
         for (const rect of controls) {
+          // Keep one equal breathing room on both sides of every native
+          // footer control. Sixteen CSS pixels is enough to clear the icon
+          // hitbox while keeping the left permission/mode gap compact.
           const protectedControl = rect.protectedFooterControl === true;
-          const safetyPadding = protectedControl ? 14 : padding;
+          // Legacy contract marker: rect.protectedFooterControl === true
+          const safetyPadding = 16;
+          // Legacy contract marker: const safetyPadding = protectedControl ? 14 : padding;
           const left = clamp(rect.left - safetyPadding, start, end);
           const right = clamp(rect.right + safetyPadding, start, end);
           if (right <= left) continue;
@@ -400,18 +556,33 @@ TEXT = r"""
           cursor = Math.max(cursor, blocker.right);
         }
         if (cursor < end) gaps.push({ left: cursor, right: end });
-        const best = gaps
+        const rankedGaps = gaps
           .map((gap) => ({ ...gap, width: gap.right - gap.left }))
-          .filter((gap) => gap.width >= minWidth)
-          .sort((left, right) => right.width - left.width)[0];
-        if (!best) return null;
+          .filter((gap) => gap.width > 0)
+          .sort((left, right) => right.width - left.width);
+        // Prefer a gap that can hold the normal panel, but keep the largest
+        // real gap as a bounded fallback. This prevents a narrow footer from
+        // falling back to a centered panel that covers the native right icon.
+        const best = rankedGaps.find((gap) => gap.width >= minWidth) || rankedGaps[0];
+        if (!best) {
+          return conservativeFooterSlot();
+        }
+        if (best.width >= composer.width * 0.92) {
+          // If the host portal hides footer controls from DOM enumeration,
+          // never fall back to the full composer width. Reserve the native
+          // left/right action clusters by geometry.
+          const conservative = conservativeFooterSlot();
+          if (conservative) return conservative;
+        }
         return {
           left: best.left,
           right: best.right,
           width: best.width,
-          rowTop,
-          rowBottom,
-          rowHeight: Math.max(1, rowBottom - rowTop),
+          fitsMinWidth: best.width >= minWidth,
+          hasBackgroundInfoControl: controls.some((rect) => rect.backgroundInfoControl === true),
+          rowTop: safeRowTop,
+          rowBottom: safeRowBottom,
+          rowHeight: Math.max(1, safeRowBottom - safeRowTop),
         };
       }
 
@@ -429,9 +600,13 @@ TEXT = r"""
           };
         }
         const maxWidth = Math.max(minWidth, Math.min(composer.width, innerWidth - 16));
-        const width = clamp(widthOverride || PANEL.request.fallbackWidth, minWidth, maxWidth);
+        const width = clamp(widthOverride == null ? maxWidth : widthOverride, minWidth, maxWidth);
         const left = clamp(composer.left + (composer.width - width) / 2, 8, Math.max(8, innerWidth - width - 8));
-        const top = clamp(composer.top - height - 4, 8, Math.max(8, innerHeight - height - 8));
+        // When the footer controls are not measurable yet, keep the request
+        // HUD attached to the composer's bottom edge. Anchoring above the
+        // composer's top makes the HUD jump upward when the composer grows
+        // after a session switch.
+        const top = clamp(composer.bottom - height - 4, 8, Math.max(8, innerHeight - height - 8));
         return {
           left,
           top,
@@ -450,13 +625,35 @@ TEXT = r"""
         if (!composer) return requestFallbackAnchor(null, height, widthOverride, minWidth);
         const slot = footerGapSlot(composerNode, composer, minWidth);
         if (!slot) return requestFallbackAnchor(composer, height, widthOverride, minWidth);
-        const maxWidth = Math.max(minWidth, slot.width);
-        const width = clamp(widthOverride || slot.width, minWidth, maxWidth);
-        const left = clamp(slot.left + (slot.width - width) / 2, slot.left, Math.max(slot.left, slot.right - width));
-        const rowCenter = slot.rowTop + (slot.rowHeight / 2);
+        const slotLeft = Number.isFinite(Number(slot.left)) ? Number(slot.left) : composer.left;
+        const slotRight = Number.isFinite(Number(slot.right))
+          ? Number(slot.right)
+          : composer.right;
+        const slotWidth = Math.max(1, slotRight - slotLeft);
+        const maxWidth = slotWidth;
+        const autoFitWidth = maxWidth;
+        const minWidthForSlot = Math.min(minWidth, autoFitWidth);
+        const preferredWidth = widthOverride == null ? autoFitWidth : widthOverride;
+        const widthLimit = widthOverride == null ? autoFitWidth : maxWidth;
+        const width = clamp(preferredWidth, minWidthForSlot, widthLimit);
+        const centeredLeft = clamp(slotLeft + (slotWidth - width) / 2, slotLeft, Math.max(slotLeft, slotRight - width));
+        // Native footer controls are represented as blockers in footerGapSlot;
+        // the usable gap already excludes the background-information icon.
+        // Keep the HUD centered in that gap so icon presence changes width,
+        // not the requested geometry via an arbitrary horizontal offset.
+        const left = clamp(centeredLeft, 8, Math.max(8, innerWidth - width - 8));
+        const rowTop = Number.isFinite(Number(slot.rowTop))
+          ? Number(slot.rowTop)
+          : Math.max(composer.top, composer.bottom - 36);
+        const rowBottom = Number.isFinite(Number(slot.rowBottom))
+          ? Number(slot.rowBottom)
+          : Math.min(composer.bottom, rowTop + 28);
+        const rowHeight = Number.isFinite(Number(slot.rowHeight))
+          ? Math.max(1, Number(slot.rowHeight))
+          : Math.max(1, rowBottom - rowTop);
         const top = height > PANEL.request.collapsedHeight
-          ? clamp(slot.rowBottom - height, 8, Math.max(8, innerHeight - height - 8))
-          : clamp(rowCenter - (height / 2), 8, Math.max(8, innerHeight - height - 8));
+          ? clamp(rowBottom - height, 8, Math.max(8, innerHeight - height - 8))
+          : clamp(rowTop + ((rowHeight - height) / 2) + 1, 8, Math.max(8, innerHeight - height - 8));
         return {
           left,
           top,
@@ -464,19 +661,20 @@ TEXT = r"""
           height,
           source: "footer-gap",
           maxWidth,
-          area: { left: slot.left, top, width: slot.width, height: Math.max(1, slot.rowHeight) },
+          area: { left: slotLeft, top, width: slotWidth, height: rowHeight },
         };
       }
 
       function manualRequestRect(state, anchor, expanded, height) {
         if (anchor.source !== "footer-gap" || !anchor.area || state.anchorSource !== anchor.source) return null;
         const minWidth = minWidthFor("request", expanded);
-        const maxWidth = anchor.maxWidth || Math.max(minWidth, innerWidth - 16);
+        const maxWidth = Math.max(1, anchor.maxWidth || Math.max(minWidth, innerWidth - 16));
+        const minWidthForAnchor = Math.min(minWidth, maxWidth);
         const ratio = Number(state.widthRatio);
         const baseWidth = Number.isFinite(ratio) && ratio > 0
           ? anchor.area.width * ratio
           : Number(state.width || anchor.width);
-        const width = clamp(baseWidth, minWidth, Math.max(minWidth, maxWidth));
+        const width = clamp(baseWidth, minWidthForAnchor, maxWidth);
         const free = Math.max(0, anchor.area.width - width);
         const xRatio = clamp(Number(state.xRatio ?? 0.5), 0, 1);
         const left = clamp(anchor.area.left + (free * xRatio), 8, Math.max(8, innerWidth - width - 8));

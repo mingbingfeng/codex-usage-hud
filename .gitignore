@@ -78,3 +78,7 @@ output/
 
 # Reasonix tool metadata
 .reasonix/
+.workbuddy/
+skills/
+docs/
+icon/

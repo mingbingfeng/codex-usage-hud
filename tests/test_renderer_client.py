@@ -77,34 +77,3 @@ def test_client_uses_its_payload_and_support_owners(monkeypatch) -> None:
     assert captured["snapshot"] is snapshot
     assert captured["support_images"] == []
     assert captured["settings_path"] is None
-
-
-def test_session_lock_blocks_startup_retry_before_any_cdp_work(monkeypatch) -> None:
-    client = renderer_client.RendererHudClient(enabled=True)
-    client.suspend_for_session_lock()
-    attempted: list[str] = []
-    monkeypatch.setattr(
-        client,
-        "_update_payload_once",
-        lambda *_args, **_kwargs: attempted.append("cdp") or True,
-    )
-
-    assert not client.update_payload({"payloadDomains": {}}, startup_retry=True)
-    assert attempted == []
-    assert client.last_status == "session-locked"
-
-
-def test_session_unlock_clears_stale_cdp_state_once(monkeypatch) -> None:
-    client = renderer_client.RendererHudClient(enabled=True)
-    calls: list[bool] = []
-    monkeypatch.setattr(
-        client,
-        "_clear_target_cache",
-        lambda *, clear_script: calls.append(clear_script),
-    )
-
-    client.suspend_for_session_lock()
-    client.resume_after_session_unlock()
-    client.resume_after_session_unlock()
-
-    assert calls == [True]

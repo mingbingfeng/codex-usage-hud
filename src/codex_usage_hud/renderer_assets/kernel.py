@@ -14,6 +14,11 @@ TEXT = r"""
     let disposed = false;
     let context = null;
 
+    function callbackActive() {
+      return !disposed
+        && (typeof runtimeIsCurrent !== "function" || runtimeIsCurrent());
+    }
+
     function releaseEntry(entry, invoke = true) {
       if (!entry?.active) return false;
       entry.active = false;
@@ -97,6 +102,7 @@ TEXT = r"""
       const id = requestAnimationFrame((timestamp) => {
         scheduledFrames.delete(key);
         release(false);
+        if (!callbackActive()) return;
         callback(timestamp);
       });
       release = addTeardown(`frame:${key}`, () => cancelAnimationFrame(id));
@@ -117,6 +123,7 @@ TEXT = r"""
       const id = requestAnimationFrame((timestamp) => {
         frameDisposers.delete(id);
         release(false);
+        if (!callbackActive()) return;
         callback(timestamp);
       });
       release = addTeardown(`frame:${owner || "shared"}`, () => cancelAnimationFrame(id));
@@ -196,6 +203,7 @@ TEXT = r"""
       const id = setTimeout(() => {
         timeoutDisposers.delete(id);
         release(false);
+        if (!callbackActive()) return;
         callback(...args);
       }, delay);
       release = addTeardown(`timeout:${owner || "shared"}`, () => clearTimeout(id));
@@ -214,7 +222,10 @@ TEXT = r"""
     }
 
     function scheduleInterval(owner, callback, delay, ...args) {
-      const id = setInterval(callback, delay, ...args);
+      const id = setInterval(() => {
+        if (!callbackActive()) return;
+        callback(...args);
+      }, delay);
       const release = addTeardown(`interval:${owner || "shared"}`, () => clearInterval(id));
       intervalDisposers.set(id, release);
       return id;

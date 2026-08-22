@@ -1,24 +1,52 @@
-"""Windows session-lock gating for the Renderer HUD runtime."""
+"""Event-driven Windows session-lock notifications for the HUD daemon."""
 
 from __future__ import annotations
 
 import ctypes
+import logging
 import sys
 import threading
 from collections.abc import Callable
+from ctypes import wintypes
 
 
+_LOGGER = logging.getLogger(__name__)
 _DESKTOP_SWITCHDESKTOP = 0x0100
 _UOI_NAME = 2
+_WM_QUIT = 0x0012
+_WM_WTSSESSION_CHANGE = 0x02B1
+_WTS_SESSION_LOCK = 0x7
+_WTS_SESSION_UNLOCK = 0x8
+_NOTIFY_FOR_THIS_SESSION = 0
+_HWND_MESSAGE = -3
+
+_WINFUNCTYPE = getattr(ctypes, "WINFUNCTYPE", ctypes.CFUNCTYPE)
+_WNDPROC = _WINFUNCTYPE(
+    ctypes.c_ssize_t,
+    wintypes.HWND,
+    wintypes.UINT,
+    ctypes.c_size_t,
+    ctypes.c_ssize_t,
+)
+
+
+class _WNDCLASSW(ctypes.Structure):
+    _fields_ = [
+        ("style", wintypes.UINT),
+        ("lpfnWndProc", _WNDPROC),
+        ("cbClsExtra", ctypes.c_int),
+        ("cbWndExtra", ctypes.c_int),
+        ("hInstance", ctypes.c_void_p),
+        ("hIcon", ctypes.c_void_p),
+        ("hCursor", ctypes.c_void_p),
+        ("hbrBackground", ctypes.c_void_p),
+        ("lpszMenuName", ctypes.c_wchar_p),
+        ("lpszClassName", ctypes.c_wchar_p),
+    ]
 
 
 def windows_session_locked() -> bool:
-    """Return whether the interactive Windows desktop is unavailable.
-
-    ``OpenInputDesktop`` is available without a GUI framework and fails while
-    Windows is displaying the secure lock screen.  Non-Windows runtimes are
-    always considered interactive so Renderer HUD behavior stays unchanged.
-    """
+    """Return whether the interactive Windows desktop is unavailable."""
     if not sys.platform.startswith("win"):
         return False
     try:
@@ -63,48 +91,11 @@ def windows_session_locked() -> bool:
         finally:
             close_desktop(desktop)
     except Exception:
-        # A detection failure must not turn a normal desktop session into a
-        # permanent HUD outage.
         return False
 
 
-class RendererActivityGate:
-    """Coordinates lock/unlock transitions with the Renderer event loop."""
-
-    def __init__(self) -> None:
-        self._suspended = threading.Event()
-        self._resumed = threading.Event()
-        self._resumed.set()
-
-    def suspend(self) -> bool:
-        if self._suspended.is_set():
-            return False
-        self._suspended.set()
-        self._resumed.clear()
-        return True
-
-    def resume(self) -> bool:
-        if not self._suspended.is_set():
-            return False
-        self._suspended.clear()
-        self._resumed.set()
-        return True
-
-    def is_suspended(self) -> bool:
-        return self._suspended.is_set()
-
-    def wait_until_resumed(self, timeout_seconds: float = 30.0) -> bool:
-        return self._resumed.wait(max(0.05, float(timeout_seconds)))
-
-
 class WindowsSessionLockMonitor:
-    """Observe lock transitions with conservative polling outside the renderer.
-
-    Windows delivers lock notifications only to a GUI message window.  The HUD
-    has no native window in Renderer mode, so this monitor uses the input
-    desktop availability probe once per second.  It never touches Codex or
-    CDP; callbacks only transition the local activity gate.
-    """
+    """Report Windows session lock transitions through a hidden message window."""
 
     def __init__(
         self,
@@ -112,42 +103,83 @@ class WindowsSessionLockMonitor:
         on_lock: Callable[[], None],
         on_unlock: Callable[[], None],
         locked_probe: Callable[[], bool] = windows_session_locked,
-        poll_seconds: float = 1.0,
     ) -> None:
         self._on_lock = on_lock
         self._on_unlock = on_unlock
         self._locked_probe = locked_probe
-        self._poll_seconds = max(0.2, float(poll_seconds))
         self._stop_event = threading.Event()
+        self._ready = threading.Event()
+        self._state_lock = threading.Lock()
         self._thread: threading.Thread | None = None
+        self._thread_id = 0
+        self._hwnd: wintypes.HWND | None = None
         self._locked: bool | None = None
+        self._startup_error: BaseException | None = None
 
-    def start(self) -> None:
-        if not sys.platform.startswith("win") or self._thread is not None:
+    def start(self, *, initial_locked: bool | None = None) -> None:
+        if not sys.platform.startswith("win"):
             return
-        self._thread = threading.Thread(
-            target=self._run,
-            name="codex-hud-session-lock-monitor",
-            daemon=True,
-        )
-        self._thread.start()
+        with self._state_lock:
+            if self._thread is not None:
+                return
+            self._stop_event.clear()
+            self._ready.clear()
+            self._startup_error = None
+            self._locked = initial_locked
+            thread = threading.Thread(
+                target=self._run,
+                name="codex-hud-session-lock-monitor",
+                daemon=True,
+            )
+            self._thread = thread
+        if self._locked:
+            self._on_lock()
+        thread.start()
+        self._ready.wait(timeout=2.0)
+        error = self._startup_error
+        if error is not None:
+            _LOGGER.error("session_lock_monitor_start_failed error=%s", error)
+            self.close()
+
+    def set_enabled(self, enabled: bool) -> None:
+        if enabled:
+            self.start()
+        else:
+            self.close()
 
     def close(self) -> None:
         self._stop_event.set()
-        thread = self._thread
+        with self._state_lock:
+            thread = self._thread
+            thread_id = self._thread_id
+        if thread_id:
+            try:
+                user32 = ctypes.WinDLL("user32", use_last_error=True)
+                post_thread_message = user32.PostThreadMessageW
+                post_thread_message.argtypes = (
+                    wintypes.DWORD,
+                    wintypes.UINT,
+                    wintypes.WPARAM,
+                    wintypes.LPARAM,
+                )
+                post_thread_message.restype = wintypes.BOOL
+                post_thread_message(thread_id, _WM_QUIT, 0, 0)
+            except Exception:
+                pass
         if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=self._poll_seconds + 0.2)
-        self._thread = None
+            thread.join(timeout=2.0)
+        with self._state_lock:
+            if self._thread is thread and (thread is None or not thread.is_alive()):
+                self._thread = None
+            self._thread_id = 0
+            self._hwnd = None
+            self._locked = None
 
-    def poll_once(self) -> None:
-        locked = bool(self._locked_probe())
-        previous = self._locked
-        self._locked = locked
-        if previous is None:
-            if locked:
-                self._on_lock()
-            return
-        if locked == previous:
+    def _emit_transition(self, locked: bool) -> None:
+        with self._state_lock:
+            previous = self._locked
+            self._locked = bool(locked)
+        if previous is None or bool(locked) == previous:
             return
         if locked:
             self._on_lock()
@@ -155,16 +187,175 @@ class WindowsSessionLockMonitor:
             self._on_unlock()
 
     def _run(self) -> None:
-        while not self._stop_event.is_set():
-            try:
-                self.poll_once()
-            except Exception:
-                pass
-            self._stop_event.wait(self._poll_seconds)
+        user32 = None
+        wtsapi32 = None
+        class_name = f"CodexUsageHudSessionLock_{id(self):x}"
+        registered = False
+        hwnd: wintypes.HWND | None = None
+        wnd_proc = None
+        try:
+            user32 = ctypes.WinDLL("user32", use_last_error=True)
+            wtsapi32 = ctypes.WinDLL("wtsapi32", use_last_error=True)
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            def_window_proc = user32.DefWindowProcW
+            def_window_proc.argtypes = (
+                wintypes.HWND,
+                wintypes.UINT,
+                ctypes.c_size_t,
+                ctypes.c_ssize_t,
+            )
+            def_window_proc.restype = ctypes.c_ssize_t
+            get_current_thread_id = kernel32.GetCurrentThreadId
+            get_current_thread_id.argtypes = ()
+            get_current_thread_id.restype = wintypes.DWORD
+            with self._state_lock:
+                self._thread_id = int(get_current_thread_id())
+
+            def window_proc(
+                current_hwnd: wintypes.HWND,
+                message: int,
+                wparam: int,
+                lparam: int,
+            ) -> int:
+                if message == _WM_WTSSESSION_CHANGE:
+                    if int(wparam) == _WTS_SESSION_LOCK:
+                        self._emit_transition(True)
+                    elif int(wparam) == _WTS_SESSION_UNLOCK:
+                        self._emit_transition(False)
+                return int(def_window_proc(current_hwnd, message, wparam, lparam))
+
+            wnd_proc = _WNDPROC(window_proc)
+            get_module_handle = kernel32.GetModuleHandleW
+            get_module_handle.argtypes = (wintypes.LPCWSTR,)
+            get_module_handle.restype = ctypes.c_void_p
+            hinstance = get_module_handle(None)
+            register_class = user32.RegisterClassW
+            register_class.argtypes = (ctypes.POINTER(_WNDCLASSW),)
+            register_class.restype = wintypes.ATOM
+            unregister_class = user32.UnregisterClassW
+            unregister_class.argtypes = (wintypes.LPCWSTR, ctypes.c_void_p)
+            unregister_class.restype = wintypes.BOOL
+            window_class = _WNDCLASSW(
+                style=0,
+                lpfnWndProc=wnd_proc,
+                cbClsExtra=0,
+                cbWndExtra=0,
+                hInstance=hinstance,
+                hIcon=None,
+                hCursor=None,
+                hbrBackground=None,
+                lpszMenuName=None,
+                lpszClassName=class_name,
+            )
+            if not register_class(ctypes.byref(window_class)):
+                raise ctypes.WinError(ctypes.get_last_error())
+            registered = True
+            create_window = user32.CreateWindowExW
+            create_window.argtypes = (
+                wintypes.DWORD,
+                wintypes.LPCWSTR,
+                wintypes.LPCWSTR,
+                wintypes.DWORD,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+                wintypes.HWND,
+                wintypes.HMENU,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+            )
+            create_window.restype = wintypes.HWND
+            hwnd = create_window(
+                0,
+                class_name,
+                class_name,
+                0,
+                0,
+                0,
+                0,
+                0,
+                wintypes.HWND(_HWND_MESSAGE),
+                None,
+                hinstance,
+                None,
+            )
+            if not hwnd:
+                raise ctypes.WinError(ctypes.get_last_error())
+            with self._state_lock:
+                self._hwnd = hwnd
+            register_session = wtsapi32.WTSRegisterSessionNotification
+            register_session.argtypes = (wintypes.HWND, wintypes.DWORD)
+            register_session.restype = wintypes.BOOL
+            if not register_session(hwnd, _NOTIFY_FOR_THIS_SESSION):
+                raise ctypes.WinError(ctypes.get_last_error())
+
+            self._synchronize_initial_state()
+
+            get_message = user32.GetMessageW
+            get_message.argtypes = (
+                ctypes.POINTER(wintypes.MSG),
+                wintypes.HWND,
+                wintypes.UINT,
+                wintypes.UINT,
+            )
+            get_message.restype = ctypes.c_int
+            translate_message = user32.TranslateMessage
+            translate_message.argtypes = (ctypes.POINTER(wintypes.MSG),)
+            translate_message.restype = wintypes.BOOL
+            dispatch_message = user32.DispatchMessageW
+            dispatch_message.argtypes = (ctypes.POINTER(wintypes.MSG),)
+            dispatch_message.restype = ctypes.c_ssize_t
+            self._ready.set()
+            message = wintypes.MSG()
+            while not self._stop_event.is_set():
+                result = int(get_message(ctypes.byref(message), None, 0, 0))
+                if result <= 0:
+                    break
+                translate_message(ctypes.byref(message))
+                dispatch_message(ctypes.byref(message))
+            unregister_session = wtsapi32.WTSUnRegisterSessionNotification
+            unregister_session.argtypes = (wintypes.HWND,)
+            unregister_session.restype = wintypes.BOOL
+            unregister_session(hwnd)
+        except BaseException as exc:
+            with self._state_lock:
+                self._startup_error = exc
+            _LOGGER.exception("session_lock_monitor_failed")
+        finally:
+            if hwnd:
+                try:
+                    user32.DestroyWindow(hwnd)
+                except Exception:
+                    pass
+            if registered:
+                try:
+                    user32.UnregisterClassW(class_name, hinstance)
+                except Exception:
+                    pass
+            self._ready.set()
+            with self._state_lock:
+                self._hwnd = None
+                self._thread_id = 0
+
+    def _synchronize_initial_state(self) -> None:
+        current = bool(self._locked_probe())
+        with self._state_lock:
+            previous = self._locked
+            self._locked = current
+        if previous is None:
+            if current:
+                self._on_lock()
+            return
+        if previous == current:
+            return
+        if current:
+            self._on_lock()
+        else:
+            self._on_unlock()
 
 
 __all__ = [
-    "RendererActivityGate",
     "WindowsSessionLockMonitor",
     "windows_session_locked",
 ]

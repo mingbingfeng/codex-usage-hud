@@ -38,6 +38,17 @@ from codex_usage_hud.pricing import (
 
 
 class UserConfigStoreTests(unittest.TestCase):
+    def test_lock_screen_stop_setting_defaults_off_and_round_trips(self) -> None:
+        defaults = UserConfig.defaults()
+        self.assertFalse(defaults.stop_hud_on_lock_screen)
+
+        enabled = UserConfig.from_dict({"stop_hud_on_lock_screen": "on"})
+        self.assertTrue(enabled.stop_hud_on_lock_screen)
+        self.assertTrue(enabled.to_dict()["stop_hud_on_lock_screen"])
+
+        invalid = UserConfig.from_dict({"stop_hud_on_lock_screen": "unknown"})
+        self.assertFalse(invalid.stop_hud_on_lock_screen)
+
     def test_failed_legacy_migration_write_keeps_file_time_version_stable(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "hud_settings.json"

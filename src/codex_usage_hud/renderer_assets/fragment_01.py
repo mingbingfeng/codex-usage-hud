@@ -1,6 +1,6 @@
 HEAD = r"""
 (() => {
-  const version = "54";
+  const version = "67";
   const rootId = "codex-usage-hud-root";
   // Reinstalling the same Renderer bundle in a live document must be
   // idempotent.  In particular, do not tear down the old runtime while a
@@ -15,6 +15,13 @@ HEAD = r"""
   ) {
     return;
   }
+  const runtimeGenerationName = "__codexUsageHudRuntimeGeneration";
+  const previousRuntimeGeneration = Number(window[runtimeGenerationName] || 0);
+  const runtimeGeneration = Number.isFinite(previousRuntimeGeneration)
+    ? previousRuntimeGeneration + 1
+    : 1;
+  window[runtimeGenerationName] = runtimeGeneration;
+  const runtimeIsCurrent = () => window[runtimeGenerationName] === runtimeGeneration;
   const styleId = "codex-usage-hud-style";
   const topClass = "codex-usage-hud-top";
   const requestClass = "codex-usage-hud-request";
@@ -210,6 +217,8 @@ scanStartedAt: 0,
       requestId: "",
       data: null,
       operation: null,
+      startedAt: 0,
+      cancelledRequestId: "",
       resumeRequestId: "",
       resumeSessionId: "",
       resumeState: "",
@@ -228,6 +237,8 @@ scanStartedAt: 0,
     : new Set(Array.isArray(sessionTransferState.selectedIds) ? sessionTransferState.selectedIds : []);
   sessionTransferState.scanRequestId = String(sessionTransferState.scanRequestId || "");
   sessionTransferState.requestId = String(sessionTransferState.requestId || "");
+  sessionTransferState.startedAt = Math.max(0, Number(sessionTransferState.startedAt || 0));
+  sessionTransferState.cancelledRequestId = String(sessionTransferState.cancelledRequestId || "");
   sessionTransferState.page = Math.max(0, Number(sessionTransferState.page || 0));
   window[sessionTransferStateName] = sessionTransferState;
   let backgroundUsageFetchSeq = 0;
@@ -315,7 +326,9 @@ scanStartedAt: 0,
   const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
   const px = (value) => `${Math.round(value)}px`;
   const visible = (node) => {
-    if (!(node instanceof HTMLElement) || !node.isConnected) return false;
+    // Native footer icons may be standalone SVG elements rather than HTML
+    // controls, so use the shared Element base for geometry visibility.
+    if (!(node instanceof Element) || !node.isConnected) return false;
     const style = getComputedStyle(node);
     if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity || 1) === 0) return false;
     const rect = node.getBoundingClientRect();

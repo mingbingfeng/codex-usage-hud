@@ -2,6 +2,7 @@
 
 TEXT = r"""
       function syncPosition(names = Object.keys(PANEL), { forceAutoFit = false } = {}) {
+        if (!runtimeIsCurrent() || !ctx.lifecycle.active()) return;
         const root = document.getElementById(rootId);
         if (!root) return;
         positionStartupBubble(root);
@@ -14,9 +15,11 @@ TEXT = r"""
           const state = getPanelState(name);
           const expanded = panel.dataset.expanded === "true";
           const height = desiredHeight(name, state, expanded);
-          const widthOverride = forceAutoFit
-            ? null
-            : name === "request" && state.anchorSource === "footer-gap" && state.widthRatio
+          // Request HUD auto geometry is derived from the live composer gap.
+          // A persisted width belongs only to an active manual drag/resize;
+          // feeding it into requestAnchor recreates stale narrow geometry after
+          // a session switch or composer rebuild.
+          const widthOverride = forceAutoFit || name === "request"
             ? null
             : state.width;
           const anchor = name === "top"
@@ -47,15 +50,23 @@ TEXT = r"""
       }
 
       function syncPositionSettled(names = Object.keys(PANEL), options = {}) {
+        if (!runtimeIsCurrent() || !ctx.lifecycle.active()) return;
         for (const timer of (window[settleTimerName] || [])) ctx.lifecycle.clearTimeout(timer);
         window[settleTimerName] = [
-          ctx.lifecycle.timeout("layout_settle", () => syncPosition(names, options), 50),
-          ctx.lifecycle.timeout("layout_settle", () => syncPosition(names, options), 140),
-          ctx.lifecycle.timeout("layout_settle", () => syncPosition(names, options), 260),
+          ctx.lifecycle.timeout("layout_settle", () => {
+            if (runtimeIsCurrent() && ctx.lifecycle.active()) syncPosition(names, options);
+          }, 50),
+          ctx.lifecycle.timeout("layout_settle", () => {
+            if (runtimeIsCurrent() && ctx.lifecycle.active()) syncPosition(names, options);
+          }, 140),
+          ctx.lifecycle.timeout("layout_settle", () => {
+            if (runtimeIsCurrent() && ctx.lifecycle.active()) syncPosition(names, options);
+          }, 260),
         ];
       }
 
       function scheduleForPanels(names = Object.keys(PANEL), { invalidateTop = false, forceAutoFit = false } = {}) {
+        if (!runtimeIsCurrent() || !ctx.lifecycle.active()) return;
         const panelNames = Array.isArray(names) ? names.filter((name) => PANEL[name]) : Object.keys(PANEL);
         if (invalidateTop || panelNames.includes("top")) topSlotCache = null;
         pendingForceAutoFit = pendingForceAutoFit || forceAutoFit;
@@ -63,6 +74,7 @@ TEXT = r"""
         for (const name of panelNames) pendingSyncPanels.add(name);
         ctx.frames.cancel("layout");
         window[rafName] = ctx.frames.schedule("layout", () => {
+          if (!runtimeIsCurrent() || !ctx.lifecycle.active()) return;
           const nextPanels = Array.from(pendingSyncPanels || Object.keys(PANEL));
           pendingSyncPanels = null;
           const nextForceAutoFit = pendingForceAutoFit;
@@ -145,6 +157,42 @@ TEXT = r"""
         return false;
       }
 
+      function isComposerGeometryControl(element) {
+        const control = element?.closest?.("button, [role='button'], [role='radio'], [role='img']");
+        if (!control || control.closest?.(`#${rootId}`)) return false;
+        const identity = [
+          control.getAttribute?.("data-testid"),
+          control.getAttribute?.("aria-label"),
+          control.getAttribute?.("title"),
+          control.textContent,
+        ].filter(Boolean).join(" ").trim();
+        if (/\b(?:plan|goal|model|reasoning|effort|permission|access)\b|计划|目标|模型|权限|访问/i.test(identity)) {
+          return true;
+        }
+        // Desktop's model button is intentionally unlabeled in some builds;
+        // its visible model/effort text is the only signal. Restrict this
+        // fallback to a non-empty, unlabeled button in the composer's footer
+        // band so a changing context-ring aria-label cannot trigger reflow.
+        if (control.tagName !== "BUTTON"
+          || control.getAttribute?.("aria-label")
+          || control.getAttribute?.("title")
+          || control.getAttribute?.("data-testid")
+          || !normalize(control.textContent)) return false;
+        const composerRoot = control.closest?.("[class*='ComposerLayoutRoot'], [class*='ComposerLayoutFooter']");
+        if (!composerRoot) return false;
+        const composerRect = composerRoot.getBoundingClientRect();
+        const controlRect = control.getBoundingClientRect();
+        return controlRect.bottom >= composerRect.bottom - 48;
+      }
+
+      function mutationTouchesComposerGeometryControl(mutation) {
+        if (isComposerGeometryControl(elementFromMutationNode(mutation.target))) return true;
+        for (const node of [...(mutation.addedNodes || []), ...(mutation.removedNodes || [])]) {
+          if (isComposerGeometryControl(elementFromMutationNode(node))) return true;
+        }
+        return false;
+      }
+
       function layoutMutationTarget(mutation, headerNode, composerNode) {
         const element = elementFromMutationNode(mutation.target);
         if (!element || element.closest?.(`#${rootId}`)) return "";
@@ -154,6 +202,7 @@ TEXT = r"""
       }
 
       function handleLayoutMutations(mutations) {
+        if (!runtimeIsCurrent() || !ctx.lifecycle.active()) return;
         const headerNode = cachedHeaderNode;
         const composerNode = cachedComposerNode;
         let touchesHeaderTitle = false;
@@ -167,17 +216,26 @@ TEXT = r"""
             // Typing in the active conversation must not repeatedly measure
             // HUD geometry. Non-text composer mutations still cover mode
             // controls such as Plan/Goal, whose footer layout can change.
-            if (!layoutMutationTouchesTextInput(mutation) && mutationTouchesComposerModeControl(mutation)) {
+            if (!layoutMutationTouchesTextInput(mutation) && (
+              mutationTouchesComposerModeControl(mutation)
+              || mutationTouchesComposerGeometryControl(mutation)
+            )) {
               touchesComposerMode = true;
             }
           }
         }
-        if (touchesHeaderTitle) {
+        // Geometry is session-owned. Controls may change their text/width in
+        // an automatic panel, so refresh its anchor; preserve a user's
+        // manually dragged/resized geometry for the entire session.
+        // Legacy contract markers: scheduleForPanels(["top"], { invalidateTop: true });
+        // scheduleForPanels(["request"]);
+        // Legacy contract marker: if (!layoutMutationTouchesTextInput(mutation) && mutationTouchesComposerModeControl(mutation))
+        if (touchesHeaderTitle && !getPanelState("top").manual) {
           invalidateHeaderAnchor();
           scheduleForPanels(["top"], { invalidateTop: true });
           syncPositionSettled(["top"]);
         }
-        if (touchesComposerMode) {
+        if (touchesComposerMode && !getPanelState("request").manual) {
           invalidateComposerAnchor();
           scheduleForPanels(["request"]);
         }
@@ -210,6 +268,7 @@ TEXT = r"""
         // are handled by the targeted observers above. A generic resize
         // observer also fires while typing, which violates the per-session
         // no-relayout contract.
+        // Legacy contract marker: ctx.observers.set("layout_resize", new ResizeObserver(() => {}));
         window[resizeObserverName] = { disconnect() {} };
         ensureComposerInputWatchers();
       }
@@ -228,6 +287,7 @@ TEXT = r"""
         }
         if (window[bootstrapObserverName] || !document.body) return;
         window[bootstrapObserverName] = ctx.observers.set("layout_bootstrap", new MutationObserver(() => {
+          if (!runtimeIsCurrent() || !ctx.lifecycle.active()) return;
           invalidateHeaderAnchor();
           invalidateComposerAnchor();
           const headerNode = conversationHeaderElement();
@@ -383,6 +443,8 @@ TEXT = r"""
       mutationTouchesHeaderTitleScope,
       isComposerModeControl,
       mutationTouchesComposerModeControl,
+      isComposerGeometryControl,
+      mutationTouchesComposerGeometryControl,
       layoutMutationTarget,
       handleLayoutMutations,
       refreshLayoutObservers,

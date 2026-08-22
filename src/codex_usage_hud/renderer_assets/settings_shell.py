@@ -19,6 +19,7 @@ _TEXT_PREFIX = r"""
       };
       const codexProviderDrafts = new Map();
       const codexProviderDirty = new Set();
+      let autoSavedSettingsSignature = "";
       const codexCliState = {
         open: false,
         provider: "",
@@ -1455,6 +1456,7 @@ _TEXT_PREFIX = r"""
           provider_registry: {},
           app_provider: "",
           support_url: "https://github.com/mingbingfeng/codex-usage-hud",
+          stop_hud_on_lock_screen: false,
           rest_reminder_enabled: false,
           rest_reminder_interval_minutes: 45,
           rest_reminder_break_minutes: 2,
@@ -2049,6 +2051,7 @@ _TEXT_PREFIX = r"""
         const providerSettings = entry.settings;
         const required = activeProvider === draft.appProvider;
         const quickLaunchEnabled = draft.quickLaunchProviders?.has(activeProvider) === true;
+        const pricingDraftPending = settingsDirtyProviders.has(activeProvider);
         const meta = settingsProviderMeta(settings, activeProvider);
         const weeklyAdjustment = Number(providerSettings.weekly_adjustment_usd);
         const weeklyAdjustmentValue = Number.isFinite(weeklyAdjustment) && weeklyAdjustment > 0
@@ -2080,6 +2083,7 @@ _TEXT_PREFIX = r"""
               <button type="button" class="codex-usage-hud-settings-icon-action codex-usage-hud-codex-cli-launch-action" data-action="settings-codex-cli-open" data-provider="${escapeHtml(activeProvider)}" aria-label="以当前 Provider 启动 Codex CLI" title="以当前 Provider 启动 Codex CLI"><span aria-hidden="true">&gt;_</span></button>
               <button type="button" class="codex-usage-hud-settings-icon-action" data-action="settings-transfer-provider" data-provider="${escapeHtml(activeProvider)}" aria-label="复制或迁移 ${escapeHtml(activeProvider)} 的会话" title="复制或迁移会话"><span aria-hidden="true">⇆</span></button>
               ${required ? "" : '<button type="button" class="codex-usage-hud-settings-icon-action" data-action="settings-edit-provider" data-provider="' + escapeHtml(activeProvider) + '" aria-label="编辑 ' + escapeHtml(activeProvider) + ' 供应商配置" title="编辑供应商配置">✎</button>' + '<button type="button" class="codex-usage-hud-settings-icon-action codex-usage-hud-provider-delete-action" data-action="settings-delete-provider" data-provider="' + escapeHtml(activeProvider) + '" aria-label="删除 ' + escapeHtml(activeProvider) + ' 供应商" title="删除供应商"><span aria-hidden="true">⌫</span></button>'}
+              <button type="button" class="codex-usage-hud-settings-action codex-usage-hud-pricing-apply-action" data-action="settings-pricing-apply" data-primary="true" data-price-draft-pending="${pricingDraftPending}" aria-label="${pricingDraftPending ? "应用模型单价修改，有待应用修改" : "应用模型单价修改"}" title="${pricingDraftPending ? "应用待提交的模型单价修改" : "应用模型单价修改"}">应用<span class="codex-usage-hud-provider-dirty-dot codex-usage-hud-pricing-apply-dirty-dot" data-pricing-apply-dirty-dot="true" aria-hidden="true" ${pricingDraftPending ? "" : "hidden"}></span></button>
             </div>
           </div>
           <div class="codex-usage-hud-price-table">
@@ -2249,12 +2253,28 @@ _TEXT_PREFIX = r"""
         if (count) setSettingsStatus(`${count} 个 Provider 有未保存修改`);
       }
 
+      function syncPricingApplyDirtyState() {
+        const button = document.querySelector(`#${settingsModalId} [data-action="settings-pricing-apply"]`);
+        if (!button) return;
+        const activeProvider = String(settingsProviderDraft?.activeProvider || "").trim().toLowerCase();
+        const pending = !!activeProvider && settingsDirtyProviders.has(activeProvider);
+        button.dataset.priceDraftPending = String(pending);
+        button.setAttribute(
+          "aria-label",
+          pending ? "应用模型单价修改，有待应用修改" : "应用模型单价修改",
+        );
+        button.title = pending ? "应用待提交的模型单价修改" : "应用模型单价修改";
+        const dot = button.querySelector('[data-pricing-apply-dirty-dot="true"]');
+        if (dot) dot.hidden = !pending;
+      }
+
       function markSettingsProviderDirty() {
         const activeProvider = captureSettingsProviderForm();
         if (!activeProvider) return;
         settingsDirtyProviders.add(activeProvider);
         syncCodexCliQuickLaunchMenu();
         renderSettingsProviderTabs();
+        syncPricingApplyDirtyState();
         updateSettingsProviderDraftStatus();
       }
 
@@ -2732,14 +2752,14 @@ _TEXT_PREFIX = r"""
           originalEnvKey: existingCodex?.originalEnvKey || "",
         });
         codexProviderDirty.add(provider);
-        settingsDirtyProviders.add(provider);
         // 输入了自定义模型名时，把它一并写入该供应商的模型单价列表（单价默认 0）。
-        addCustomModelPriceToDraft(
+        const addedCustomModelPrice = addCustomModelPriceToDraft(
           provider,
           String(
             layer.querySelector('[data-provider-config-field="chat_model"]')?.value || "",
           ).trim(),
         );
+        if (addedCustomModelPrice) settingsDirtyProviders.add(provider);
         closeSettingsConfirm();
         renderSettingsProviderEditor();
         renderSettingsProviderTabs();
@@ -2758,7 +2778,6 @@ _TEXT_PREFIX = r"""
           `正在保存供应商 ${provider} 配置...`,
         );
         if (submitted) {
-          settingsDirtyProviders.clear();
           codexProviderDirty.clear();
           renderSettingsProviderTabs();
         }
@@ -2770,9 +2789,9 @@ _TEXT_PREFIX = r"""
         // 单价默认全为 0，便于用户后续直接在此列表填写真实价格。
         const normalizedProvider = String(provider || "").trim().toLowerCase();
         const normalizedModel = String(model || "").trim();
-        if (!normalizedProvider || !normalizedModel) return;
+        if (!normalizedProvider || !normalizedModel) return false;
         const entry = settingsProviderDraft?.providers?.[normalizedProvider];
-        if (!entry) return;
+        if (!entry) return false;
         const table = entry.settings?.model_prices && typeof entry.settings.model_prices === "object"
           ? entry.settings.model_prices
           : {};
@@ -2780,7 +2799,7 @@ _TEXT_PREFIX = r"""
           const rowModel = String(row?.model || key || "").trim().toLowerCase();
           return rowModel === normalizedModel.toLowerCase();
         });
-        if (exists) return;
+        if (exists) return false;
         entry.settings = {
           ...entry.settings,
           model_prices: {
@@ -2796,6 +2815,7 @@ _TEXT_PREFIX = r"""
             },
           },
         };
+        return true;
       }
 
       function openProviderDeleteDialog(provider = "") {
@@ -2907,6 +2927,7 @@ _TEXT_PREFIX = r"""
         }
         const settings = hudSettingsFromPayload();
         settingsActiveTab = activeTab;
+        autoSavedSettingsSignature = JSON.stringify(settingsWithPersistedPriceTables(settings, settings));
         // 重新打开设置界面时重置粘性错误，避免上一轮的旧错误残留到新一轮。
         settingsStatusErrorSticky = false;
         writeSettingsUiState(true, activeTab);
@@ -2918,8 +2939,8 @@ _TEXT_PREFIX = r"""
           : activeTab === "storage"
             ? "扫描和永久删除仅在用户明确操作时执行。"
             : activeTab === "backgroundUsage"
-              ? "Tokens 来自本机日志；费用均为 HUD 估算。"
-            : (bridge ? "设置将保存到本地配置文件" : "设置桥接未连接，可导出 JSON 手动写入配置文件");
+            ? "Tokens 来自本机日志；费用均为 HUD 估算。"
+            : (bridge ? "设置将保存到本地配置文件" : "设置桥接未连接，无法保存本地配置文件");
         modal.innerHTML = `
           <div class="codex-usage-hud-settings-dialog" data-active-tab="${escapeHtml(activeTab)}" role="dialog" aria-modal="true" aria-label="codex-usage-hud 设置">
             <div class="codex-usage-hud-settings-head">
@@ -2939,7 +2960,7 @@ _TEXT_PREFIX = r"""
             <div class="codex-usage-hud-settings-actions">
               <div class="codex-usage-hud-settings-status" data-settings-status="true">${escapeHtml(status || defaultStatus)}</div>
               <div>
-                ${activeTab === "settings" ? '<button type="button" class="codex-usage-hud-settings-action" data-action="settings-export">导出 JSON</button> <button type="button" class="codex-usage-hud-settings-action" data-action="settings-restart" hidden>立即重启 HUD</button> <button type="button" class="codex-usage-hud-settings-action" data-action="settings-save" data-primary="true">保存</button>' : activeTab === "backgroundUsage" ? '<button type="button" class="codex-usage-hud-settings-action" data-action="background-usage-refresh">刷新</button> <button type="button" class="codex-usage-hud-settings-action" data-action="settings-close" data-primary="true">关闭</button>' : activeTab === "about" ? '<button type="button" class="codex-usage-hud-settings-action" data-action="settings-check-update">检查更新</button> <button type="button" class="codex-usage-hud-settings-action" data-action="settings-install-update" data-primary="true">安装更新</button>' : '<button type="button" class="codex-usage-hud-settings-action" data-action="settings-close" data-primary="true">关闭</button>'}
+                ${activeTab === "settings" ? '<button type="button" class="codex-usage-hud-settings-action" data-action="settings-restart" hidden>立即重启 HUD</button>' : activeTab === "backgroundUsage" ? '<button type="button" class="codex-usage-hud-settings-action" data-action="background-usage-refresh">刷新</button> <button type="button" class="codex-usage-hud-settings-action" data-action="settings-close" data-primary="true">关闭</button>' : activeTab === "about" ? '<button type="button" class="codex-usage-hud-settings-action" data-action="settings-check-update">检查更新</button> <button type="button" class="codex-usage-hud-settings-action" data-action="settings-install-update" data-primary="true">安装更新</button>' : '<button type="button" class="codex-usage-hud-settings-action" data-action="settings-close" data-primary="true">关闭</button>'}
               </div>
             </div>
           </div>
@@ -3028,20 +3049,21 @@ _TEXT_PREFIX = r"""
               </div>
             </div>
             <div class="codex-usage-hud-settings-compact-row">
-              <div class="codex-usage-hud-settings-field">
-                <label>超额提醒阈值</label>
-                <input data-setting-key="budget_thresholds" value="${escapeHtml(thresholdText(settings))}" placeholder="50,80,100">
-              </div>
-              <div class="codex-usage-hud-settings-field">
-                <label>会话进度气泡数量（0 为关闭）</label>
-                <select data-setting-key="work_overlay_max_items">${overlayOptions}</select>
+              <div class="codex-usage-hud-settings-compact-inputs">
+                <div class="codex-usage-hud-settings-field">
+                  <label>超额提醒阈值</label>
+                  <input data-setting-key="budget_thresholds" value="${escapeHtml(thresholdText(settings))}" placeholder="50,80,100">
+                </div>
+                <div class="codex-usage-hud-settings-field">
+                  <label>会话进度气泡数量（0 为关闭）</label>
+                  <select data-setting-key="work_overlay_max_items">${overlayOptions}</select>
+                </div>
               </div>
               <div class="codex-usage-hud-settings-field">
                 <label>气泡运行环境</label>
                 <div class="codex-usage-hud-overlay-runtime-row">
                   <div data-desktop-overlay-dependency="true">${desktopOverlayDependencyHtml()}</div>
                   <label class="codex-usage-hud-overlay-side-control" title="选择会话进度气泡显示在屏幕哪一侧">
-                    <span>位置</span>
                     <select data-setting-key="work_overlay_side" aria-label="气泡位置">${overlaySideOptions}</select>
                   </label>
                 </div>
@@ -3052,6 +3074,10 @@ _TEXT_PREFIX = r"""
             </div>
             <div class="codex-usage-hud-settings-footnote">
               <button type="button" class="codex-usage-hud-settings-action" data-action="settings-exit" data-variant="ghost">退出 HUD</button>
+              <label class="codex-usage-hud-settings-lock-toggle" title="锁屏后退出 HUD，解锁后自动重新启动">
+                <input type="checkbox" data-setting-key="stop_hud_on_lock_screen" ${settings.stop_hud_on_lock_screen ? "checked" : ""} aria-label="锁屏后停止HUD一切活动">
+                <span>锁屏后停止HUD一切活动</span>
+              </label>
               <div class="codex-usage-hud-settings-status">配置文件：${escapeHtml(path || "未提供")} ${bridge ? "" : "（桥接未连接）"}</div>
             </div>
           </div>
@@ -3346,10 +3372,12 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
           settingsDirtyProviders.clear();
           codexProviderDirty.clear();
           renderSettingsProviderTabs();
+          syncPricingApplyDirtyState();
         }
       }
 
       const sessionTransferPageSize = 50;
+      let sessionTransferElapsedTimer = 0;
 
       function sessionTransferProviderTargets(settings, sourceProvider) {
         const draft = ensureSettingsProviderDraft(settings);
@@ -3389,24 +3417,50 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
         return sessionCleanupFromPayload();
       }
 
+      function sessionTransferCompletedSourceIds(operation = sessionTransferOperation()) {
+        const action = String(operation?.action || "").trim().toLowerCase();
+        const mode = String(operation?.mode || "").trim().toLowerCase();
+        const state = String(operation?.state || "").trim().toLowerCase();
+        if (
+          action !== "sessiontransfer"
+          || mode !== "migrate"
+          || !new Set(["completed", "partial", "failed"]).has(state)
+          || !Array.isArray(operation?.results)
+        ) return new Set();
+        return new Set(
+          operation.results
+            .filter((item) => item?.targetVisible === true && item?.targetResumable === true)
+            .map((item) => String(item?.id || "").trim())
+            .filter(Boolean),
+        );
+      }
+
       function sessionTransferRows(data = sessionCleanupFromPayload()) {
         const source = String(sessionTransferState.sourceProvider || "").trim().toLowerCase();
         if (!source) return [];
+        const completedSourceIds = sessionTransferCompletedSourceIds();
         return sessionCleanupRows(data, {
           search: String(sessionTransferState.search || ""),
           dateStart: "",
           dateEnd: "",
           archive: "all",
-          availability: "selectable",
+          availability: "all",
           clientKind: "all",
           // Provider values are normalized by the scan core, but keep this
           // surface case-insensitive so old inventories remain selectable.
           modelProvider: "all",
           sort: "recent",
         }).filter((item) => (
-          item?.transferable !== false
+          (item?.transferable !== false || item?.archived === true)
+          && !completedSourceIds.has(String(item?.id || "").trim())
           && String(item?.modelProvider || "").trim().toLowerCase() === source
-        ));
+        )).map((item) => item?.archived === true
+          ? {
+            ...item,
+            selectable: false,
+            transferBlockedReason: "会话已归档，请先解除归档后再复制或迁移。",
+          }
+          : item);
       }
 
       function sessionTransferView(data = sessionCleanupFromPayload()) {
@@ -3501,10 +3555,168 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
 
       function sessionTransferBusy(operation = sessionTransferOperation()) {
         const state = String(operation?.state || "").toLowerCase();
+        const sharedScanRequestId = String(activeSessionCleanupScanRequestId() || "").trim();
+        const cancelledRequestId = String(sessionTransferState.cancelledRequestId || "").trim();
         return !!sessionTransferState.scanRequestId
           || !!sessionTransferState.requestId
-          || !!activeSessionCleanupScanRequestId()
+          || (!!sharedScanRequestId && sharedScanRequestId !== cancelledRequestId)
           || new Set(["scanning", "accepted", "running"]).has(state);
+      }
+
+      function sessionTransferProgressModel(
+        data = sessionCleanupFromPayload(),
+        operation = sessionTransferOperation(),
+      ) {
+        const dataValue = data && typeof data === "object" ? data : {};
+        const operationValue = operation && typeof operation === "object" ? operation : {};
+        const action = String(operationValue?.action || "").toLowerCase();
+        const state = String(operationValue?.state || "").toLowerCase();
+        const activeStates = new Set(["scanning", "accepted", "running"]);
+        const cancelledRequestId = String(sessionTransferState.cancelledRequestId || "").trim();
+        const sharedScanRequestId = String(activeSessionCleanupScanRequestId(dataValue) || "").trim();
+        const transferOperationActive = !!sessionTransferState.requestId
+          || (action === "sessiontransfer" && activeStates.has(state));
+        const scanning = !!sessionTransferState.scanRequestId
+          || (!!sharedScanRequestId && sharedScanRequestId !== cancelledRequestId)
+          || (new Set(["scan", "sessioncleanupscan"]).has(action) && activeStates.has(state));
+        const scanOnly = scanning && !transferOperationActive;
+        const transferring = transferOperationActive;
+        const active = scanning || transferring;
+        const mode = String(
+          operationValue?.mode || sessionTransferState.mode || "copy",
+        ).toLowerCase() === "migrate" ? "migrate" : "copy";
+        const operationStartedAt = Math.max(0, Number(operationValue?.startedAt || 0));
+        let startedAt = scanning
+          ? Number(sessionCleanupState.scanStartedAt || 0)
+          : Math.max(
+            Number(sessionTransferState.startedAt || 0),
+            operationStartedAt,
+          );
+        if (active && !startedAt) {
+          startedAt = Date.now();
+          if (scanning) sessionCleanupState.scanStartedAt = startedAt;
+          else sessionTransferState.startedAt = startedAt;
+        }
+        const rawProgress = Math.max(0, Math.min(100, Number(operationValue?.progress || 0)));
+        const progress = active ? Math.min(99, rawProgress) : rawProgress;
+        const selectedIds = Array.isArray(operationValue?.selectedIds)
+          ? operationValue.selectedIds
+          : [];
+        const total = Math.max(
+          0,
+          Number(operationValue?.sessionCount || selectedIds.length || sessionTransferState.selectedIds.size || 0),
+        );
+        const completed = Math.max(0, Number(operationValue?.completedCount || 0));
+        const targetReady = Math.max(
+          0,
+          Number(operationValue?.targetReadyCount ?? operationValue?.copiedCount ?? 0),
+        );
+        const migrated = Math.max(0, Number(operationValue?.migratedCount || 0));
+        const retained = Math.max(0, Number(operationValue?.sourceRetainedCount || 0));
+        const sourceCleanupCompleted = Math.max(
+          0,
+          Number(operationValue?.sourceCleanupCompletedCount || migrated),
+        );
+        const sourceCleanupTotal = Math.max(
+          0,
+          Number(operationValue?.sourceCleanupTotalCount || total),
+        );
+        const elapsed = formatSessionCleanupElapsed(startedAt);
+        const fallbackPhaseCount = mode === "migrate" ? 2 : 1;
+        const phaseLabel = scanOnly
+          ? sessionCleanupPhaseLabel(operationValue)
+          : String(
+            operationValue?.phaseLabel
+              || (mode === "migrate" ? "复制目标并安全清理源会话" : "复制目标会话"),
+          );
+        const phaseCount = scanOnly
+          ? Math.max(1, Number(operationValue?.phaseCount || 3))
+          : Math.max(1, Number(operationValue?.phaseCount || fallbackPhaseCount));
+        const phaseIndex = scanOnly
+          ? Math.max(1, Number(operationValue?.phaseIndex || 1))
+          : Math.min(
+            phaseCount,
+            Math.max(
+              1,
+              Number(
+                operationValue?.phaseIndex
+                  || (mode === "migrate" && completed >= total && total > 0 ? 2 : 1),
+              ),
+            ),
+          );
+        const progressMetaPrefix = scanOnly
+          ? `第 ${phaseIndex}/${phaseCount} 步 · 约 ${Math.max(progress, 1)}% · 已用时 `
+          : `${completed}/${total || "--"} 个会话 · 约 ${Math.max(progress, 1)}% · 已用时 `;
+        const title = scanOnly
+          ? "正在扫描会话"
+          : (mode === "migrate" ? "正在迁移会话" : "正在复制会话");
+        const subtitle = scanOnly
+          ? "按主会话归并本地记录与关联子任务"
+          : `${completed}/${total || "--"} 个会话 · 目标可见可续聊 ${targetReady} 个`;
+        const stage = scanOnly
+          ? "列表与提交将在完成后解锁"
+          : `目标就绪 ${targetReady} · 源已删除 ${migrated} · 源保留 ${retained}`
+            + (mode === "migrate" && sourceCleanupTotal > 0
+              ? ` · 源清理 ${sourceCleanupCompleted}/${sourceCleanupTotal}`
+              : "");
+        return {
+          active,
+          scanning,
+          scanOnly,
+          transferring,
+          mode,
+          progress,
+          progressMetaPrefix,
+          phaseLabel,
+          phaseIndex,
+          phaseCount,
+          title,
+          subtitle,
+          stage,
+          elapsed,
+          cancelAction: scanOnly ? "session-cleanup-cancel" : "session-transfer-cancel",
+          cancelLabel: scanOnly ? "取消扫描" : (mode === "migrate" ? "取消迁移" : "取消复制"),
+        };
+      }
+
+      function sessionTransferProgressHtml(model) {
+        const view = model && typeof model === "object" ? model : {};
+        const scanOnly = view.scanOnly === true;
+        const icon = scanOnly ? "scan" : "copy";
+        const progress = Math.max(0, Math.min(99, Number(view.progress || 0)));
+        return `<div class="codex-usage-hud-session-transfer-progress-state" data-session-transfer-progress-state="true" aria-live="polite"><div class="codex-usage-hud-cleanup-scan-strip"><div class="codex-usage-hud-cleanup-scan-strip-top"><div class="codex-usage-hud-cleanup-scan-strip-title"><span class="codex-usage-hud-cleanup-mini-spinner"></span>${escapeHtml(scanOnly ? "扫描本地会话" : "处理 Provider 会话")}</div><div class="codex-usage-hud-cleanup-scan-strip-meta">${escapeHtml(view.progressMetaPrefix || "处理中 · 已用时 ")}<span data-session-transfer-elapsed="true">${escapeHtml(view.elapsed || "0:00")}</span></div></div><div class="codex-usage-hud-cleanup-scan-track"><div class="codex-usage-hud-cleanup-scan-fill" data-indeterminate="${progress <= 0}" style="width:${Math.max(progress, 8)}%"></div></div><div class="codex-usage-hud-cleanup-scan-stage"><span>当前：<strong>${escapeHtml(view.phaseLabel || "处理中")}</strong></span><span>${escapeHtml(view.stage || "完成后恢复列表")}</span></div></div><div class="codex-usage-hud-cleanup-empty-state" style="min-height:180px"><div class="codex-usage-hud-cleanup-scan-mark" data-live="true">${cleanupIconSvg(icon, "codex-usage-hud-cleanup-icon-lg")}</div><h2 class="codex-usage-hud-cleanup-empty-title">${escapeHtml(view.title || "正在处理会话")}</h2><p class="codex-usage-hud-cleanup-empty-meta">${escapeHtml(view.subtitle || "请稍候")}</p><button type="button" class="codex-usage-hud-settings-action" data-action="${escapeHtml(view.cancelAction || "session-transfer-cancel")}">${escapeHtml(view.cancelLabel || "取消")}</button></div></div>`;
+      }
+
+      function stopSessionTransferElapsedTicker() {
+        if (sessionTransferElapsedTimer) {
+          ctx.lifecycle.clearInterval(sessionTransferElapsedTimer);
+          sessionTransferElapsedTimer = 0;
+        }
+      }
+
+      function syncSessionTransferElapsed() {
+        const layer = sessionTransferDialogLayer();
+        const model = sessionTransferProgressModel();
+        if (!layer || !sessionTransferState.open || !model.active) {
+          stopSessionTransferElapsedTicker();
+          return false;
+        }
+        layer.querySelectorAll('[data-session-transfer-elapsed="true"]').forEach((node) => {
+          node.textContent = model.elapsed;
+        });
+        return true;
+      }
+
+      function ensureSessionTransferElapsedTicker() {
+        if (!syncSessionTransferElapsed()) return false;
+        if (!sessionTransferElapsedTimer) {
+          sessionTransferElapsedTimer = ctx.lifecycle.interval(
+            "session_transfer_elapsed",
+            syncSessionTransferElapsed,
+            1000,
+          );
+        }
+        return true;
       }
 
       function sessionTransferModeValue(input) {
@@ -3554,13 +3766,16 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
         const retained = mode === "迁移"
           ? Math.max(0, Number(operation?.sourceRetainedCount || 0))
           : 0;
+        const cleanupPending = mode === "迁移"
+          ? Math.max(0, Number(operation?.sourceCleanupPendingCount || 0))
+          : 0;
         const headline = state === "completed"
-          ? `${mode}完成：${targetReady} 个会话已可在目标 Provider 继续工作`
+          ? `${mode}完成：${targetReady} 个会话已可在目标 Provider 继续工作${cleanupPending ? `，${cleanupPending} 个源会话待清理` : ""}`
           : `${mode}${state === "partial" ? "部分完成" : "失败"}`;
         const details = mode === "迁移" && state !== "completed"
           ? `目标可见可续聊 ${targetReady} · 源已删除 ${migrated} · 源保留 ${retained} · 目标未就绪 ${targetFailed}`
           : mode === "迁移"
-            ? `目标可见可续聊 ${targetReady}`
+            ? `目标可见可续聊 ${targetReady} · 源已删除 ${migrated} · 源保留 ${retained}`
           : `目标可见可续聊 ${targetReady} · 目标未就绪 ${targetFailed}`;
         const operationError = String(operation?.error || "").trim();
         const targetProvider = String(operation?.targetProvider || "").trim().toLowerCase();
@@ -3589,15 +3804,11 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
         const settings = hudSettingsFromPayload();
         const targets = normaliseSessionTransferTargetProvider(settings, source);
         const operation = sessionTransferOperation();
-        const operationState = String(operation?.state || "").toLowerCase();
         const busy = sessionTransferBusy(operation);
+        const progressModel = sessionTransferProgressModel(dataValue, operation);
         const selected = view.selected;
         const selectableIds = view.selectableIds;
         const allSelected = selectableIds.length > 0 && selectableIds.every((id) => selected.has(id));
-        const scanning = !!sessionTransferState.scanRequestId
-          || !!activeSessionCleanupScanRequestId(dataValue)
-          || (new Set(["scan", "sessioncleanupscan"]).has(String(operation?.action || "").toLowerCase())
-            && new Set(["scanning", "accepted", "running"]).has(operationState));
         const submitDisabled = busy
           || !String(dataValue?.revision || "").trim()
           || !selected.size
@@ -3624,6 +3835,8 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
           if (sessionTransferState.targetProvider) target.value = sessionTransferState.targetProvider;
           target.disabled = busy || !targets.length;
         }
+        const search = layer.querySelector('[data-session-transfer-search="true"]');
+        if (search) search.disabled = busy;
         const submit = layer.querySelector('[data-session-transfer-submit-button="true"]');
         if (submit) {
           submit.disabled = submitDisabled;
@@ -3632,20 +3845,18 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
         const scanButton = layer.querySelector('[data-action="session-transfer-scan"]');
         if (scanButton) {
           scanButton.disabled = busy;
-          scanButton.textContent = scanning ? "正在扫描..." : "重新扫描";
+          scanButton.textContent = progressModel.scanning ? "正在扫描..." : "重新扫描";
         }
-        const progressText = scanning
-          ? "正在扫描会话清单..."
-          : busy
-            ? (sessionTransferState.mode === "migrate" ? "正在复制并安全删除源会话..." : "正在复制会话...")
-            : "";
-        const progress = Math.max(0, Math.min(100, Number(operation?.progress || 0)));
-        const progressLayer = layer.querySelector('[data-session-transfer-progress="true"]');
-        if (progressLayer) {
-          progressLayer.hidden = !progressText;
-          progressLayer.querySelector('[data-session-transfer-progress-label="true"]')?.replaceChildren(document.createTextNode(progressText));
-          const value = progressLayer.querySelector('[data-session-transfer-progress-value="true"]');
-          if (value) value.textContent = `${progress}%`;
+        const list = layer.querySelector('[data-session-transfer-list="true"]');
+        if (list) {
+          const nextState = progressModel.active ? "progress" : "list";
+          if (list.dataset.state !== nextState) {
+            renderSessionTransferDialog(dataValue);
+            return true;
+          }
+          if (progressModel.active) {
+            list.innerHTML = sessionTransferProgressHtml(progressModel);
+          }
         }
         const resultLayer = layer.querySelector('[data-session-transfer-result="true"]');
         if (resultLayer) {
@@ -3655,6 +3866,8 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
         }
         const card = layer.querySelector('.codex-usage-hud-session-transfer-card');
         if (card) card.setAttribute("aria-busy", String(busy));
+        if (progressModel.active) ensureSessionTransferElapsedTicker();
+        else stopSessionTransferElapsedTicker();
         return true;
       }
 
@@ -3672,50 +3885,45 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
         const selected = view.selected;
         const allSelected = selectableIds.length > 0 && selectableIds.every((id) => selected.has(id));
         const busy = sessionTransferBusy(operation);
+        const progressModel = sessionTransferProgressModel(data, operation);
         const revision = String(data?.revision || "").trim();
-        const operationState = String(operation?.state || "").toLowerCase();
-        const scanning = !!sessionTransferState.scanRequestId
-          || !!activeSessionCleanupScanRequestId(data)
-          || (new Set(["scan", "sessioncleanupscan"]).has(String(operation?.action || "").toLowerCase())
-            && new Set(["scanning", "accepted", "running"]).has(operationState));
         const rowHtml = rows.length
           ? rows.map((item) => {
             const id = String(item?.id || "");
             const selectable = item?.selectable === true;
             const checked = selected.has(id);
             const updated = String(item?.updatedAt || "").replace("T", " ").replace(/([+-]\d\d:\d\d|Z)$/, "");
-            return `<label class="codex-usage-hud-session-transfer-row" data-session-transfer-row="true"><input type="checkbox" data-session-transfer-id="${escapeHtml(id)}" ${checked ? "checked" : ""} ${selectable ? "" : "disabled"}><span class="codex-usage-hud-session-transfer-main"><strong>${escapeHtml(item?.title || "未命名会话")}</strong><small>${escapeHtml(item?.workdirName || "未记录工作目录")} · ${escapeHtml(item?.modelProvider || "unknown")}</small></span><span class="codex-usage-hud-session-transfer-time">${escapeHtml(updated || "--")}</span></label>`;
+            const archivedNotice = item?.archived === true
+              ? '<small data-kind="warning">已归档，请先解除归档后再复制或迁移</small>'
+              : "";
+            return `<label class="codex-usage-hud-session-transfer-row" data-session-transfer-row="true"><input type="checkbox" data-session-transfer-id="${escapeHtml(id)}" ${checked ? "checked" : ""} ${selectable ? "" : "disabled"}><span class="codex-usage-hud-session-transfer-main"><strong>${escapeHtml(item?.title || "未命名会话")}</strong><small>${escapeHtml(item?.workdirName || "未记录工作目录")} · ${escapeHtml(item?.modelProvider || "unknown")}</small>${archivedNotice}</span><span class="codex-usage-hud-session-transfer-time">${escapeHtml(updated || "--")}</span></label>`;
           }).join("")
           : '<div class="codex-usage-hud-session-transfer-empty">没有找到可选的源 Provider 会话。请先扫描，或调整搜索条件。</div>';
         const targetOptions = targets.length
           ? targets.map((provider) => `<option value="${escapeHtml(provider)}" ${provider === sessionTransferState.targetProvider ? "selected" : ""}>${escapeHtml(provider)}</option>`).join("")
           : '<option value="">没有可用目标 Provider</option>';
-        const progress = Math.max(0, Math.min(100, Number(operation?.progress || 0)));
-        const progressText = scanning
-          ? "正在扫描会话清单..."
-          : busy
-            ? (String(sessionTransferState.mode || "copy") === "migrate" ? "正在复制并安全删除源会话..." : "正在复制会话...")
-            : "";
         const totalRows = view.allRows.length;
         const pageStart = totalRows ? view.page * sessionTransferPageSize + 1 : 0;
         const pageEnd = Math.min(totalRows, (view.page + 1) * sessionTransferPageSize);
-        const pagination = view.totalPages > 1
+        const pagination = !progressModel.active && view.totalPages > 1
           ? `<div class="codex-usage-hud-session-transfer-pagination"><button type="button" class="codex-usage-hud-settings-icon-action" data-action="session-transfer-page" data-direction="prev" aria-label="上一页" title="上一页" ${busy || view.page <= 0 ? "disabled" : ""}>‹</button><span>第 ${view.page + 1}/${view.totalPages} 页 · ${pageStart}-${pageEnd}/${totalRows}</span><button type="button" class="codex-usage-hud-settings-icon-action" data-action="session-transfer-page" data-direction="next" aria-label="下一页" title="下一页" ${busy || view.page >= view.totalPages - 1 ? "disabled" : ""}>›</button></div>`
           : "";
         const result = sessionTransferResultHtml(operation);
+        const transferList = progressModel.active
+          ? `<div class="codex-usage-hud-session-transfer-list" data-session-transfer-list="true" data-state="progress">${sessionTransferProgressHtml(progressModel)}</div>`
+          : `<div class="codex-usage-hud-session-transfer-list" data-session-transfer-list="true" data-state="list">${rowHtml}</div>`;
         return `<div class="codex-usage-hud-settings-confirm-card codex-usage-hud-session-transfer-card" role="dialog" aria-modal="true" aria-label="复制或迁移 Provider 会话">
           <div class="codex-usage-hud-session-transfer-head"><div><div class="codex-usage-hud-settings-confirm-kicker">Provider 会话</div><div class="codex-usage-hud-settings-confirm-title">复制或迁移会话</div></div><button type="button" class="codex-usage-hud-settings-icon-action" data-action="session-transfer-close" aria-label="关闭" title="关闭">×</button></div>
           <div class="codex-usage-hud-session-transfer-body">
             <div class="codex-usage-hud-session-transfer-context"><span>源 Provider</span><strong>${escapeHtml(source || "未选择")}</strong><span>目标 Provider</span><select data-session-transfer-target="true" ${busy || !targets.length ? "disabled" : ""}>${targetOptions}</select></div>
             <div class="codex-usage-hud-session-transfer-mode"><label><input type="radio" name="codex-session-transfer-mode" data-session-transfer-mode="copy" value="copy" ${sessionTransferState.mode === "copy" ? "checked" : ""} ${busy ? "disabled" : ""}><span>复制</span><small>保留源会话</small></label><label><input type="radio" name="codex-session-transfer-mode" data-session-transfer-mode="migrate" value="migrate" ${sessionTransferState.mode === "migrate" ? "checked" : ""} ${busy ? "disabled" : ""}><span>迁移</span><small>复制成功后删除源会话</small></label></div>
-            <div class="codex-usage-hud-session-transfer-search"><span aria-hidden="true">⌕</span><input type="search" data-session-transfer-search="true" value="${escapeHtml(sessionTransferState.search)}" placeholder="搜索标题或工作目录" aria-label="搜索会话"></div>
+            <div class="codex-usage-hud-session-transfer-search"><span aria-hidden="true">⌕</span><input type="search" data-session-transfer-search="true" value="${escapeHtml(sessionTransferState.search)}" placeholder="搜索标题或工作目录" aria-label="搜索会话" ${busy ? "disabled" : ""}></div>
              <div class="codex-usage-hud-session-transfer-toolbar"><label><input type="checkbox" data-session-transfer-select-all="true" ${allSelected ? "checked" : ""} ${busy || !selectableIds.length ? "disabled" : ""}>全选当前筛选</label><span data-session-transfer-selection-count="true">${selected.size} / ${selectableIds.length} 个可选会话</span></div>
-             <div class="codex-usage-hud-session-transfer-list">${rowHtml}</div>
+             ${transferList}
              ${pagination}
-             <div class="codex-usage-hud-session-transfer-progress" data-session-transfer-progress="true" ${progressText ? "" : "hidden"}><span data-session-transfer-progress-label="true">${escapeHtml(progressText)}</span><span data-session-transfer-progress-value="true">${progress}%</span></div>
              <div data-session-transfer-result="true" ${result ? "" : "hidden"}>${result}</div>
            </div>
-           <div class="codex-usage-hud-settings-confirm-actions"><button type="button" class="codex-usage-hud-settings-action" data-action="session-transfer-scan" ${busy ? "disabled" : ""}>${scanning ? "正在扫描..." : "重新扫描"}</button><button type="button" class="codex-usage-hud-settings-action" data-action="session-transfer-submit" data-session-transfer-submit-button="true" data-primary="true" ${busy || !revision || !selected.size || !source || !sessionTransferState.targetProvider ? "disabled" : ""}>${sessionTransferState.mode === "migrate" ? "开始迁移" : "开始复制"}</button><button type="button" class="codex-usage-hud-settings-action" data-action="session-transfer-close" data-variant="ghost">关闭</button></div>
+           <div class="codex-usage-hud-settings-confirm-actions"><button type="button" class="codex-usage-hud-settings-action" data-action="session-transfer-scan" ${busy ? "disabled" : ""}>${progressModel.scanning ? "正在扫描..." : "重新扫描"}</button><button type="button" class="codex-usage-hud-settings-action" data-action="session-transfer-submit" data-session-transfer-submit-button="true" data-primary="true" ${busy || !revision || !selected.size || !source || !sessionTransferState.targetProvider ? "disabled" : ""}>${sessionTransferState.mode === "migrate" ? "开始迁移" : "开始复制"}</button><button type="button" class="codex-usage-hud-settings-action" data-action="session-transfer-close" data-variant="ghost">关闭</button></div>
          </div>`;
       }
 
@@ -3735,6 +3943,7 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
       }
 
       function closeSessionTransferDialog() {
+        stopSessionTransferElapsedTicker();
         sessionTransferDialogLayer()?.remove();
         delete window[sessionTransferStateName];
         sessionTransferState.open = false;
@@ -3746,6 +3955,8 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
         sessionTransferState.selectedIds.clear();
         sessionTransferState.scanRequestId = "";
         sessionTransferState.requestId = "";
+        sessionTransferState.startedAt = 0;
+        sessionTransferState.cancelledRequestId = "";
         sessionTransferState.resumeRequestId = "";
         sessionTransferState.resumeSessionId = "";
         sessionTransferState.resumeState = "";
@@ -3756,6 +3967,7 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
 
       function requestSessionTransferScan() {
         if (!sessionTransferState.open || sessionTransferState.requestId) return false;
+        sessionTransferState.cancelledRequestId = "";
         return requestSessionCleanupScan({ preserveTransfer: true });
       }
 
@@ -3793,6 +4005,13 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
           && String(operation?.targetProvider || "").trim().toLowerCase() === String(targets[0] || "").trim().toLowerCase()
           ? operation
           : null;
+        if (sessionTransferState.operation && sessionTransferProgressModel(sessionTransferState.data, sessionTransferState.operation).active) {
+          const persistedStartedAt = Math.max(
+            Number(sessionTransferState.startedAt || 0),
+            Number(sessionTransferState.operation?.startedAt || 0),
+          );
+          sessionTransferState.startedAt = persistedStartedAt || Date.now();
+        }
         const sharedScanRequestId = activeSessionCleanupScanRequestId(sessionTransferState.data);
         if (sharedScanRequestId) sessionTransferState.scanRequestId = sharedScanRequestId;
         const layer = document.createElement("div");
@@ -3804,6 +4023,47 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
           !String(sessionTransferState.data?.revision || "").trim()
           && !sharedScanRequestId
         ) requestSessionTransferScan();
+        return true;
+      }
+
+      function requestSessionTransferCancel() {
+        if (!sessionTransferState.open || !sessionTransferBusy()) return false;
+        const operation = sessionTransferOperation();
+        const transferOperationActive = !!sessionTransferState.requestId
+          || String(operation?.action || "").toLowerCase() === "sessiontransfer";
+        if (
+          (sessionTransferState.scanRequestId || activeSessionCleanupScanRequestId())
+          && !transferOperationActive
+        ) {
+          return requestSessionCleanupCancel();
+        }
+        const targetRequestId = String(
+          sessionTransferState.requestId || sessionTransferState.operation?.requestId || "",
+        ).trim();
+        const requestId = typedSettingsRequestId("session-transfer-cancel");
+        const submitted = submitSettingsCommand(
+          {
+            action: "sessionCleanupCancel",
+            requestId,
+            targetRequestId,
+          },
+          "正在取消会话复制/迁移...",
+          { preserveOverlay: true },
+        );
+        if (!submitted) return false;
+        sessionTransferState.cancelledRequestId = targetRequestId;
+        sessionTransferState.requestId = "";
+        sessionTransferState.startedAt = 0;
+        sessionTransferState.operation = {
+          ...(sessionTransferState.operation && typeof sessionTransferState.operation === "object"
+            ? sessionTransferState.operation
+            : {}),
+          action: "cancel",
+          state: "cancelled",
+          requestId: targetRequestId || requestId,
+          progress: 100,
+        };
+        renderSessionTransferDialog();
         return true;
       }
 
@@ -3822,6 +4082,8 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
         }
         const requestId = typedSettingsRequestId("session-transfer");
         sessionTransferState.requestId = requestId;
+        sessionTransferState.startedAt = Date.now();
+        sessionTransferState.cancelledRequestId = "";
         sessionTransferState.operation = {
           action: "sessionTransfer",
           state: "accepted",
@@ -3831,6 +4093,7 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
           mode: sessionTransferState.mode,
           selectedIds: itemIds,
           progress: 0,
+          startedAt: sessionTransferState.startedAt,
         };
         renderSessionTransferDialog();
         const submitted = submitSettingsCommand(
@@ -3848,6 +4111,7 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
         );
         if (!submitted) {
           sessionTransferState.requestId = "";
+          sessionTransferState.startedAt = 0;
           sessionTransferState.operation = null;
           renderSessionTransferDialog();
         }
@@ -3868,14 +4132,21 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
         const action = String(operation?.action || "").toLowerCase();
         const state = String(operation?.state || "").toLowerCase();
         const responseRequestId = String(operation?.requestId || "");
-        const terminal = new Set(["completed", "partial", "failed"]).has(state);
+        const terminal = new Set(["completed", "partial", "failed", "cancelled"]).has(state);
+        const cancelledRequestId = String(sessionTransferState.cancelledRequestId || "");
+        const cancellationMatches = !!cancelledRequestId && responseRequestId === cancelledRequestId;
         if (new Set(["scan", "sessioncleanupscan"]).has(action)) {
-          if (
+          const requestMatches = (
             (sessionTransferState.scanRequestId && responseRequestId === sessionTransferState.scanRequestId)
             || (!sessionTransferState.scanRequestId && !sessionTransferState.requestId)
-          ) {
+          );
+          if ((requestMatches || cancellationMatches) && (!cancellationMatches || terminal)) {
             sessionTransferState.operation = operation;
-            if (terminal) sessionTransferState.scanRequestId = "";
+            if (terminal) {
+              sessionTransferState.scanRequestId = "";
+              sessionTransferState.startedAt = 0;
+              if (cancellationMatches) sessionTransferState.cancelledRequestId = "";
+            }
           }
         } else if (action === "sessiontransfer") {
           if (sessionTransferState.open) {
@@ -3884,20 +4155,35 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
           }
           const pairMatches = !sessionTransferState.open
             || sessionTransferOperationMatchesCurrentPair(operation);
-          if (pairMatches && (!sessionTransferState.requestId || responseRequestId === sessionTransferState.requestId)) {
+          const requestMatches = !sessionTransferState.requestId
+            || responseRequestId === sessionTransferState.requestId;
+          if (pairMatches && requestMatches && (!cancellationMatches || terminal)) {
             sessionTransferState.operation = operation;
+            const operationStartedAt = Math.max(0, Number(operation?.startedAt || 0));
+            if (!terminal && operationStartedAt > 0) {
+              sessionTransferState.startedAt = Math.max(
+                Number(sessionTransferState.startedAt || 0),
+                operationStartedAt,
+              );
+            }
             if (terminal) {
               codexCliPersistTransferWorkdirs(operation);
               sessionTransferState.requestId = "";
+              sessionTransferState.startedAt = 0;
+              if (cancellationMatches) sessionTransferState.cancelledRequestId = "";
               sessionTransferState.selectedIds.clear();
             }
           }
+        } else if (action === "cancel") {
+          sessionTransferState.operation = operation;
+          sessionTransferState.scanRequestId = "";
+          sessionTransferState.requestId = "";
+          sessionTransferState.startedAt = 0;
         }
         if (!sessionTransferState.open) return;
         const layer = sessionTransferDialogLayer();
-        // Progress notifications only change status text and counters. Keep the
-        // existing list DOM (and the user's focus/scroll position) stable until
-        // a terminal scan/transfer snapshot actually changes the inventory.
+        // Progress notifications update only the progress surface. Rebuild the
+        // list when the operation enters or leaves its active state.
         if (layer && !terminal) {
           syncSessionTransferDialogControls(data);
         } else {
@@ -4266,6 +4552,9 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
           support_url: String(settings.support_url || "https://github.com/mingbingfeng/codex-usage-hud").trim(),
           model_prices: settings.model_prices,
         };
+        if (settingNode("stop_hud_on_lock_screen")) {
+          next.stop_hud_on_lock_screen = !!settingNode("stop_hud_on_lock_screen").checked;
+        }
         // Rest-reminder controls live on the support tab; keep previous values when absent.
         if (settingNode("rest_reminder_enabled")) {
           next.rest_reminder_enabled = !!settingNode("rest_reminder_enabled").checked;
@@ -4347,6 +4636,41 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
 
       function pricingChanged(settings) {
         return pricingTableFingerprint(settings) !== pricingTableFingerprint(hudSettingsFromPayload());
+      }
+
+      function settingsWithPersistedPriceTables(candidate, base = hudSettingsFromPayload()) {
+        const baseProviders = base?.provider_settings && typeof base.provider_settings === "object"
+          ? base.provider_settings
+          : {};
+        const candidateProviders = candidate?.provider_settings && typeof candidate.provider_settings === "object"
+          ? candidate.provider_settings
+          : {};
+        const providerSettings = Object.fromEntries(Object.entries(candidateProviders).map(([provider, value]) => [
+          provider,
+          {
+            ...(value && typeof value === "object" ? value : {}),
+            model_prices: baseProviders[provider]?.model_prices && typeof baseProviders[provider].model_prices === "object"
+              ? baseProviders[provider].model_prices
+              : {},
+          },
+        ]));
+        return {
+          ...candidate,
+          model_prices: base?.model_prices && typeof base.model_prices === "object" ? base.model_prices : {},
+          provider_settings: providerSettings,
+        };
+      }
+
+      function autoSaveNonPricingSettingsFromModal({ section = "" } = {}) {
+        const settings = settingsWithPersistedPriceTables(collectSettingsForm());
+        const signature = JSON.stringify(settings);
+        if (signature === autoSavedSettingsSignature) return false;
+        const submitted = submitSettingsCommand(
+          { action: "save", settings, ...(section ? { section } : {}) },
+          section === "restReminder" ? "正在自动保存提醒设置..." : "正在自动保存设置...",
+        );
+        if (submitted) autoSavedSettingsSignature = signature;
+        return submitted;
       }
 
       function pricingTablesByScope(settings) {
@@ -4887,22 +5211,32 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
         }
       }
 
-      function saveSettingsFromModal({ section = "" } = {}) {
+      function applyModelPricesFromModal() {
         const settings = collectSettingsForm();
-        if (!section && pricingChanged(settings)) {
-          openPricingEffectiveDialog({
-            mode: "save",
-            settings,
-            provider: String(settingsProviderDraft?.activeProvider || "").trim().toLowerCase(),
-          });
-          return;
+        if (!pricingChanged(settings)) {
+          setSettingsStatus("模型单价没有待应用的修改。", "");
+          return false;
         }
-        const codexProviders = collectCodexProviderUpdates();
+        openPricingEffectiveDialog({
+          mode: "save",
+          settings,
+          provider: String(settingsProviderDraft?.activeProvider || "").trim().toLowerCase(),
+        });
+        return true;
+      }
+
+      function saveSettingsFromModal({ section = "" } = {}) {
+        // The rest-reminder panel keeps its explicit Save action. It must not
+        // submit a pending model-price draft through the generic save path.
+        const settings = section === "restReminder"
+          ? settingsWithPersistedPriceTables(collectSettingsForm())
+          : collectSettingsForm();
+        const codexProviders = section ? [] : collectCodexProviderUpdates();
         const submitted = submitSettingsCommand(
           { action: "save", settings, ...(section ? { section } : {}), ...(codexProviders.length ? { codexProviders } : {}) },
-          section === "restReminder" ? "正在保存提醒设置..." : "正在保存设置..."
+          section === "restReminder" ? "正在保存提醒设置..." : "正在保存设置...",
         );
-        if (submitted) {
+        if (submitted && !section) {
           settingsDirtyProviders.clear();
           codexProviderDirty.clear();
           renderSettingsProviderTabs();
@@ -5041,21 +5375,6 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
         );
       }
 
-      function exportSettingsFromModal() {
-        const settings = collectSettingsForm();
-        const data = JSON.stringify({ user: settings }, null, 2);
-        const blob = new Blob([data], { type: "application/json" });
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement("a");
-        link.href = url;
-        link.download = "codex-usage-hud-settings.json";
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        ctx.lifecycle.timeout("settings_export", () => URL.revokeObjectURL(url), 1000);
-        setSettingsStatus("已导出 JSON");
-      }
-
       function priceClipboardValues(text) {
         const values = String(text ?? "").trim().split(/\s+/).filter(Boolean);
         if (values.length !== 5 || !values[0]) return null;
@@ -5121,10 +5440,10 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
         layer.className = "codex-usage-hud-settings-confirm-layer";
         layer.dataset.settingsConfirm = "true";
         layer.innerHTML = `
-          <div class="codex-usage-hud-settings-confirm-card" role="alertdialog" aria-modal="true" aria-label="放弃未保存的 Provider 修改">
+          <div class="codex-usage-hud-settings-confirm-card" role="alertdialog" aria-modal="true" aria-label="放弃待应用的模型单价修改">
             <div class="codex-usage-hud-settings-confirm-kicker">未保存修改</div>
             <div class="codex-usage-hud-settings-confirm-title">关闭设置并放弃修改？</div>
-            <div class="codex-usage-hud-settings-confirm-body">${settingsDirtyProviders.size} 个 Provider 仍有未保存修改。</div>
+            <div class="codex-usage-hud-settings-confirm-body">${settingsDirtyProviders.size} 个 Provider 仍有待应用的模型单价修改。</div>
             <div class="codex-usage-hud-settings-confirm-actions">
               <button type="button" class="codex-usage-hud-settings-action" data-action="settings-discard-cancel" data-variant="ghost">继续编辑</button>
               <button type="button" class="codex-usage-hud-settings-action" data-action="settings-discard-confirm" data-primary="true">放弃修改</button>
@@ -5557,6 +5876,7 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
 
     function dispose() {
       disposeCodexCliQuickLaunchMenu();
+      stopSessionTransferElapsedTicker();
       return true;
     }
 
@@ -5654,8 +5974,10 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
       syncSettingsUpdateLoading,
       applySettingsCommandStatus,
       openSessionTransferDialog,
+      renderSessionTransferDialog,
       closeSessionTransferDialog,
       requestSessionTransferScan,
+      requestSessionTransferCancel,
       submitSessionTransfer,
       sessionTransferSelectableIds,
       syncSessionTransferSelection,
@@ -5669,6 +5991,9 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
       collectSettingsForm,
       collectCodexProviderUpdates,
       commitSettingsFromDraft,
+      settingsWithPersistedPriceTables,
+      autoSaveNonPricingSettingsFromModal,
+      applyModelPricesFromModal,
       saveSettingsFromModal,
       fetchPricesFromModal,
       confirmPricingEffectiveAt,
@@ -5687,7 +6012,6 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
       openSettingsExitConfirm,
       runUpdateAction,
       dismissWarningsToday,
-      exportSettingsFromModal,
       addModelPriceRow,
       openSettingsDiscardConfirm,
       closeSettingsModal,
@@ -5790,6 +6114,7 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
     syncSettingsUpdateLoading,
     applySettingsCommandStatus,
     openSessionTransferDialog,
+    renderSessionTransferDialog,
     closeSessionTransferDialog,
     requestSessionTransferScan,
     submitSessionTransfer,
@@ -5805,6 +6130,9 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
     collectSettingsForm,
     collectCodexProviderUpdates,
     commitSettingsFromDraft,
+    settingsWithPersistedPriceTables,
+    autoSaveNonPricingSettingsFromModal,
+    applyModelPricesFromModal,
     saveSettingsFromModal,
     fetchPricesFromModal,
     confirmPricingEffectiveAt,
@@ -5823,7 +6151,6 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
     openSettingsExitConfirm,
     runUpdateAction,
     dismissWarningsToday,
-    exportSettingsFromModal,
     addModelPriceRow,
     openSettingsDiscardConfirm,
     closeSettingsModal,

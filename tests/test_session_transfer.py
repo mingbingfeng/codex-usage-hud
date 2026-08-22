@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sqlite3
 import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call
@@ -13,11 +14,15 @@ from codex_usage_hud.core.session_transfer import (
     _codex_environment,
 )
 from codex_usage_hud.core.runtime_events import RuntimeEventBus
-from codex_usage_hud.session_cleanup_runtime import SessionCleanupWorker
+from codex_usage_hud.session_cleanup_runtime import (
+    SessionCleanupWorker,
+    _load_transfer_inherited_session_ids,
+)
 
 
 SOURCE_ID = "10000000-0000-4000-8000-000000000001"
 TARGET_ID = "10000000-0000-4000-8000-000000000002"
+SECOND_TARGET_ID = "10000000-0000-4000-8000-000000000003"
 
 
 def test_app_server_fork_requests_interactive_target_provider_and_validates_response() -> None:
@@ -46,6 +51,28 @@ def test_app_server_client_overrides_codex_home_for_desktop_store(monkeypatch) -
     monkeypatch.setenv("CODEX_HOME", "E:/wrong-home")
     environment = _codex_environment("E:/AppData/Codex")
     assert environment["CODEX_HOME"] == "E:/AppData/Codex"
+
+
+def test_load_transfer_inherited_session_ids_uses_state_db_fork_marker(
+    tmp_path: Path,
+) -> None:
+    state_db = tmp_path / "state_5.sqlite"
+    with sqlite3.connect(state_db) as connection:
+        connection.execute(
+            "CREATE TABLE threads ("
+            "id TEXT, has_user_event INTEGER, thread_source TEXT"
+            ")"
+        )
+        connection.executemany(
+            "INSERT INTO threads(id, has_user_event, thread_source) VALUES (?, ?, ?)",
+            [
+                (TARGET_ID, 0, "user"),
+                (SOURCE_ID, 1, "user"),
+                ("10000000-0000-4000-8000-000000000003", 0, "subagent"),
+            ],
+        )
+
+    assert _load_transfer_inherited_session_ids(state_db) == {TARGET_ID}
 
 
 def test_app_server_fork_rejects_provider_mismatch() -> None:
@@ -129,6 +156,77 @@ def test_app_server_verifies_persistent_thread_before_source_deletion(
     ]
 
 
+def test_app_server_verifies_batch_targets_with_one_provider_list_traversal(
+    tmp_path: Path,
+) -> None:
+    first_rollout = tmp_path / "first-target.jsonl"
+    second_rollout = tmp_path / "second-target.jsonl"
+    first_rollout.write_text("{}\n", encoding="utf-8")
+    second_rollout.write_text("{}\n", encoding="utf-8")
+    client = CodexAppServerClient(
+        executable="codex",
+        target_visibility_retry_delays=(0.0,),
+    )
+    responses = iter(
+        [
+            {
+                "thread": {
+                    "id": TARGET_ID,
+                    "modelProvider": "routin",
+                    "ephemeral": False,
+                    "path": str(first_rollout),
+                }
+            },
+            {
+                "thread": {
+                    "id": SECOND_TARGET_ID,
+                    "modelProvider": "routin",
+                    "ephemeral": False,
+                    "path": str(second_rollout),
+                }
+            },
+            {
+                "data": [
+                    {"id": TARGET_ID, "modelProvider": "routin"},
+                    {"id": SECOND_TARGET_ID, "modelProvider": "routin"},
+                ],
+                "nextCursor": None,
+            },
+            {
+                "thread": {
+                    "id": TARGET_ID,
+                    "modelProvider": "routin",
+                    "ephemeral": False,
+                }
+            },
+            {
+                "thread": {
+                    "id": SECOND_TARGET_ID,
+                    "modelProvider": "routin",
+                    "ephemeral": False,
+                }
+            },
+        ]
+    )
+    progress: list[tuple[str, str, bool, str]] = []
+
+    def request(method: str, params: dict[str, object]) -> object:
+        if method == "thread/resume" and params.get("threadId") == SECOND_TARGET_ID:
+            assert progress == [(TARGET_ID, "verify", True, "")]
+        return next(responses)
+
+    client.request = request  # type: ignore[method-assign]
+
+    assert client.verify_persistent_threads(
+        ((TARGET_ID, "ROUTIN"), (SECOND_TARGET_ID, "ROUTIN")),
+        progress_callback=lambda *values: progress.append(values),
+    ) == {TARGET_ID: True, SECOND_TARGET_ID: True}
+    assert progress == [
+        (TARGET_ID, "verify", True, ""),
+        (SECOND_TARGET_ID, "verify", True, ""),
+    ]
+
+
 def test_app_server_retries_until_target_is_listed_and_supports_pagination(
     tmp_path: Path,
 ) -> None:
@@ -206,23 +304,34 @@ def test_worker_routes_session_transfer_to_app_server_and_configured_target() ->
             "state": "completed",
             "copiedCount": 1,
             "migratedCount": 0,
+            "results": [
+                {
+                    "targetSessionId": TARGET_ID,
+                    "targetCreated": True,
+                    "forked": True,
+                }
+            ],
         },
     }
     first_app_server = MagicMock()
     first_app_server.fork.return_value = TARGET_ID
     second_app_server = MagicMock()
-    second_app_server.verify_persistent_thread.return_value = True
+    second_app_server.verify_persistent_threads.return_value = {TARGET_ID: True}
     first_client = MagicMock()
     first_client.__enter__.return_value = first_app_server
     second_client = MagicMock()
     second_client.__enter__.return_value = second_app_server
     client_factory = MagicMock(side_effect=[first_client, second_client])
-    manager.materialize_target_rollout.return_value = None
+    manager.materialize_target_rollouts.return_value = {TARGET_ID: True}
 
     def transfer(*_args, **kwargs):
         assert kwargs["fork"](SOURCE_ID, "routin", "E:/project") == TARGET_ID
-        assert kwargs["materialize"](TARGET_ID, SOURCE_ID) is None
-        assert kwargs["verify"](TARGET_ID, "routin") is True
+        assert kwargs["materialize_batch"]([(TARGET_ID, SOURCE_ID)]) == {
+            TARGET_ID: True
+        }
+        assert kwargs["verify_batch"]([(TARGET_ID, "routin")]) == {
+            TARGET_ID: True
+        }
         assert callable(kwargs["desktop_source_lifecycle"])
         return transfer_result
 
@@ -272,22 +381,31 @@ def test_worker_routes_session_transfer_to_app_server_and_configured_target() ->
         accepted_operation = manager.mark_operation.call_args_list[0].kwargs
         assert accepted_operation["sourceProvider"] == "codex"
         assert accepted_operation["targetProvider"] == "routin"
+        assert accepted_operation["startedAt"] > 0
+        assert accepted_operation["selectedIds"] == ["opaque-id"]
+        assert accepted_operation["sessionCount"] == 1
         first_app_server.fork.assert_called_once_with(
             SOURCE_ID,
             "routin",
             cwd="E:/project",
         )
-        manager.materialize_target_rollout.assert_called_once_with(TARGET_ID, SOURCE_ID)
-        second_app_server.verify_persistent_thread.assert_called_once_with(
-            TARGET_ID,
-            "routin",
+        manager.materialize_target_rollouts.assert_called_once_with(
+            [(TARGET_ID, SOURCE_ID)],
+            progress_callback=None,
         )
+        second_app_server.verify_persistent_threads.assert_called_once_with(
+            [(TARGET_ID, "routin")],
+            progress_callback=None,
+        )
+        manager.materialize_target_rollout.assert_not_called()
+        second_app_server.verify_persistent_thread.assert_not_called()
         first_client.__exit__.assert_called_once_with(None, None, None)
         second_client.__exit__.assert_called_once_with(None, None, None)
         assert client_factory.call_args_list == [
             call(codex_home=Path("E:/AppData/Codex")),
             call(codex_home=Path("E:/AppData/Codex")),
         ]
+        assert TARGET_ID in context._work_overlay_transfer_inherited_session_ids
     finally:
         assert worker.close()
 
@@ -372,7 +490,7 @@ def test_worker_releases_fork_connection_before_materialization_and_verification
         events.append("first-fork") or TARGET_ID
     )
     second_app_server = MagicMock()
-    second_app_server.verify_persistent_thread.side_effect = lambda *_args: (
+    second_app_server.verify_persistent_threads.side_effect = lambda *_args, **_kwargs: (
         events.append("second-verify") or True
     )
     first_client = MagicMock()
@@ -386,8 +504,8 @@ def test_worker_releases_fork_connection_before_materialization_and_verification
     )
     second_client.__exit__.side_effect = lambda *_args: events.append("second-close")
     client_factory = MagicMock(side_effect=[first_client, second_client])
-    manager.materialize_target_rollout.side_effect = lambda *_args: events.append(
-        "materialize"
+    manager.materialize_target_rollouts.side_effect = lambda *_args, **_kwargs: (
+        events.append("materialize") or {TARGET_ID: True}
     )
     desktop_lifecycle = MagicMock()
     desktop_report = MagicMock()
@@ -410,8 +528,10 @@ def test_worker_releases_fork_connection_before_materialization_and_verification
 
     def transfer(*_args, **kwargs):
         assert kwargs["fork"](SOURCE_ID, "routin", "E:/project") == TARGET_ID
-        assert kwargs["materialize"](TARGET_ID, SOURCE_ID) is None
-        assert kwargs["verify"](TARGET_ID, "routin") is True
+        assert kwargs["materialize_batch"]([(TARGET_ID, SOURCE_ID)]) == {
+            TARGET_ID: True
+        }
+        assert kwargs["verify_batch"]([(TARGET_ID, "routin")]) is True
         assert kwargs["desktop_source_preflight"]([SOURCE_ID], "E:/project") == {
             "verified": True,
             "threadIds": [SOURCE_ID],
@@ -459,9 +579,15 @@ def test_worker_releases_fork_connection_before_materialization_and_verification
             )
             assert accepted["status"] == "accepted"
             deadline = time.monotonic() + 2
-            while context.session_cleanup_payload["operation"]["state"] != "completed":
+            while context.session_cleanup_payload["operation"]["state"] not in {
+                "completed",
+                "failed",
+            }:
                 assert time.monotonic() < deadline
                 time.sleep(0.01)
+            assert context.session_cleanup_payload["operation"]["state"] == "completed", (
+                context.session_cleanup_payload
+            )
 
         assert events == [
             "first-enter",
@@ -478,7 +604,10 @@ def test_worker_releases_fork_connection_before_materialization_and_verification
             call(codex_home=Path("E:/AppData/Codex")),
             call(codex_home=Path("E:/AppData/Codex")),
         ]
-        manager.materialize_target_rollout.assert_called_once_with(TARGET_ID, SOURCE_ID)
+        manager.materialize_target_rollouts.assert_called_once_with(
+            [(TARGET_ID, SOURCE_ID)],
+            progress_callback=None,
+        )
         desktop_lifecycle.archive_then_delete.assert_called_once_with(
             SOURCE_ID,
             cwd="E:/project",

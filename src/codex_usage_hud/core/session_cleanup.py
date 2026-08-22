@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -116,6 +117,11 @@ UsageSnapshotCommit = Callable[[object], None]
 UsageSnapshotDiscard = Callable[[object], None]
 DesktopSourceLifecycle = Callable[[str, str], Mapping[str, object]]
 DesktopSourcePreflight = Callable[[Sequence[str], str], Mapping[str, object]]
+TransferProgressCallback = Callable[[str, str, bool, str], None]
+TransferBatchOperation = Callable[
+    [Sequence[tuple[str, str]], TransferProgressCallback | None],
+    Mapping[str, object],
+]
 
 
 def _canonical_uuid(value: object) -> str:
@@ -301,6 +307,7 @@ class SessionCleanupManager:
         transfer_ready_retry_delays: Sequence[
             float
         ] = _TRANSFER_READY_RETRY_DELAYS_SECONDS,
+        transfer_max_workers: int = 1,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self.state_db_path = Path(state_db_path)
@@ -317,6 +324,11 @@ class SessionCleanupManager:
         self.transfer_ready_retry_delays = tuple(
             max(0.0, float(delay)) for delay in transfer_ready_retry_delays
         ) or (0.0,)
+        try:
+            configured_workers = int(transfer_max_workers)
+        except (TypeError, ValueError):
+            configured_workers = 1
+        self.transfer_max_workers = max(1, min(8, configured_workers))
         self._sleep = sleep
         self._revision_counter = 0
         self._revision = ""
@@ -326,6 +338,12 @@ class SessionCleanupManager:
         self._confirmations: dict[str, _Confirmation] = {}
         self._operation: dict[str, object] = self._idle_operation()
         self._unresolved_count = 0
+        # Real (thread) ids whose sources were migrated away in a completed
+        # transfer.  Excluded from every inventory so a dialog reopen or a
+        # fresh scan cannot resurrect a session that already belongs to
+        # another provider. Keyed by canonical thread id (stable across
+        # scans and opaque-id regeneration), never by the ephemeral item id.
+        self._migrated_source_ids: set[str] = set()
 
     @staticmethod
     def _idle_operation() -> dict[str, object]:
@@ -340,7 +358,11 @@ class SessionCleanupManager:
 
     def snapshot(self, *, include_sessions: bool = True) -> dict[str, object]:
         sessions = sorted(
-            self._items.values(),
+            (
+                item
+                for item in self._items.values()
+                if item._session_id not in self._migrated_source_ids
+            ),
             key=lambda item: (item.updated_at, item.title.casefold()),
             reverse=True,
         )
@@ -362,6 +384,19 @@ class SessionCleanupManager:
         if include_sessions:
             payload["sessions"] = [item.to_payload() for item in sessions]
         return payload
+
+    def mark_migrated_sources(self, session_ids: Iterable[str]) -> None:
+        """Record sources that were successfully migrated to another provider.
+
+        These thread ids are excluded from every subsequent inventory so a
+        dialog reopen or fresh scan cannot resurrect sessions that now belong
+        to a different provider.  Only committed deletions (the Desktop
+        lifecycle confirmed archive/delete) are recorded.
+        """
+        for session_id in session_ids:
+            canonical = _canonical_uuid(session_id)
+            if canonical:
+                self._migrated_source_ids.add(canonical)
 
     def workdir_for_item(self, item_id: object, revision: object) -> Path | None:
         """Resolve one current inventory item without exposing its path in the payload."""
@@ -530,6 +565,14 @@ class SessionCleanupManager:
         for root_index, root_id in enumerate(roots, 1):
             descendants = self._descendants(root_id, records, parents)
             family = (root_id, *descendants)
+            if root_id in self._migrated_source_ids or any(
+                session_id in self._migrated_source_ids for session_id in descendants
+            ):
+                # Sources successfully migrated to another provider must never
+                # re-enter the transferable inventory, even if the Desktop
+                # lifecycle deletion lags behind the fork (or a scan races a
+                # deleted state row).
+                continue
             family_records = [records[session_id] for session_id in family]
             rollout_paths = tuple(
                 record.rollout_path
@@ -739,29 +782,55 @@ class SessionCleanupManager:
             actualBytes=actual_bytes,
         )
 
-    def materialize_target_rollout(self, target_id: str, source_id: str) -> None:
-        """Flatten a forked target before any optional source deletion."""
-        canonical_target = _canonical_uuid(target_id)
-        canonical_source = _canonical_uuid(source_id)
-        if not canonical_target or not canonical_source:
-            raise SessionCleanupError("目标或源会话标识无效。")
-        last_error = ""
+    def materialize_target_rollouts(
+        self,
+        targets: Sequence[tuple[str, str]],
+        progress_callback: TransferProgressCallback | None = None,
+    ) -> dict[str, object]:
+        """Flatten several forked targets with one state/path snapshot per retry."""
+        normalized: list[tuple[str, str]] = []
+        seen_targets: set[str] = set()
+        for target_id, source_id in targets:
+            canonical_target = _canonical_uuid(target_id)
+            canonical_source = _canonical_uuid(source_id)
+            if not canonical_target or not canonical_source:
+                raise SessionCleanupError("目标或源会话标识无效。")
+            if canonical_target in seen_targets:
+                raise SessionCleanupError("目标会话标识重复。")
+            seen_targets.add(canonical_target)
+            normalized.append((canonical_target, canonical_source))
+        if not normalized:
+            raise SessionCleanupError("目标会话列表为空。")
+
+        pending = dict(normalized)
+        outcomes: dict[str, object] = {}
+        last_errors: dict[str, str] = {}
+        reported_ids: set[str] = set()
+
+        def report_result(target_id: str, success: bool, error: str = "") -> None:
+            if not callable(progress_callback) or target_id in reported_ids:
+                return
+            reported_ids.add(target_id)
+            try:
+                progress_callback(
+                    target_id,
+                    "materialize",
+                    success,
+                    "" if success else str(error or "Codex 目标会话历史物化未完成。"),
+                )
+            except Exception:
+                pass
+
         for index, delay in enumerate(self.transfer_ready_retry_delays):
+            if not pending:
+                break
             if index and delay:
                 self._sleep(delay)
             try:
                 records, _parents, _edge_states, _unsafe_ids, _unresolved = (
                     self._load_state()
                 )
-                target = records.get(canonical_target)
                 allowed_roots = self._allowed_rollout_roots()
-                if (
-                    target is None
-                    or target.rollout_path is None
-                    or not _path_under(target.rollout_path, allowed_roots)
-                    or not target.rollout_path.is_file()
-                ):
-                    raise SessionCleanupError("Codex 目标会话 rollout 尚不可用。")
                 rollout_paths = {
                     session_id: record.rollout_path
                     for session_id, record in records.items()
@@ -771,30 +840,119 @@ class SessionCleanupManager:
                         and record.rollout_path.is_file()
                     )
                 }
-                materialize_forked_rollout(
-                    target_id=canonical_target,
-                    source_id=canonical_source,
-                    target_path=target.rollout_path,
-                    rollout_paths=rollout_paths,
-                )
-                return
             except (SessionCleanupError, SessionMaterializationError) as exc:
-                # A missing freshly-forked target and a transient Windows file
-                # handle are both expected just after fork.  The source remains
-                # untouched until this bounded materialization succeeds.
-                last_error = str(exc) or type(exc).__name__
-        raise SessionCleanupError(last_error or "Codex 目标会话历史物化未完成。")
+                detail = str(exc) or type(exc).__name__
+                for target_id in pending:
+                    last_errors[target_id] = detail
+                continue
 
-    def _register_session_index(self, session_id: str, title: str) -> None:
-        """Make a newly forked thread discoverable by ``codex resume``."""
-        canonical = _canonical_uuid(session_id)
-        if not canonical:
-            raise SessionCleanupError("目标会话标识无效，无法更新 CLI 会话索引。")
+            def materialize_one(
+                target_id: str,
+                source_id: str,
+            ) -> tuple[str, bool, str]:
+                target = records.get(target_id)
+                try:
+                    if (
+                        target is None
+                        or target.rollout_path is None
+                        or not _path_under(target.rollout_path, allowed_roots)
+                        or not target.rollout_path.is_file()
+                    ):
+                        raise SessionCleanupError(
+                            "Codex 目标会话 rollout 尚不可用。"
+                        )
+                    materialize_forked_rollout(
+                        target_id=target_id,
+                        source_id=source_id,
+                        target_path=target.rollout_path,
+                        rollout_paths=rollout_paths,
+                    )
+                except Exception as exc:
+                    # A missing freshly-forked target and a transient Windows
+                    # file handle are both expected just after fork.  The source
+                    # remains untouched until this bounded materialization succeeds.
+                    return target_id, False, str(exc) or type(exc).__name__
+                return target_id, True, ""
+
+            pending_items = tuple(pending.items())
+            worker_count = min(self.transfer_max_workers, len(pending_items))
+
+            def apply_materialize_result(
+                completed: tuple[str, bool, str],
+            ) -> None:
+                target_id, success, error = completed
+                if success:
+                    outcomes[target_id] = True
+                    pending.pop(target_id, None)
+                    report_result(target_id, True)
+                else:
+                    last_errors[target_id] = error
+                    if index == len(self.transfer_ready_retry_delays) - 1:
+                        report_result(target_id, False, error)
+
+            if worker_count <= 1:
+                for target_id, source_id in pending_items:
+                    apply_materialize_result(
+                        materialize_one(target_id, source_id)
+                    )
+            else:
+                with ThreadPoolExecutor(
+                    max_workers=worker_count,
+                    thread_name_prefix="codex-hud-session-materialize",
+                ) as executor:
+                    futures = {
+                        executor.submit(materialize_one, target_id, source_id): target_id
+                        for target_id, source_id in pending_items
+                    }
+                    for future in as_completed(futures):
+                        apply_materialize_result(future.result())
+
+        for target_id in pending:
+            outcomes[target_id] = last_errors.get(
+                target_id,
+                "Codex 目标会话历史物化未完成。",
+            )
+            report_result(target_id, False, str(outcomes[target_id] or ""))
+        return outcomes
+
+    def materialize_target_rollout(self, target_id: str, source_id: str) -> None:
+        """Flatten one forked target before any optional source deletion."""
+        canonical_target = _canonical_uuid(target_id)
+        outcomes = self.materialize_target_rollouts(((canonical_target, source_id),))
+        outcome = outcomes.get(canonical_target)
+        if outcome is True:
+            return
+        raise SessionCleanupError(
+            str(outcome or "Codex 目标会话历史物化未完成。")
+        )
+
+    def _register_session_index_batch(
+        self,
+        entries: Sequence[tuple[str, str]],
+    ) -> None:
+        """Append newly forked threads with one index scan and one fsync."""
+        normalized: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for session_id, title in entries:
+            canonical = _canonical_uuid(session_id)
+            if not canonical:
+                raise SessionCleanupError(
+                    "目标会话标识无效，无法更新 CLI 会话索引。"
+                )
+            if canonical in seen:
+                continue
+            seen.add(canonical)
+            normalized.append((canonical, title))
+        if not normalized:
+            return
+
         existing_ids: set[str] = set()
+        existing_lines: list[str] = []
         if self.session_index_path.is_file():
             try:
                 with self.session_index_path.open("r", encoding="utf-8") as handle:
                     for line in handle:
+                        existing_lines.append(line)
                         try:
                             payload = json.loads(line)
                         except json.JSONDecodeError:
@@ -805,29 +963,51 @@ class SessionCleanupManager:
                                 existing_ids.add(existing)
             except (OSError, UnicodeError) as exc:
                 raise SessionCleanupError("Codex CLI 会话索引无法读取。") from exc
-        if canonical in existing_ids:
+        pending = [
+            (session_id, title)
+            for session_id, title in normalized
+            if session_id not in existing_ids
+        ]
+        if not pending:
             return
-        payload = {
-            "id": canonical,
-            "thread_name": str(title or "Untitled session").strip()
-            or "Untitled session",
-            "updated_at": datetime.now(timezone.utc)
-            .isoformat(timespec="microseconds")
-            .replace("+00:00", "Z"),
-        }
+        lines = []
+        for session_id, title in pending:
+            payload = {
+                "id": session_id,
+                "thread_name": str(title or "Untitled session").strip()
+                or "Untitled session",
+                "updated_at": datetime.now(timezone.utc)
+                .isoformat(timespec="microseconds")
+                .replace("+00:00", "Z"),
+            }
+            lines.append(
+                json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+                + "\n"
+            )
+        temporary = self.session_index_path.with_name(
+            f".{self.session_index_path.name}.hud-batch-{secrets.token_hex(10)}"
+        )
+        existing_content = "".join(existing_lines)
+        if existing_content and not existing_content.endswith(("\n", "\r")):
+            existing_content += "\n"
         try:
             self.session_index_path.parent.mkdir(parents=True, exist_ok=True)
-            with self.session_index_path.open(
-                "a", encoding="utf-8", newline="\n"
-            ) as handle:
-                handle.write(
-                    json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-                )
-                handle.write("\n")
+            with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+                handle.write(existing_content)
+                handle.write("".join(lines))
                 handle.flush()
                 os.fsync(handle.fileno())
+            os.replace(temporary, self.session_index_path)
         except (OSError, UnicodeError) as exc:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
             raise SessionCleanupError("Codex CLI 会话索引无法更新。") from exc
+
+    def _register_session_index(self, session_id: str, title: str) -> None:
+        """Make a newly forked thread discoverable by ``codex resume``."""
+        self._register_session_index_batch(((session_id, title),))
 
     def transfer(
         self,
@@ -840,8 +1020,11 @@ class SessionCleanupManager:
         fork: Callable[[str, str, str], str],
         materialize: Callable[[str, str], object] | None = None,
         verify: Callable[[str, str], bool] | None = None,
+        materialize_batch: TransferBatchOperation | None = None,
+        verify_batch: TransferBatchOperation | None = None,
         desktop_source_lifecycle: DesktopSourceLifecycle | None = None,
         desktop_source_preflight: DesktopSourcePreflight | None = None,
+        started_at_ms: int | float | None = None,
         request_id: str = "",
     ) -> dict[str, object]:
         """Fork selected sessions to another Provider, optionally removing sources.
@@ -862,9 +1045,9 @@ class SessionCleanupManager:
             raise SessionCleanupError("不支持的会话迁移模式。")
         if not callable(fork):
             raise SessionCleanupError("Codex fork 服务当前不可用。")
-        if not callable(materialize):
+        if not callable(materialize) and not callable(materialize_batch):
             raise SessionCleanupError("Codex 目标会话物化服务当前不可用。")
-        if not callable(verify):
+        if not callable(verify) and not callable(verify_batch):
             raise SessionCleanupError("Codex 目标会话持久化验证当前不可用。")
         items = self._selected_items(item_ids, revision)
         if any(item.model_provider.casefold() != normalized_source for item in items):
@@ -873,15 +1056,44 @@ class SessionCleanupManager:
             )
         if any(not item.transferable for item in items):
             raise SessionCleanupError("所选会话的分页历史源无法验证，不能复制或迁移。")
+        if any(item.archived for item in items):
+            raise SessionCleanupError(
+                "所选会话包含已归档会话，请先解除归档后再复制或迁移。"
+            )
         results: list[dict[str, object]] = []
         migration_candidates: list[tuple[SessionCleanupItem, dict[str, object]]] = []
-        existing_session_ids = set(self._load_state()[0])
+        current_records = self._load_state()[0]
+        for item in items:
+            current_record = current_records.get(item._session_id)
+            if current_record is None:
+                raise SessionCleanupError(
+                    "所选会话在提交前已改变或不再可用，请重新扫描后再试。"
+                )
+            if current_record.archived:
+                raise SessionCleanupError(
+                    "所选会话在提交前已归档，请先解除归档后再复制或迁移。"
+                )
+        existing_session_ids = set(current_records)
         created_target_ids: set[str] = set()
         publisher = getattr(self, "progress_publisher", None)
         total = len(items)
         last_progress_publish = 0.0
+        try:
+            transfer_started_at = int(started_at_ms or self.clock() * 1000)
+        except (TypeError, ValueError, OverflowError):
+            transfer_started_at = int(time.time() * 1000)
+        target_progress: dict[str, tuple[str, bool, str]] = {}
+        target_progress_events: set[tuple[str, str]] = set()
+        source_cleanup_completed = 0
+        source_cleanup_total = 0
 
-        def publish_progress(*, force: bool = False) -> None:
+        def publish_progress(
+            *,
+            force: bool = False,
+            phase: str = "targets",
+            source_cleanup_completed: int = 0,
+            source_cleanup_total: int = 0,
+        ) -> None:
             nonlocal last_progress_publish
             now = time.monotonic()
             # App-server notifications and renderer payloads are relatively
@@ -893,25 +1105,51 @@ class SessionCleanupManager:
                 and now - last_progress_publish < 0.075
             ):
                 return
-            target_ready_count = sum(
-                bool(result.get("targetVisible"))
-                and bool(result.get("targetResumable"))
-                for result in results
+            target_completed_count = sum(
+                status[0] in {"materialize", "verify"}
+                or (status[0] == "fork" and not status[1])
+                for status in target_progress.values()
             )
-            target_failed_count = len(results) - target_ready_count
+            target_ready_count = sum(
+                status[0] == "verify" and status[1]
+                for status in target_progress.values()
+            )
+            target_failed_count = sum(
+                status[0] in {"fork", "materialize", "verify"} and not status[1]
+                for status in target_progress.values()
+            )
             migrated_count = sum(
                 bool(result.get("sourceDeleted")) for result in results
             )
+            if phase in {"sourcePreflight", "sourceCleanup"}:
+                progress = 60 + round(
+                    39
+                    * source_cleanup_completed
+                    / max(1, source_cleanup_total),
+                )
+                phase_label = (
+                    "Desktop 源会话只读预检"
+                    if phase == "sourcePreflight"
+                    else "Desktop 源会话归档与删除"
+                )
+                phase_index = 2
+                phase_count = 2
+            else:
+                progress = round(60 * target_completed_count / max(1, total))
+                phase_label = "目标会话物化与可见性验证"
+                phase_index = 1
+                phase_count = 2 if normalized_mode == "migrate" else 1
             self.mark_operation(
                 request_id=request_id,
                 action="sessionTransfer",
                 state="running",
-                progress=min(99, round(80 * len(results) / max(1, total))),
+                progress=min(99, progress),
                 sourceProvider=normalized_source,
                 targetProvider=normalized_target,
                 mode=normalized_mode,
                 selectedIds=[item.id for item in items],
-                completedCount=len(results),
+                sessionCount=total,
+                completedCount=target_completed_count,
                 copiedCount=target_ready_count,
                 targetReadyCount=target_ready_count,
                 migratedCount=migrated_count,
@@ -926,10 +1164,17 @@ class SessionCleanupManager:
                 ),
                 targetFailedCount=target_failed_count,
                 unmigratedCount=(
-                    len(results) - target_ready_count
+                    total - target_ready_count
                     if normalized_mode == "migrate"
                     else 0
                 ),
+                sourceCleanupCompletedCount=source_cleanup_completed,
+                sourceCleanupTotalCount=source_cleanup_total,
+                transferPhase=phase,
+                phaseLabel=phase_label,
+                phaseIndex=phase_index,
+                phaseCount=phase_count,
+                startedAt=transfer_started_at,
                 # Source cleanup is best effort after target readiness; only
                 # target visibility/resumability contributes to transfer failure.
                 failedCount=target_failed_count,
@@ -938,12 +1183,29 @@ class SessionCleanupManager:
                 publisher(self.snapshot(include_sessions=False))
             last_progress_publish = now
 
+        def report_target_progress(
+            target_id: str,
+            phase: str,
+            success: bool,
+            error: str = "",
+        ) -> None:
+            target_progress[target_id] = (phase, bool(success), str(error or ""))
+            target_progress_events.add((phase, target_id))
+            publish_progress(phase="targets")
+
+        publish_progress(force=True, phase="targets")
+
+        transfer_work: list[dict[str, object]] = []
         for item in items:
-            forked = False
-            target_ready = False
-            history_materialized = False
-            new_session_id = ""
-            index_warning = ""
+            work: dict[str, object] = {
+                "item": item,
+                "targetId": "",
+                "forked": False,
+                "historyMaterialized": False,
+                "targetReady": False,
+                "indexWarning": "",
+                "error": "",
+            }
             try:
                 new_session_id = _normalise_fork_target_uuid(
                     fork(item._session_id, normalized_target, item._cwd)
@@ -958,80 +1220,211 @@ class SessionCleanupManager:
                         "Codex fork 返回了与现有目标会话冲突的标识。"
                     )
                 created_target_ids.add(new_session_id)
-                forked = True
-                # App Server forks initially contain only lineage metadata.
-                # Flatten the source history for both copy and migration so
-                # thread/list can discover the target through its rollout
-                # fallback before we claim that it is visible and resumable.
-                assert callable(materialize)
-                materialized = materialize(new_session_id, item._session_id)
-                if materialized is False:
-                    raise SessionCleanupError("Codex 目标会话历史物化未完成。")
-                history_materialized = True
-                if verify(new_session_id, normalized_target) is not True:
-                    raise SessionCleanupError(
-                        "目标会话已创建，但未通过目标 Provider 可见和续聊验证。"
-                    )
-                target_ready = True
-                # The state-db/list proof above is authoritative.  The legacy
-                # CLI index is only a best-effort convenience for older CLI
-                # builds and must not turn a usable target into a false failure.
-                try:
-                    self._register_session_index(new_session_id, item.title)
-                except SessionCleanupError as exc:
-                    index_warning = str(exc) or type(exc).__name__
-                result = {
-                    "id": item.id,
-                    "title": item.title,
-                    "workdir": item._cwd,
-                    "targetSessionId": new_session_id,
-                    "state": "copied",
-                    "forked": True,
-                    "targetCreated": True,
-                    "targetVisible": True,
-                    "targetResumable": True,
-                    "historyMaterialized": history_materialized,
-                    "sourceDeleted": False,
-                    "sourceRetained": normalized_mode == "migrate",
-                    "sourceArchived": False,
-                    "sourceCleanupPending": normalized_mode == "migrate",
-                    "sourceCleanupPreflighted": False,
-                    "sourceCleanupError": "",
-                    "desktopLifecycleVerified": normalized_mode != "migrate",
-                    "indexWarning": index_warning,
-                    "error": "",
-                }
-                results.append(result)
-                if normalized_mode == "migrate":
-                    migration_candidates.append((item, result))
-            except Exception as exc:
-                error_text = str(exc) or type(exc).__name__
-                results.append(
-                    {
-                        "id": item.id,
-                        "title": item.title,
-                        "workdir": item._cwd,
-                        "targetSessionId": new_session_id,
-                        "state": "copied"
-                        if target_ready
-                        else ("targetCreated" if forked else "failed"),
-                        "forked": forked,
-                        "targetCreated": forked,
-                        "targetVisible": target_ready,
-                        "targetResumable": target_ready,
-                        "historyMaterialized": history_materialized,
-                        "sourceDeleted": False,
-                        "sourceRetained": normalized_mode == "migrate",
-                        "sourceArchived": False,
-                        "sourceCleanupPending": normalized_mode == "migrate",
-                        "sourceCleanupPreflighted": False,
-                        "sourceCleanupError": "",
-                        "desktopLifecycleVerified": False,
-                        "indexWarning": index_warning,
-                        "error": error_text,
-                    }
+                work["targetId"] = new_session_id
+                work["forked"] = True
+                report_target_progress(
+                    f"fork:{item._session_id}",
+                    "fork",
+                    True,
                 )
-            publish_progress()
+            except Exception as exc:
+                work["error"] = str(exc) or type(exc).__name__
+                report_target_progress(
+                    f"fork:{item._session_id}",
+                    "fork",
+                    False,
+                    str(work["error"]),
+                )
+            transfer_work.append(work)
+
+        publish_progress(force=True, phase="targets")
+
+        def batch_error(
+            outcomes: object,
+            key: str,
+            fallback: str,
+            *,
+            allow_none: bool = False,
+        ) -> str:
+            if not isinstance(outcomes, Mapping) or key not in outcomes:
+                return fallback
+            value = outcomes[key]
+            if value is True or (allow_none and value is None):
+                return ""
+            if value is False:
+                return fallback
+            return str(value).strip() or fallback
+
+        forked_work = [
+            work for work in transfer_work if bool(work.get("forked"))
+        ]
+        if forked_work:
+            materialize_targets = [
+                (
+                    str(work["targetId"]),
+                    str(getattr(work["item"], "_session_id", "")),
+                )
+                for work in forked_work
+            ]
+            if callable(materialize_batch):
+                try:
+                    materialized_outcomes: object = materialize_batch(
+                        materialize_targets,
+                        report_target_progress,
+                    )
+                except Exception as exc:
+                    materialized_outcomes = {
+                        target_id: str(exc) or type(exc).__name__
+                        for target_id, _source_id in materialize_targets
+                    }
+                for work in forked_work:
+                    target_id = str(work["targetId"])
+                    error = batch_error(
+                        materialized_outcomes,
+                        target_id,
+                        "Codex 目标会话历史物化未完成。",
+                        allow_none=True,
+                    )
+                    if error:
+                        work["error"] = error
+                    else:
+                        work["historyMaterialized"] = True
+                    if ("materialize", target_id) not in target_progress_events:
+                        report_target_progress(
+                            target_id,
+                            "materialize",
+                            not bool(error),
+                            error,
+                        )
+            else:
+                assert callable(materialize)
+                for work in forked_work:
+                    target_id = str(work["targetId"])
+                    source_id = str(getattr(work["item"], "_session_id", ""))
+                    try:
+                        materialized = materialize(target_id, source_id)
+                        if materialized is False:
+                            raise SessionCleanupError(
+                                "Codex 目标会话历史物化未完成。"
+                            )
+                        work["historyMaterialized"] = True
+                    except Exception as exc:
+                        work["error"] = str(exc) or type(exc).__name__
+                    report_target_progress(
+                        target_id,
+                        "materialize",
+                        not bool(work.get("error")),
+                        str(work.get("error") or ""),
+                    )
+
+        materialized_work = [
+            work for work in transfer_work if bool(work.get("historyMaterialized"))
+        ]
+        if materialized_work:
+            verify_targets = [
+                (str(work["targetId"]), normalized_target)
+                for work in materialized_work
+            ]
+            if callable(verify_batch):
+                try:
+                    verified_outcomes: object = verify_batch(
+                        verify_targets,
+                        report_target_progress,
+                    )
+                except Exception as exc:
+                    verified_outcomes = {
+                        target_id: str(exc) or type(exc).__name__
+                        for target_id, _provider in verify_targets
+                    }
+                for work in materialized_work:
+                    target_id = str(work["targetId"])
+                    error = batch_error(
+                        verified_outcomes,
+                        target_id,
+                        "目标会话已创建，但未通过目标 Provider 可见和续聊验证。",
+                    )
+                    if error:
+                        work["error"] = error
+                    else:
+                        work["targetReady"] = True
+                    if ("verify", target_id) not in target_progress_events:
+                        report_target_progress(
+                            target_id,
+                            "verify",
+                            not bool(error),
+                            error,
+                        )
+            else:
+                assert callable(verify)
+                for work in materialized_work:
+                    target_id = str(work["targetId"])
+                    try:
+                        if verify(target_id, normalized_target) is not True:
+                            raise SessionCleanupError(
+                                "目标会话已创建，但未通过目标 Provider 可见和续聊验证。"
+                            )
+                        work["targetReady"] = True
+                    except Exception as exc:
+                        work["error"] = str(exc) or type(exc).__name__
+                    report_target_progress(
+                        target_id,
+                        "verify",
+                        bool(work.get("targetReady")),
+                        str(work.get("error") or ""),
+                    )
+
+        ready_work = [
+            work for work in transfer_work if bool(work.get("targetReady"))
+        ]
+        if ready_work:
+            try:
+                self._register_session_index_batch(
+                    [
+                        (
+                            str(work["targetId"]),
+                            str(getattr(work["item"], "title", "")),
+                        )
+                        for work in ready_work
+                    ]
+                )
+            except SessionCleanupError as exc:
+                warning = str(exc) or type(exc).__name__
+                for work in ready_work:
+                    work["indexWarning"] = warning
+
+        for work in transfer_work:
+            item = work["item"]
+            forked = bool(work.get("forked"))
+            target_ready = bool(work.get("targetReady"))
+            new_session_id = str(work.get("targetId") or "")
+            result = {
+                "id": item.id,
+                "title": item.title,
+                "workdir": item._cwd,
+                "targetSessionId": new_session_id,
+                "state": "copied"
+                if target_ready
+                else ("targetCreated" if forked else "failed"),
+                "forked": forked,
+                "targetCreated": forked,
+                "targetVisible": target_ready,
+                "targetResumable": target_ready,
+                "historyMaterialized": bool(work.get("historyMaterialized")),
+                "sourceDeleted": False,
+                "sourceRetained": normalized_mode == "migrate",
+                "sourceArchived": False,
+                "sourceCleanupPending": normalized_mode == "migrate",
+                "sourceCleanupPreflighted": False,
+                "sourceCleanupError": "",
+                "desktopLifecycleVerified": target_ready
+                and normalized_mode != "migrate",
+                "indexWarning": str(work.get("indexWarning") or ""),
+                "error": str(work.get("error") or ""),
+            }
+            results.append(result)
+            if normalized_mode == "migrate" and target_ready:
+                migration_candidates.append((item, result))
+        publish_progress(force=True)
 
         if normalized_mode == "migrate":
             if len(migration_candidates) != total:
@@ -1054,10 +1447,15 @@ class SessionCleanupManager:
                     for _original, result in migration_candidates
                     if _canonical_uuid(result.get("targetSessionId"))
                 }
+                inventory_items = self._items
+                inventory_revision = self._revision
                 try:
                     # The pre-fork opaque inventory is stale after App Server
                     # work. Re-scan before preview/execute and map by the
-                    # private source id, never by the old renderer id.
+                    # private source id, never by the old renderer id. Restore
+                    # the pre-transfer opaque inventory afterward so the final
+                    # payload can remove successful rows by their known IDs
+                    # without requiring another renderer scan.
                     self.scan(request_id=request_id)
                     current_by_session = {
                         candidate._session_id: candidate
@@ -1075,6 +1473,10 @@ class SessionCleanupManager:
                             # risking deletion of a usable target conversation.
                             blockers[original.id] = (
                                 "目标会话仍属于源会话子树，无法安全删除源会话。"
+                            )
+                        elif current.archived:
+                            blockers[original.id] = (
+                                "源会话在删除前已归档，请先解除归档后再试。"
                             )
                         elif current.model_provider.casefold() != normalized_source:
                             blockers[original.id] = "源会话的 Provider 在删除前已改变。"
@@ -1095,6 +1497,9 @@ class SessionCleanupManager:
                         original.id: f"删除前刷新源会话失败：{detail}"
                         for original, _result in migration_candidates
                     }
+                finally:
+                    self._items = inventory_items
+                    self._revision = inventory_revision
 
                 if blockers:
                     for original, result in migration_candidates:
@@ -1127,32 +1532,76 @@ class SessionCleanupManager:
                         )
                         for current, result in fresh_candidates
                     ]
+                    source_cleanup_total = len(source_families)
+                    publish_progress(
+                        force=True,
+                        phase="sourcePreflight",
+                        source_cleanup_completed=0,
+                        source_cleanup_total=source_cleanup_total,
+                    )
                     preflight_errors: dict[str, str] = {}
                     if callable(desktop_source_preflight):
                         # This is a batch barrier: do not send archive/delete
                         # for an earlier root while a later root can still fail
                         # the Desktop rollout check.
-                        for current, result, source_family_ids in source_families:
-                            try:
-                                preflight = desktop_source_preflight(
+                        worker_count = min(
+                            self.transfer_max_workers,
+                            len(source_families),
+                        )
+
+                        def run_preflight(
+                            current: SessionCleanupItem,
+                            source_family_ids: Sequence[str],
+                        ) -> Mapping[str, object]:
+                            return desktop_source_preflight(
+                                source_family_ids,
+                                current._cwd,
+                            )
+
+                        with ThreadPoolExecutor(
+                            max_workers=max(1, worker_count),
+                            thread_name_prefix="codex-hud-session-preflight",
+                        ) as executor:
+                            futures = {
+                                executor.submit(
+                                    run_preflight,
+                                    current,
                                     source_family_ids,
-                                    current._cwd,
-                                )
-                                if not isinstance(preflight, Mapping):
-                                    raise SessionCleanupError(
-                                        "Codex Desktop 源会话预检返回了无效结果。"
+                                ): result
+                                for current, result, source_family_ids in source_families
+                            }
+                            for future in as_completed(futures):
+                                result = futures[future]
+                                try:
+                                    preflight = future.result()
+                                    if not isinstance(preflight, Mapping):
+                                        raise SessionCleanupError(
+                                            "Codex Desktop 源会话预检返回了无效结果。"
+                                        )
+                                    if preflight.get("verified") is not True:
+                                        raise SessionCleanupError(
+                                            str(
+                                                preflight.get("error")
+                                                or "Codex Desktop 源会话预检未通过。"
+                                            ).strip()
+                                        )
+                                except Exception as exc:
+                                    preflight_errors[result["id"]] = (
+                                        str(exc) or type(exc).__name__
                                     )
-                                if preflight.get("verified") is not True:
-                                    raise SessionCleanupError(
-                                        str(
-                                            preflight.get("error")
-                                            or "Codex Desktop 源会话预检未通过。"
-                                        ).strip()
-                                    )
-                            except Exception as exc:
-                                preflight_errors[result["id"]] = (
-                                    str(exc) or type(exc).__name__
-                                )
+
+                    publish_progress(
+                        force=True,
+                        phase=(
+                            "sourcePreflight"
+                            if preflight_errors
+                            or not callable(desktop_source_preflight)
+                            or not callable(desktop_source_lifecycle)
+                            else "sourceCleanup"
+                        ),
+                        source_cleanup_completed=0,
+                        source_cleanup_total=source_cleanup_total,
+                    )
 
                     if not callable(desktop_source_lifecycle):
                         for _current, result, _source_family_ids in source_families:
@@ -1182,14 +1631,15 @@ class SessionCleanupManager:
                             )
                             result["error"] = ""
                     else:
-                        for current, result, source_family_ids in source_families:
-                            result["sourceCleanupPreflighted"] = True
-                            usage_receipt: object | None = None
+                        source_cleanup_completed = 0
+
+                        def run_lifecycle(
+                            current: SessionCleanupItem,
+                            source_family_ids: Sequence[str],
+                        ) -> tuple[list[Mapping[str, object]], str]:
                             reports: list[Mapping[str, object]] = []
                             lifecycle_error = ""
                             try:
-                                if self.usage_snapshot_prepare is not None:
-                                    usage_receipt = self.usage_snapshot_prepare(current)
                                 for source_id in source_family_ids:
                                     report = desktop_source_lifecycle(
                                         source_id,
@@ -1209,7 +1659,17 @@ class SessionCleanupManager:
                                     reports.append(report)
                             except Exception as exc:
                                 lifecycle_error = str(exc) or type(exc).__name__
+                            return reports, lifecycle_error
 
+                        def apply_lifecycle_result(
+                            current: SessionCleanupItem,
+                            result: dict[str, object],
+                            source_family_ids: Sequence[str],
+                            usage_receipt: object | None,
+                            reports: Sequence[Mapping[str, object]],
+                            lifecycle_error: str,
+                        ) -> None:
+                            nonlocal source_cleanup_completed
                             archived = (
                                 bool(reports)
                                 and len(reports) == len(source_family_ids)
@@ -1241,6 +1701,7 @@ class SessionCleanupManager:
                                 result["sourceCleanupError"] = ""
                                 result["desktopLifecycleVerified"] = True
                                 result["error"] = ""
+                                self.mark_migrated_sources(source_family_ids)
                                 if (
                                     usage_receipt
                                     and self.usage_snapshot_commit is not None
@@ -1253,36 +1714,111 @@ class SessionCleanupManager:
                                             "但使用量归档失败："
                                             f"{str(exc) or type(exc).__name__}"
                                         )
-                                continue
+                            else:
+                                if (
+                                    usage_receipt
+                                    and self.usage_snapshot_discard is not None
+                                ):
+                                    try:
+                                        self.usage_snapshot_discard(usage_receipt)
+                                    except Exception:
+                                        pass
+                                result["sourceArchived"] = archived
+                                result["desktopLifecycleVerified"] = False
+                                result["sourceRetained"] = True
+                                result["sourceCleanupPending"] = True
+                                result["sourceCleanupError"] = detail
+                                # The destination has already passed the durable
+                                # visibility and resume checks. Source cleanup is
+                                # best effort and must not turn a usable migration
+                                # into a user-visible transfer error.
+                                result["error"] = ""
+                            source_cleanup_completed += 1
+                            publish_progress(
+                                force=True,
+                                phase="sourceCleanup",
+                                source_cleanup_completed=source_cleanup_completed,
+                                source_cleanup_total=source_cleanup_total,
+                            )
 
-                            if (
-                                usage_receipt
-                                and self.usage_snapshot_discard is not None
-                            ):
+                        lifecycle_jobs: list[
+                            tuple[
+                                SessionCleanupItem,
+                                dict[str, object],
+                                tuple[str, ...],
+                                object | None,
+                            ]
+                        ] = []
+                        for current, result, source_family_ids in source_families:
+                            result["sourceCleanupPreflighted"] = True
+                            usage_receipt: object | None = None
+                            try:
+                                if self.usage_snapshot_prepare is not None:
+                                    usage_receipt = self.usage_snapshot_prepare(current)
+                            except Exception as exc:
+                                apply_lifecycle_result(
+                                    current,
+                                    result,
+                                    source_family_ids,
+                                    None,
+                                    (),
+                                    str(exc) or type(exc).__name__,
+                                )
+                            else:
+                                lifecycle_jobs.append(
+                                    (
+                                        current,
+                                        result,
+                                        source_family_ids,
+                                        usage_receipt,
+                                    )
+                                )
+
+                        worker_count = min(
+                            self.transfer_max_workers,
+                            len(lifecycle_jobs),
+                        )
+                        with ThreadPoolExecutor(
+                            max_workers=max(1, worker_count),
+                            thread_name_prefix="codex-hud-session-lifecycle",
+                        ) as executor:
+                            futures = {
+                                executor.submit(
+                                    run_lifecycle,
+                                    current,
+                                    source_family_ids,
+                                ): (current, result, source_family_ids, usage_receipt)
+                                for (
+                                    current,
+                                    result,
+                                    source_family_ids,
+                                    usage_receipt,
+                                ) in lifecycle_jobs
+                            }
+                            for future in as_completed(futures):
+                                current, result, source_family_ids, usage_receipt = (
+                                    futures[future]
+                                )
                                 try:
-                                    self.usage_snapshot_discard(usage_receipt)
-                                except Exception:
-                                    pass
-                            result["sourceArchived"] = archived
-                            result["desktopLifecycleVerified"] = False
-                            result["sourceRetained"] = True
-                            result["sourceCleanupPending"] = True
-                            result["sourceCleanupError"] = detail
-                            # The destination has already passed the durable
-                            # visibility and resume checks.  Source cleanup is
-                            # best effort and must not turn a usable migration
-                            # into a user-visible transfer error.
-                            result["error"] = ""
-                publish_progress(force=True)
+                                    reports, lifecycle_error = future.result()
+                                except Exception as exc:
+                                    reports = []
+                                    lifecycle_error = str(exc) or type(exc).__name__
+                                apply_lifecycle_result(
+                                    current,
+                                    result,
+                                    source_family_ids,
+                                    usage_receipt,
+                                    reports,
+                                    lifecycle_error,
+                                )
+                publish_progress(
+                    force=True,
+                    phase=("sourceCleanup" if normalized_mode == "migrate" else "targets"),
+                    source_cleanup_completed=source_cleanup_completed,
+                    source_cleanup_total=source_cleanup_total,
+                )
 
-        if any(bool(result.get("forked")) for result in results):
-            try:
-                self.scan(request_id=request_id)
-            except Exception:
-                # The transfer result is still useful even if the follow-up
-                # inventory refresh is unavailable; the next manual scan will
-                # reconcile the list.
-                pass
         copied_count = sum(
             bool(result.get("targetVisible")) and bool(result.get("targetResumable"))
             for result in results
@@ -1325,9 +1861,12 @@ class SessionCleanupManager:
             ),
             desktopLifecycleFailureCount=source_cleanup_pending_count,
             sourceCleanupPendingCount=source_cleanup_pending_count,
+            sourceCleanupCompletedCount=source_cleanup_completed,
+            sourceCleanupTotalCount=source_cleanup_total,
             targetFailedCount=max(0, target_failed_count),
             unmigratedCount=max(0, unmigrated_count),
             failedCount=max(0, failed_count),
+            startedAt=transfer_started_at,
         )
 
     def preview(

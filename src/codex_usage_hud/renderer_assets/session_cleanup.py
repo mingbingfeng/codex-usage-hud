@@ -573,6 +573,9 @@ TEXT = r"""
       }
 
       function requestSessionCleanupCancel() {
+        const transferRequestId = sessionTransferState.open
+          ? String(sessionTransferState.scanRequestId || "").trim()
+          : "";
         const requestId = typedSettingsRequestId("session-cleanup-cancel");
         const submitted = submitSettingsCommand(
           { action: "sessionCleanupCancel", requestId },
@@ -584,6 +587,21 @@ TEXT = r"""
           sessionCleanupState.scanStartedAt = 0;
           stopSessionCleanupScanWatchdog();
           stopSessionCleanupElapsedTicker();
+          if (transferRequestId) {
+            sessionTransferState.scanRequestId = "";
+            sessionTransferState.cancelledRequestId = transferRequestId;
+            sessionTransferState.startedAt = 0;
+            sessionTransferState.operation = {
+              ...(sessionTransferState.operation && typeof sessionTransferState.operation === "object"
+                ? sessionTransferState.operation
+                : {}),
+              action: "cancel",
+              state: "cancelled",
+              requestId: transferRequestId,
+              progress: 100,
+            };
+            if (sessionTransferState.open) renderSessionTransferDialog();
+          }
         }
         return submitted;
       }
@@ -609,6 +627,8 @@ TEXT = r"""
         sessionCleanupState.previewTokenShown = "";
         if (transferOpen) {
           sessionTransferState.scanRequestId = requestId;
+          sessionTransferState.startedAt = sessionCleanupState.scanStartedAt;
+          sessionTransferState.cancelledRequestId = "";
           sessionTransferState.operation = {
             action: "sessionCleanupScan",
             state: "scanning",

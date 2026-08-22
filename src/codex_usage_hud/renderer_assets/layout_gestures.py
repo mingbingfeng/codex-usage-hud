@@ -7,6 +7,13 @@ TEXT = r"""
         const rect = panel.getBoundingClientRect();
         const expanded = panel.dataset.expanded === "true";
         const startState = getPanelState(name);
+        // A session switch queues a few settling passes so the native footer
+        // can finish mounting. Once the user starts a gesture, those passes
+        // must yield to the user's geometry for this session.
+        for (const timer of (window[settleTimerName] || [])) {
+          ctx.lifecycle.clearTimeout(timer);
+        }
+        window[settleTimerName] = [];
         const startHeight = desiredHeight(name, startState, expanded, rect.height);
         const startAnchor = name === "top"
           ? topAnchor(startHeight, startState.width)

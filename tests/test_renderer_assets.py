@@ -169,9 +169,32 @@ def test_provider_settings_expose_session_copy_and_transfer_workflow() -> None:
     assert "function moveSessionTransferPage" in SETTINGS_SHELL
     assert "目标 Provider 的会话列表确认落盘" in SETTINGS_SHELL
     assert "operationSource" in SETTINGS_SHELL
+    assert "function sessionTransferCompletedSourceIds" in SETTINGS_SHELL
+    assert "targetVisible === true && item?.targetResumable === true" in SETTINGS_SHELL
+    assert 'availability: "all"' in SETTINGS_SHELL
+    assert "item?.transferable !== false || item?.archived === true" in SETTINGS_SHELL
+    assert "已归档，请先解除归档后再复制或迁移" in SETTINGS_SHELL
     assert "return !!source && !!target && !!operationSource && !!operationTarget" in SETTINGS_SHELL
     assert "function normaliseSessionTransferTargetProvider" in SETTINGS_SHELL
     assert "function sessionTransferOperationMatchesCurrentPair" in SETTINGS_SHELL
+    assert "function sessionTransferProgressModel" in SETTINGS_SHELL
+    assert "function sessionTransferProgressHtml" in SETTINGS_SHELL
+    assert 'data-session-transfer-list="true"' in SETTINGS_SHELL
+    assert 'data-session-transfer-progress-state="true"' in SETTINGS_SHELL
+    assert "function requestSessionTransferCancel" in SETTINGS_SHELL
+    assert "sessionTransferElapsedTimer" in SETTINGS_SHELL
+    assert "sessionTransferState.startedAt" in SETTINGS_SHELL
+    assert "operationStartedAt" in SETTINGS_SHELL
+    assert "persistedStartedAt" in SETTINGS_SHELL
+    assert "sourceCleanupCompletedCount" in SETTINGS_SHELL
+    assert "operationValue?.phaseLabel" in SETTINGS_SHELL
+    assert "sourceCleanupPendingCount" in SETTINGS_SHELL
+    assert "个源会话待清理" in SETTINGS_SHELL
+    assert 'data-state="progress"' in SETTINGS_SHELL
+    assert '.codex-usage-hud-session-transfer-list[data-state="progress"]' in LAYOUT_STYLE
+    assert 'new Set(["completed", "partial", "failed", "cancelled"])' in SETTINGS_SHELL
+    assert "list.dataset.state !== nextState" in SETTINGS_SHELL
+    assert "stopSessionTransferElapsedTicker();" in SETTINGS_SHELL
     assert "const pairMatches = !sessionTransferState.open" in SETTINGS_SHELL
     assert "已可在目标 Provider 继续工作" in SETTINGS_SHELL
     assert 'parts.push("Codex App · 必选")' not in SETTINGS_SHELL
@@ -204,6 +227,9 @@ def test_session_transfer_reuses_session_management_scan_state_and_controls() ->
     assert "function bindSessionTransferModeControls" in script
     assert 'input.addEventListener("change", apply);' in script
     assert "function syncSessionTransferModeFromDialog" in script
+    assert "function requestSessionTransferCancel" in script
+    assert 'action.dataset.action === "session-transfer-cancel"' in script
+    assert "sessionTransferState.cancelledRequestId" in script
     assert "syncSessionTransferModeFromDialog();" in script
     assert "const syncSessionTransferModeFromEvent = (event) =>" in script
     assert 'rootScope.listen(document, "click"' in script

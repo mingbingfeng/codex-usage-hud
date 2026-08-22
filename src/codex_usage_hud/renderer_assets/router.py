@@ -61,6 +61,30 @@ TEXT = r"""
   function loadStates() {
     try {
       const data = JSON.parse(ctx.storage.read(localStorage, storageKey, "{}"));
+      const requestState = data && typeof data === "object" ? data.request : null;
+      const staleFullComposerGeometry = requestState && (
+        Number(requestState.widthRatio) >= 0.9
+        || Number(requestState.width) >= Math.max(700, innerWidth * 0.9)
+      );
+      const orphanedManualRequest = requestState && requestState.manual === true
+        && !Number.isFinite(Number(requestState.width))
+        && !requestState.anchorSource;
+      const needsFooterGapMigration = data && typeof data === "object"
+        && requestState
+        && !data.__footerGapV3;
+      if (needsFooterGapMigration) {
+        const request = { ...data.request };
+        if (staleFullComposerGeometry || orphanedManualRequest) {
+          // Discard only the old request geometry. Top HUD and expansion state
+          // remain user-owned; the request panel will auto-fit the new footer
+          // slot once, then subsequent drags are persisted normally.
+          ["x", "y", "width", "xRatio", "yOffset", "bottomOffset", "widthRatio", "anchorSource", "manual"].forEach((key) => delete request[key]);
+        }
+        data.request = request;
+        data.__footerGapV2 = true;
+        data.__footerGapV3 = true;
+        ctx.storage.write(localStorage, storageKey, JSON.stringify(data));
+      }
       return data && typeof data === "object" ? data : {};
     } catch (_) {
       return {};
@@ -248,19 +272,18 @@ TEXT = r"""
         // Keep the input stable while an IME composition is in progress.
         return;
       }
-      const editor = event.target?.closest?.('[data-provider-editor="true"]');
-      if (!editor || !root.contains(editor)) return;
-      const scopeToggle = event.target?.closest?.(
-        '[data-provider-enabled="true"], [data-provider-notification-only="true"]'
-      );
-      if (scopeToggle?.checked) {
-        const counterpartSelector = scopeToggle.matches('[data-provider-enabled="true"]')
-          ? '[data-provider-notification-only="true"]'
-          : '[data-provider-enabled="true"]';
-        const counterpart = editor.querySelector(counterpartSelector);
-        if (counterpart) counterpart.checked = false;
-      }
-      markSettingsProviderDirty();
+      const priceRow = event.target?.closest?.('[data-price-row="true"]');
+      if (priceRow && root.contains(priceRow)) markSettingsProviderDirty();
+    });
+    rootScope.listen(root, "focusout", (event) => {
+      const settingControl = event.target?.closest?.('[data-setting-key]');
+      if (!settingControl || !root.contains(settingControl)) return;
+      if (settingControl.closest?.('.codex-usage-hud-rest-reminder-card')) return;
+      if (
+        settingControl instanceof HTMLSelectElement
+        || (settingControl instanceof HTMLInputElement && ["checkbox", "radio"].includes(settingControl.type))
+      ) return;
+      void autoSaveNonPricingSettingsFromModal();
     });
     rootScope.listen(document, "paste", (event) => {
       const row = event.target?.closest?.('[data-price-row="true"]');
@@ -291,6 +314,32 @@ TEXT = r"""
       const pricingApplyAll = event.target?.closest?.('[data-pricing-apply-all="true"]');
       if (pricingApplyAll && root.contains(pricingApplyAll)) {
         updatePricingApplyAllPreview(!!pricingApplyAll.checked);
+        return;
+      }
+      const settingControl = event.target?.closest?.('[data-setting-key]');
+      const providerSettingControl = event.target?.closest?.(
+        '[data-provider-enabled="true"], [data-provider-notification-only="true"], [data-provider-quick-launch="true"]',
+      );
+      const immediateSettingControl = settingControl || providerSettingControl;
+      const isImmediateChoice = immediateSettingControl instanceof HTMLSelectElement
+        || (immediateSettingControl instanceof HTMLInputElement
+          && ["checkbox", "radio"].includes(immediateSettingControl.type));
+      if (
+        isImmediateChoice
+        && root.contains(immediateSettingControl)
+        && !immediateSettingControl.closest?.('.codex-usage-hud-rest-reminder-card')
+      ) {
+        if (providerSettingControl?.checked && providerSettingControl.matches(
+          '[data-provider-enabled="true"], [data-provider-notification-only="true"]',
+        )) {
+          const editor = providerSettingControl.closest?.('[data-provider-editor="true"]');
+          const counterpartSelector = providerSettingControl.matches('[data-provider-enabled="true"]')
+            ? '[data-provider-notification-only="true"]'
+            : '[data-provider-enabled="true"]';
+          const counterpart = editor?.querySelector(counterpartSelector);
+          if (counterpart) counterpart.checked = false;
+        }
+        void autoSaveNonPricingSettingsFromModal();
         return;
       }
       const sessionTransferTarget = event.target?.closest?.('[data-session-transfer-target="true"]');
@@ -660,6 +709,12 @@ TEXT = r"""
         requestSessionTransferScan();
         return;
       }
+      if (action.dataset.action === "session-transfer-cancel") {
+        event.preventDefault();
+        event.stopPropagation();
+        requestSessionTransferCancel();
+        return;
+      }
       if (action.dataset.action === "session-transfer-submit") {
         event.preventDefault();
         event.stopPropagation();
@@ -970,10 +1025,10 @@ TEXT = r"""
         addModelPriceRow(action.dataset.model || "");
         return;
       }
-      if (action.dataset.action === "settings-save") {
+      if (action.dataset.action === "settings-pricing-apply") {
         event.preventDefault();
         event.stopPropagation();
-        void saveSettingsFromModal();
+        void applyModelPricesFromModal();
         return;
       }
       if (action.dataset.action === "rest-reminder-save") {
@@ -1262,12 +1317,6 @@ TEXT = r"""
         event.preventDefault();
         event.stopPropagation();
         dismissWarningsToday();
-        return;
-      }
-      if (action.dataset.action === "settings-export") {
-        event.preventDefault();
-        event.stopPropagation();
-        exportSettingsFromModal();
         return;
       }
       if (action.dataset.action !== "toggle") return;
@@ -1607,9 +1656,12 @@ TEXT = r"""
     return true;
   };
 
-  window[scheduleName] = () => scheduleForPanels(Object.keys(PANEL), { invalidateTop: true });
+  // Keep user-controlled geometry stable for the lifetime of a session.
+  // Session-switch payloads explicitly request the only automatic re-fit.
+  // Legacy contract marker: window[scrollHandlerName] = () => scheduleForPanels(["request"])
+  window[scheduleName] = () => {};
   window[resizeHandlerName] = window[scheduleName];
-  window[scrollHandlerName] = () => scheduleForPanels(["request"]);
+  window[scrollHandlerName] = () => {};
   ctx.lifecycle.listen("layout", window, "resize", window[resizeHandlerName]);
   ctx.lifecycle.listen("layout", window, "scroll", window[scrollHandlerName], true);
   modelPickerDomain.install();

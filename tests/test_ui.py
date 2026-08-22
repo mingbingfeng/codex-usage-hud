@@ -2910,6 +2910,49 @@ class BudgetHelperTests(unittest.TestCase):
             )
         )
 
+    def test_work_overlay_hides_equal_timestamp_completion_for_transferred_session(
+        self,
+    ) -> None:
+        now = datetime.now().astimezone()
+        snapshot = ParsedSession(
+            session_id="transferred-session",
+            session_title="Transferred session",
+            model_provider="custom",
+            client_kind="app",
+            session_started_at=now,
+            task_started_at=now,
+            task_completed_at=now,
+        )
+        snapshot.request.started_at = now
+        snapshot.request.updated_at = now
+        context = SimpleNamespace(
+            _work_overlay_transfer_inherited_session_ids={"transferred-session"},
+        )
+
+        self.assertIsNone(
+            active_work._work_item_from_snapshot(
+                snapshot,
+                current=False,
+                context=context,
+                now=now,
+            )
+        )
+
+        snapshot.task_completed_at = now + timedelta(seconds=1)
+        snapshot.request.updated_at = snapshot.task_completed_at
+        item = active_work._work_item_from_snapshot(
+            snapshot,
+            current=False,
+            context=context,
+            now=snapshot.task_completed_at,
+        )
+        self.assertIsNotNone(item)
+        self.assertEqual(item.status, "recent")
+        self.assertNotIn(
+            "transferred-session",
+            context._work_overlay_transfer_inherited_session_ids,
+        )
+
     def test_work_overlay_keeps_new_completion_in_copied_session(self) -> None:
         now = datetime.now().astimezone()
         session_started_at = now - timedelta(minutes=5)
@@ -3051,6 +3094,58 @@ class BudgetHelperTests(unittest.TestCase):
             context._work_overlay_terminal_item_tasks["copied-session"],
             started_at.isoformat(),
         )
+        self.assertEqual(
+            overlay_projection._stabilize_published_work_overlay_items(
+                context,
+                refreshed,
+            ),
+            [],
+        )
+
+    def test_current_refresh_suppresses_equal_timestamp_transferred_completion(
+        self,
+    ) -> None:
+        now = datetime.now().astimezone()
+        cached = WorkStatusItem(
+            id="transferred-session",
+            session_id="transferred-session",
+            title="Transferred session",
+            status="recent",
+            status_label="刚完成",
+            detail="done",
+            model_provider="custom",
+            session_started_at=now,
+            task_started_at=now,
+            started_at=now,
+            updated_at=now,
+        )
+        snapshot = ParsedSession(
+            session_id="transferred-session",
+            session_title="Transferred session",
+            model_provider="custom",
+            client_kind="app",
+            session_started_at=now,
+            task_started_at=now,
+            task_completed_at=now,
+        )
+        snapshot.request.started_at = now
+        snapshot.request.updated_at = now
+        context = SimpleNamespace(
+            user_config=UserConfig.defaults(),
+            app_provider="custom",
+            _work_overlay_transfer_inherited_session_ids={
+                "transferred-session"
+            },
+            _work_overlay_terminal_item_tasks={},
+        )
+
+        refreshed = active_work._refresh_visible_current_work_item(
+            context,
+            [cached],
+            snapshot,
+        )
+
+        self.assertEqual(refreshed, [])
         self.assertEqual(
             overlay_projection._stabilize_published_work_overlay_items(
                 context,

@@ -6,7 +6,9 @@ import json
 from pathlib import Path
 import sqlite3
 import tempfile
+import threading
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from codex_usage_hud.core.session_cleanup import (
@@ -368,6 +370,111 @@ class SessionCleanupManagerTests(unittest.TestCase):
             "Root",
         )
 
+    def test_session_transfer_uses_batch_materialize_and_verify_callbacks(self) -> None:
+        fixture = self._fixture()
+        temporary, root, _state, _index, _rollouts, manager = fixture
+        self.addCleanup(temporary.cleanup)
+
+        payload = manager.scan(request_id="transfer-scan")
+        root_row = next(row for row in payload["sessions"] if row["title"] == "Root")
+        target_id = "10000000-0000-4000-8000-000000000010"
+        batch_materialize_calls: list[object] = []
+        batch_verify_calls: list[object] = []
+
+        def materialize_batch(
+            targets: object,
+            _progress_callback: object = None,
+        ) -> dict[str, object]:
+            batch_materialize_calls.append(targets)
+            return {target_id: True}
+
+        def verify_batch(
+            targets: object,
+            _progress_callback: object = None,
+        ) -> dict[str, object]:
+            batch_verify_calls.append(targets)
+            return {target_id: True}
+
+        result = manager.transfer(
+            [root_row["id"]],
+            payload["revision"],
+            "openai-custom",
+            "routin",
+            "copy",
+            fork=lambda *_args: target_id,
+            materialize_batch=materialize_batch,
+            verify_batch=verify_batch,
+            started_at_ms=1234567890,
+            request_id="transfer-batch-callbacks",
+        )
+
+        self.assertEqual(result["operation"]["copiedCount"], 1)
+        self.assertEqual(result["operation"]["startedAt"], 1234567890)
+        self.assertEqual(
+            batch_materialize_calls,
+            [[(target_id, ROOT_ID)]],
+        )
+        self.assertEqual(
+            batch_verify_calls,
+            [[(target_id, "routin")]],
+        )
+        self.assertEqual(
+            result["operation"]["results"][0]["workdir"],
+            str(root / "project-a"),
+        )
+
+    def test_materialize_target_rollouts_uses_bounded_workers(self) -> None:
+        fixture = self._fixture()
+        temporary, root, _state, _index, _rollouts, manager = fixture
+        self.addCleanup(temporary.cleanup)
+        manager.transfer_max_workers = 2
+        target_ids = (
+            "10000000-0000-4000-8000-000000000011",
+            "10000000-0000-4000-8000-000000000012",
+        )
+        source_path = root / "sessions" / "source.jsonl"
+        target_paths = {
+            target_id: root / "sessions" / f"{target_id}.jsonl"
+            for target_id in target_ids
+        }
+        source_path.write_text("{}\n", encoding="utf-8")
+        for path in target_paths.values():
+            path.write_text("{}\n", encoding="utf-8")
+        records = {
+            ROOT_ID: SimpleNamespace(rollout_path=source_path),
+            **{
+                target_id: SimpleNamespace(rollout_path=path)
+                for target_id, path in target_paths.items()
+            },
+        }
+        manager._load_state = MagicMock(
+            return_value=(records, {}, {}, set(), 0)
+        )
+        barrier = threading.Barrier(2)
+        thread_names: list[str] = []
+        progress: list[tuple[str, str, bool, str]] = []
+
+        def materialize(**_kwargs: object) -> None:
+            thread_names.append(threading.current_thread().name)
+            barrier.wait(timeout=2)
+
+        with patch(
+            "codex_usage_hud.core.session_cleanup.materialize_forked_rollout",
+            side_effect=materialize,
+        ):
+            outcomes = manager.materialize_target_rollouts(
+                [(target_id, ROOT_ID) for target_id in target_ids],
+                progress_callback=lambda *values: progress.append(values),
+            )
+
+        self.assertEqual(outcomes, {target_id: True for target_id in target_ids})
+        self.assertEqual(len(thread_names), 2)
+        self.assertEqual(len(set(thread_names)), 2)
+        self.assertEqual(
+            {target_id for target_id, _phase, success, _error in progress if success},
+            set(target_ids),
+        )
+
     def test_session_transfer_copy_keeps_source_when_target_is_not_persistent(
         self,
     ) -> None:
@@ -495,6 +602,103 @@ class SessionCleanupManagerTests(unittest.TestCase):
         self.assertFalse(rollouts[ROOT_ID].exists())
         self.assertFalse(rollouts[CHILD_ID].exists())
 
+    def test_session_transfer_preserves_inventory_ids_after_safety_rescan(self) -> None:
+        fixture = self._fixture()
+        temporary, root, state, _index, rollouts, manager = fixture
+        self.addCleanup(temporary.cleanup)
+        payload = manager.scan(request_id="transfer-scan")
+        root_row = next(row for row in payload["sessions"] if row["title"] == "Root")
+        archived_row = next(
+            row for row in payload["sessions"] if row["title"] == "Archived"
+        )
+
+        with patch.object(manager, "scan", wraps=manager.scan) as scan:
+            result = manager.transfer(
+                [root_row["id"]],
+                payload["revision"],
+                "openai-custom",
+                "routin",
+                "migrate",
+                fork=lambda *_args: "10000000-0000-4000-8000-000000000024",
+                materialize=lambda *_args: None,
+                verify=lambda *_args: True,
+                desktop_source_preflight=self._confirmed_desktop_preflight,
+                desktop_source_lifecycle=self._confirmed_desktop_lifecycle(
+                    state,
+                    rollouts,
+                ),
+            )
+
+        self.assertEqual(scan.call_count, 1)
+        # The migrated source (Root + its child) is excluded from the final
+        # inventory; the untouched session keeps its original opaque id so
+        # renderer rows remain addressable.
+        remaining = {row["id"]: row["title"] for row in result["sessions"]}
+        self.assertEqual(
+            remaining,
+            {archived_row["id"]: "Archived"},
+        )
+        self.assertNotIn(root_row["id"], remaining)
+        self.assertEqual(result["operation"]["state"], "completed")
+
+    def test_session_transfer_migrated_sources_stay_hidden_after_rescan(self) -> None:
+        # Regression: reopening the transfer dialog triggers a fresh scan that
+        # rebuilds _items with new opaque ids.  A migrated source must not
+        # reappear even when its state rows and rollout files still exist
+        # (Desktop deletion can lag behind the fork and its notification).
+        fixture = self._fixture()
+        temporary, _root, state, _index, rollouts, manager = fixture
+        self.addCleanup(temporary.cleanup)
+        payload = manager.scan(request_id="transfer-scan")
+        root_row = next(row for row in payload["sessions"] if row["title"] == "Root")
+
+        # Desktop reports a confirmed archive/delete but the state DB and the
+        # rollout files are intentionally NOT touched, modelling a lagging
+        # cleanup channel that a subsequent scan would otherwise resurrect.
+        def confirmed_but_lagging(thread_id: str, _cwd: str) -> dict[str, object]:
+            return {
+                "threadId": thread_id,
+                "archived": True,
+                "deleted": True,
+                "archiveNotification": True,
+                "deleteNotification": True,
+                "verified": True,
+                "error": "",
+            }
+
+        result = manager.transfer(
+            [root_row["id"]],
+            payload["revision"],
+            "openai-custom",
+            "routin",
+            "migrate",
+            fork=lambda *_args: "10000000-0000-4000-8000-000000000025",
+            materialize=lambda *_args: None,
+            verify=lambda *_args: True,
+            desktop_source_preflight=self._confirmed_desktop_preflight,
+            desktop_source_lifecycle=confirmed_but_lagging,
+            request_id="transfer-migrate-rescan",
+        )
+        self.assertEqual(result["operation"]["state"], "completed")
+        self.assertEqual(result["operation"]["migratedCount"], 1)
+        # Final payload already hides the migrated source.
+        self.assertEqual(
+            [row["title"] for row in result["sessions"]],
+            ["Archived"],
+        )
+        # Sources still exist on disk and in the state DB: a fresh scan must
+        # not resurrect them.
+        self.assertTrue(rollouts[ROOT_ID].exists())
+        self.assertTrue(rollouts[CHILD_ID].exists())
+        with closing(sqlite3.connect(state)) as connection:
+            self.assertEqual(
+                connection.execute("SELECT count(*) FROM threads").fetchone()[0], 3
+            )
+
+        fresh = manager.scan(request_id="transfer-rescan")
+        fresh_titles = [row["title"] for row in fresh["sessions"]]
+        self.assertEqual(fresh_titles, ["Archived"])
+
     def test_session_transfer_migrate_retains_source_without_desktop_cleanup_channel(
         self,
     ) -> None:
@@ -600,6 +804,110 @@ class SessionCleanupManagerTests(unittest.TestCase):
         lifecycle.assert_not_called()
         self.assertTrue(rollouts[ROOT_ID].exists())
 
+    def test_session_transfer_rejects_archived_source_before_fork(self) -> None:
+        fixture = self._fixture()
+        temporary, _root, _state, _index, rollouts, manager = fixture
+        self.addCleanup(temporary.cleanup)
+        rollouts[SECOND_ID].write_text(
+            json.dumps(
+                {
+                    "type": "session_meta",
+                    "payload": {
+                        "model_provider": "openai-custom",
+                        "originator": "Codex Desktop",
+                        "source": "vscode",
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        payload = manager.scan(request_id="transfer-scan")
+        archived_row = next(
+            row for row in payload["sessions"] if row["title"] == "Archived"
+        )
+        fork = MagicMock()
+
+        with self.assertRaisesRegex(SessionCleanupError, "已归档"):
+            manager.transfer(
+                [archived_row["id"]],
+                payload["revision"],
+                "openai-custom",
+                "routin",
+                "migrate",
+                fork=fork,
+                materialize=lambda *_args: None,
+                verify=lambda *_args: True,
+            )
+
+        fork.assert_not_called()
+
+    def test_session_transfer_rechecks_archived_source_before_fork(self) -> None:
+        fixture = self._fixture()
+        temporary, _root, state, _index, _rollouts, manager = fixture
+        self.addCleanup(temporary.cleanup)
+        payload = manager.scan(request_id="transfer-scan")
+        root_row = next(row for row in payload["sessions"] if row["title"] == "Root")
+        with closing(sqlite3.connect(state)) as connection, connection:
+            connection.execute(
+                "UPDATE threads SET archived = 1 WHERE id = ?",
+                (ROOT_ID,),
+            )
+        fork = MagicMock()
+
+        with self.assertRaisesRegex(SessionCleanupError, "提交前已归档"):
+            manager.transfer(
+                [root_row["id"]],
+                payload["revision"],
+                "openai-custom",
+                "routin",
+                "migrate",
+                fork=fork,
+                materialize=lambda *_args: None,
+                verify=lambda *_args: True,
+            )
+
+        fork.assert_not_called()
+
+    def test_session_transfer_retain_source_when_archived_before_cleanup(self) -> None:
+        fixture = self._fixture()
+        temporary, _root, state, _index, rollouts, manager = fixture
+        self.addCleanup(temporary.cleanup)
+        payload = manager.scan(request_id="transfer-scan")
+        root_row = next(row for row in payload["sessions"] if row["title"] == "Root")
+        lifecycle = MagicMock()
+
+        def verify(_session_id: str, _provider: str) -> bool:
+            with closing(sqlite3.connect(state)) as connection, connection:
+                connection.execute(
+                    "UPDATE threads SET archived = 1 WHERE id = ?",
+                    (ROOT_ID,),
+                )
+            return True
+
+        result = manager.transfer(
+            [root_row["id"]],
+            payload["revision"],
+            "openai-custom",
+            "routin",
+            "migrate",
+            fork=lambda *_args: "10000000-0000-4000-8000-000000000025",
+            materialize=lambda *_args: None,
+            verify=verify,
+            desktop_source_preflight=self._confirmed_desktop_preflight,
+            desktop_source_lifecycle=lifecycle,
+        )
+
+        operation = result["operation"]
+        row = operation["results"][0]
+        self.assertEqual(operation["state"], "completed")
+        self.assertEqual(operation["copiedCount"], 1)
+        self.assertEqual(operation["sourceCleanupPendingCount"], 1)
+        self.assertTrue(row["sourceRetained"])
+        self.assertIn("删除前已归档", row["sourceCleanupError"])
+        lifecycle.assert_not_called()
+        self.assertTrue(rollouts[ROOT_ID].exists())
+
     def test_session_transfer_migrate_retains_source_when_desktop_lifecycle_fails(
         self,
     ) -> None:
@@ -683,7 +991,7 @@ class SessionCleanupManagerTests(unittest.TestCase):
         self,
     ) -> None:
         fixture = self._fixture()
-        temporary, _root, _state, _index, rollouts, manager = fixture
+        temporary, _root, state, _index, rollouts, manager = fixture
         self.addCleanup(temporary.cleanup)
         rollouts[SECOND_ID].write_text(
             json.dumps(
@@ -699,6 +1007,11 @@ class SessionCleanupManagerTests(unittest.TestCase):
             + "\n",
             encoding="utf-8",
         )
+        with closing(sqlite3.connect(state)) as connection, connection:
+            connection.execute(
+                "UPDATE threads SET archived = 0 WHERE id = ?",
+                (SECOND_ID,),
+            )
         payload = manager.scan(request_id="transfer-scan")
         selected = [
             row["id"]
@@ -815,6 +1128,11 @@ class SessionCleanupManagerTests(unittest.TestCase):
             + "\n",
             encoding="utf-8",
         )
+        with closing(sqlite3.connect(state)) as connection, connection:
+            connection.execute(
+                "UPDATE threads SET archived = 0 WHERE id = ?",
+                (SECOND_ID,),
+            )
         payload = manager.scan(request_id="transfer-scan")
         selected = [
             row["id"]
@@ -873,6 +1191,34 @@ class SessionCleanupManagerTests(unittest.TestCase):
         self.assertTrue(progress)
         self.assertTrue(all("results" not in row["operation"] for row in progress))
         self.assertTrue(all("sessions" not in row for row in progress))
+        transfer_progress = [
+            row["operation"]
+            for row in progress
+            if row["operation"].get("action") == "sessionTransfer"
+            and row["operation"].get("state") == "running"
+        ]
+        self.assertTrue(transfer_progress)
+        self.assertEqual(
+            [row["completedCount"] for row in transfer_progress],
+            sorted(row["completedCount"] for row in transfer_progress),
+        )
+        self.assertEqual(
+            [row["progress"] for row in transfer_progress],
+            sorted(row["progress"] for row in transfer_progress),
+        )
+        self.assertEqual(transfer_progress[0]["completedCount"], 0)
+        self.assertEqual(max(row["completedCount"] for row in transfer_progress), 2)
+        self.assertEqual(
+            len({row["startedAt"] for row in transfer_progress}),
+            1,
+        )
+        self.assertTrue(
+            any(
+                row.get("sourceCleanupCompletedCount") == 1
+                for row in transfer_progress
+            ),
+            transfer_progress,
+        )
 
     def test_session_transfer_migrate_keeps_source_when_target_is_not_persistent(
         self,
@@ -969,7 +1315,7 @@ class SessionCleanupManagerTests(unittest.TestCase):
         self,
     ) -> None:
         fixture = self._fixture()
-        temporary, _root, _state, _index, rollouts, manager = fixture
+        temporary, _root, state, _index, rollouts, manager = fixture
         self.addCleanup(temporary.cleanup)
         rollouts[SECOND_ID].write_text(
             json.dumps(
@@ -985,6 +1331,11 @@ class SessionCleanupManagerTests(unittest.TestCase):
             + "\n",
             encoding="utf-8",
         )
+        with closing(sqlite3.connect(state)) as connection, connection:
+            connection.execute(
+                "UPDATE threads SET archived = 0 WHERE id = ?",
+                (SECOND_ID,),
+            )
         payload = manager.scan(request_id="transfer-scan")
         selected = [
             row["id"]

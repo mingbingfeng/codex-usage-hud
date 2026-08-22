@@ -318,6 +318,7 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertNotIn('data-action="pricing-recalc-preview"', renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertNotIn('data-action="pricing-recalc-execute"', renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("pricingPath", renderer_hud.RENDERER_HUD_SCRIPT)
+
         self.assertIn("pricingUsedTemplate", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertNotIn("pricingDownload", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("applyPricingCommandStatus", renderer_hud.RENDERER_HUD_SCRIPT)
@@ -326,6 +327,12 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("settings-add-detected-model", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn('data-action="settings-exit"', renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn('data-action="settings-exit-confirm"', renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn('data-setting-key="stop_hud_on_lock_screen"', renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("锁屏后停止HUD一切活动", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertLess(
+            renderer_hud.RENDERER_HUD_SCRIPT.index('data-action="settings-exit"'),
+            renderer_hud.RENDERER_HUD_SCRIPT.index('data-setting-key="stop_hud_on_lock_screen"'),
+        )
         self.assertIn("退出 HUD", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("版本更新", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("settings-check-update", renderer_hud.RENDERER_HUD_SCRIPT)
@@ -357,6 +364,9 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("会话进度气泡数量", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("0 为关闭", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("气泡运行环境", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("codex-usage-hud-settings-compact-inputs", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertNotIn("<span>位置</span>", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn('aria-label="气泡位置"', renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("方形进度气泡", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("圆形总结", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("未安装", renderer_hud.RENDERER_HUD_SCRIPT)
@@ -503,13 +513,33 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("pointer-events: none;", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("function headerLeftControlEdge(headerNode, header", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("function headerRightControlStart(headerNode, header", renderer_hud.RENDERER_HUD_SCRIPT)
-        self.assertIn("function footerProtectedControlRects(composer)", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("function footerProtectedControlRects(composerNode, composer)", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("function footerControlIdentity(node)", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("function isBackgroundInfoControl(node)", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn('node.querySelector?.("svg > title, title")?.textContent', renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("if (!(node instanceof Element) || !node.isConnected) return false;", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("const footerBandTop = Math.max(composer.top, composer.bottom - 96);", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("The real Desktop composer commonly spans almost the whole content", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn('const widthOverride = forceAutoFit || name === "request"', renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn('"svg",', renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("semantic: isBackgroundInfoControl(node),", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("rect.right > composer.left - 2", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("rect.left < composer.right + 2", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("[data-codex-intelligence-trigger]", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("[role='img'][aria-label*='上下文']", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("ring is a role=img span", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("rect.protectedFooterControl === true", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("const safetyPadding = protectedControl ? 14 : padding;", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("previous.left = Math.min(previous.left, left);", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("const best = rankedGaps.find((gap) => gap.width >= minWidth) || rankedGaps[0];", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("const autoFitWidth = maxWidth;", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("hasBackgroundInfoControl: controls.some((rect) => rect.backgroundInfoControl === true)", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("the usable gap already excludes the background-information icon", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertNotIn("const iconShift = widthOverride == null && slot.hasBackgroundInfoControl ? 25 : 0;", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("const top = clamp(composer.bottom - height - 4", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("Only protect external nodes when they are the known native", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertNotIn("const rowCenter = slot.rowTop + (slot.rowHeight / 2);", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("const widthLimit = widthOverride == null ? autoFitWidth : maxWidth;", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("syncPosition([gesture.name]);", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("desiredWidth(name, {}, gesture.expanded, gesture.width", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("function headerTitleScopeSelector()", renderer_hud.RENDERER_HUD_SCRIPT)
@@ -671,6 +701,34 @@ class RendererHudPayloadTests(unittest.TestCase):
         request_row_details = payload["requestRowDetails"]
         self.assertIsInstance(request_row_details, list)
         self.assertEqual(request_row, request_row_details[0]["text"])
+
+    def test_settings_auto_save_keeps_model_price_drafts_pending_for_apply(self) -> None:
+        script = renderer_hud.RENDERER_HUD_SCRIPT
+
+        self.assertIn('rootScope.listen(root, "focusout", (event) => {', script)
+        self.assertIn('const settingControl = event.target?.closest?.(\'[data-setting-key]\');', script)
+        self.assertIn('settingControl instanceof HTMLSelectElement', script)
+        self.assertIn("codex-usage-hud-rest-reminder-card", script)
+        self.assertNotIn('autoSaveNonPricingSettingsFromModal({ section: "restReminder" })', script)
+        self.assertIn("function settingsWithPersistedPriceTables(candidate, base = hudSettingsFromPayload())", script)
+        self.assertIn("const settings = settingsWithPersistedPriceTables(collectSettingsForm());", script)
+        self.assertIn('section === "restReminder"\n          ? settingsWithPersistedPriceTables(collectSettingsForm())', script)
+        self.assertIn("if (submitted && !section)", script)
+        self.assertIn("const addedCustomModelPrice = addCustomModelPriceToDraft(", script)
+        self.assertIn("if (addedCustomModelPrice) settingsDirtyProviders.add(provider);", script)
+        self.assertIn("model_prices: base?.model_prices", script)
+        self.assertIn('data-action="settings-pricing-apply"', script)
+        self.assertIn("function applyModelPricesFromModal()", script)
+        self.assertIn("function syncPricingApplyDirtyState()", script)
+        self.assertIn('data-pricing-apply-dirty-dot="true"', script)
+        self.assertIn("syncPricingApplyDirtyState();", script)
+        self.assertLess(
+            script.index('data-action="settings-delete-provider"'),
+            script.index('data-action="settings-pricing-apply"'),
+        )
+        self.assertNotIn('data-action="settings-save"', script)
+        self.assertNotIn('data-action="settings-export"', script)
+        self.assertIn('data-action="rest-reminder-save"', script)
 
     def test_request_rows_can_expand_beyond_the_default_page(self) -> None:
         snapshot = ParsedSession(status="parsed")
@@ -1936,7 +1994,7 @@ class RendererHudPayloadTests(unittest.TestCase):
     def test_renderer_top_redesign_styles_are_theme_tokenized(self) -> None:
         script = renderer_hud.RENDERER_HUD_SCRIPT
 
-        self.assertIn('const version = "54";', script)
+        self.assertIn('const version = "67";', script)
         self.assertIn("function refreshProgressRailBadge", script)
         self.assertIn("function progressBadgeCandidates", script)
         self.assertIn("function progressRailLeftLabelFits", script)

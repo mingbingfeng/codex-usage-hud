@@ -104,6 +104,7 @@ class RuntimeContext:
     session_management_current_session_id: str = ""
     session_management_active_session_ids: set[str] = field(default_factory=set)
     rest_reminder: object | None = None
+    session_lock_monitor: object | None = None
     config_overrides: dict[str, object] = field(default_factory=dict)
     config_reload: Callable[..., object] | None = field(
         default=None,

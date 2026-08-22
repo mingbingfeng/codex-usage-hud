@@ -6,10 +6,13 @@ from collections.abc import Callable, Mapping, Sequence
 import logging
 import queue
 from pathlib import Path
-from threading import Event, Thread, current_thread
+import sqlite3
+from threading import Event, Lock, Thread, current_thread
+import time
 import uuid
 
 from .core.session_cleanup import (
+    _canonical_uuid,
     SessionCleanupError,
     SessionCleanupItem,
     SessionCleanupManager,
@@ -89,6 +92,51 @@ def _session_transfer_provider_values(
     }
 
 
+def _transfer_inherited_session_ids(context: object) -> set[str]:
+    values = getattr(context, "_work_overlay_transfer_inherited_session_ids", None)
+    if isinstance(values, set):
+        return values
+    values = set()
+    try:
+        setattr(context, "_work_overlay_transfer_inherited_session_ids", values)
+    except Exception:
+        pass
+    return values
+
+
+def _load_transfer_inherited_session_ids(state_db_path: object) -> set[str]:
+    try:
+        path = Path(state_db_path)
+        if not path.is_file():
+            return set()
+        connection = sqlite3.connect(
+            f"file:{path.as_posix()}?mode=ro",
+            uri=True,
+        )
+        try:
+            columns = {
+                str(row[1])
+                for row in connection.execute("PRAGMA table_info(threads)")
+            }
+            required = {"id", "has_user_event", "thread_source"}
+            if not required.issubset(columns):
+                return set()
+            rows = connection.execute(
+                "SELECT id FROM threads "
+                "WHERE COALESCE(has_user_event, 0) = 0 "
+                "AND LOWER(COALESCE(thread_source, '')) = 'user'"
+            ).fetchall()
+            return {
+                canonical
+                for row in rows
+                if (canonical := _canonical_uuid(row[0]))
+            }
+        finally:
+            connection.close()
+    except (OSError, sqlite3.Error, TypeError, ValueError):
+        return set()
+
+
 class SessionCleanupWorker:
     _ACTIONS = {
         "sessionCleanupScan",
@@ -109,6 +157,11 @@ class SessionCleanupWorker:
         self._context = context
         self.manager = manager
         self._on_deleted = on_deleted
+        _transfer_inherited_session_ids(context).update(
+            _load_transfer_inherited_session_ids(
+                getattr(context, "state_db_path", None)
+            )
+        )
         # This only captures the configured CDP endpoint.  It attaches to the
         # Desktop process if and when a migration reaches its source lifecycle
         # phase after the target has been fully verified.
@@ -134,6 +187,8 @@ class SessionCleanupWorker:
         payload = dict(command)
         payload["action"] = action
         payload["requestId"] = request_id
+        if action == "sessionTransfer":
+            payload["startedAt"] = int(time.time() * 1000)
         if action == "sessionCleanupCancel":
             self._publish(self.manager.cancel(request_id=request_id))
         else:
@@ -142,6 +197,21 @@ class SessionCleanupWorker:
                 if action == "sessionTransfer"
                 else {}
             )
+            if action == "sessionTransfer":
+                accepted_values["startedAt"] = payload["startedAt"]
+                accepted_values["mode"] = (
+                    str(payload.get("mode") or "copy").strip().casefold()
+                )
+                accepted_values["selectedIds"] = cleanup_string_list(
+                    payload.get("itemIds") or payload.get("sessionIds")
+                )
+                accepted_values["sessionCount"] = len(accepted_values["selectedIds"])
+                accepted_values["transferPhase"] = "targets"
+                accepted_values["phaseLabel"] = "创建目标会话"
+                accepted_values["phaseIndex"] = 1
+                accepted_values["phaseCount"] = (
+                    2 if accepted_values["mode"] == "migrate" else 1
+                )
             self._publish(
                 self.manager.mark_operation(
                     request_id=request_id,
@@ -275,22 +345,25 @@ class SessionCleanupWorker:
                         # fresh connection for the durable ``thread/read`` check.
                         app_server_client: CodexAppServerClient | None = None
                         app_server: object | None = None
+                        app_server_lifecycle_lock = Lock()
 
                         def open_app_server() -> object:
                             nonlocal app_server_client, app_server
-                            app_server_client = CodexAppServerClient(
-                                codex_home=codex_home
-                            )
-                            app_server = app_server_client.__enter__()
-                            return app_server
+                            with app_server_lifecycle_lock:
+                                app_server_client = CodexAppServerClient(
+                                    codex_home=codex_home
+                                )
+                                app_server = app_server_client.__enter__()
+                                return app_server
 
                         def close_app_server() -> None:
                             nonlocal app_server_client, app_server
-                            client = app_server_client
-                            app_server_client = None
-                            app_server = None
-                            if client is not None:
-                                client.__exit__(None, None, None)
+                            with app_server_lifecycle_lock:
+                                client = app_server_client
+                                app_server_client = None
+                                app_server = None
+                                if client is not None:
+                                    client.__exit__(None, None, None)
 
                         def current_app_server() -> object:
                             if app_server is None:
@@ -308,6 +381,24 @@ class SessionCleanupWorker:
                                 return self.manager.materialize_target_rollout(
                                     target_id,
                                     source_id,
+                                )
+                            finally:
+                                open_app_server()
+
+                        def materialize_targets(
+                            targets: Sequence[tuple[str, str]],
+                            progress_callback: Callable[
+                                [str, str, bool, str], None
+                            ] | None = None,
+                        ) -> Mapping[str, object]:
+                            # Fork writers keep Windows file handles open until
+                            # the App Server connection closes. Materialize the
+                            # whole fork phase behind one close/reopen boundary.
+                            close_app_server()
+                            try:
+                                return self.manager.materialize_target_rollouts(
+                                    targets,
+                                    progress_callback=progress_callback,
                                 )
                             finally:
                                 open_app_server()
@@ -359,8 +450,16 @@ class SessionCleanupWorker:
                                         provider,
                                     )
                                 ),
+                                materialize_batch=materialize_targets,
+                                verify_batch=lambda targets, progress_callback=None: (
+                                    current_app_server().verify_persistent_threads(
+                                        targets,
+                                        progress_callback=progress_callback,
+                                    )
+                                ),
                                 desktop_source_lifecycle=archive_and_delete_source,
                                 desktop_source_preflight=preflight_source_family,
+                                started_at_ms=command.get("startedAt"),
                                 request_id=request_id,
                             )
                         finally:
@@ -397,6 +496,8 @@ class SessionCleanupWorker:
                     )
                 elif action == "sessionTransfer":
                     failure_values.update(transfer_values)
+                    if command.get("startedAt"):
+                        failure_values["startedAt"] = command.get("startedAt")
                 snapshot = self.manager.mark_operation(
                     request_id=request_id,
                     action=action,
@@ -449,12 +550,27 @@ class SessionCleanupWorker:
     def _publish(self, payload: Mapping[str, object]) -> None:
         snapshot = dict(payload)
         setattr(self._context, "session_cleanup_payload", snapshot)
+        operation = snapshot.get("operation")
+        values = operation if isinstance(operation, Mapping) else {}
+        if str(values.get("action") or "").strip().casefold() == "sessiontransfer":
+            results = values.get("results")
+            if isinstance(results, Sequence) and not isinstance(
+                results,
+                (str, bytes, bytearray),
+            ):
+                inherited_ids = _transfer_inherited_session_ids(self._context)
+                for result in results:
+                    if not isinstance(result, Mapping):
+                        continue
+                    if not bool(result.get("forked") or result.get("targetCreated")):
+                        continue
+                    target_id = _canonical_uuid(result.get("targetSessionId"))
+                    if target_id:
+                        inherited_ids.add(target_id)
         event_bus = getattr(self._context, "runtime_events", None)
         publish = getattr(event_bus, "publish", None)
         if not callable(publish):
             return
-        operation = snapshot.get("operation")
-        values = operation if isinstance(operation, Mapping) else {}
         publish(
             "session_cleanup_changed",
             source="session_cleanup",
@@ -520,5 +636,9 @@ def _build_session_cleanup_manager(context: object) -> SessionCleanupManager:
         ),
         usage_snapshot_discard=lambda receipt: _discard_session_cleanup_usage(
             context, receipt
+        ),
+        transfer_max_workers=max(
+            1,
+            min(8, int(getattr(context, "session_transfer_max_workers", 4) or 4)),
         ),
     )

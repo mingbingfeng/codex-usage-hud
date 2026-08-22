@@ -18,6 +18,7 @@ SESSION_CLEANUP_COMMANDS = frozenset(
 )
 
 _OVERLAY_KEYS = frozenset({"work_overlay_max_items", "work_overlay_side"})
+_SESSION_ACTIVITY_KEYS = frozenset({"stop_hud_on_lock_screen"})
 _QUICK_LAUNCH_KEYS = frozenset({"quick_launch_providers"})
 _REST_KEYS = frozenset(
     {
@@ -47,6 +48,7 @@ BUDGET_KEYS = frozenset(
 _SAFE_PARTIAL_KEYS = (
     frozenset({"display_mode"})
     | _OVERLAY_KEYS
+    | _SESSION_ACTIVITY_KEYS
     | _QUICK_LAUNCH_KEYS
     | _REST_KEYS
     | PRICING_KEYS

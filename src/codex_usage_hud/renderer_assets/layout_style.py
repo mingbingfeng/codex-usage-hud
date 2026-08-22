@@ -2370,10 +2370,16 @@ TEXT = r"""
             grid-column: 1 / -1;
             min-width: 0;
             display: grid;
-            grid-template-columns: minmax(112px, 0.9fr) minmax(88px, 0.72fr) minmax(0, 1.45fr);
-            gap: 8px;
-            align-items: end;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 10px;
           }
+          #${rootId} .codex-usage-hud-settings-compact-inputs {
+            min-width: 0;
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 8px;
+          }
+          #${rootId} .codex-usage-hud-settings-compact-inputs > .codex-usage-hud-settings-field,
           #${rootId} .codex-usage-hud-settings-compact-row > .codex-usage-hud-settings-field {
             min-width: 0;
           }
@@ -2393,11 +2399,7 @@ TEXT = r"""
           }
           #${rootId} .codex-usage-hud-overlay-side-control {
             min-width: 0;
-            display: grid;
-            gap: 4px;
-            color: var(--codex-usage-hud-muted, #8492a6);
-            font-size: 10px;
-            font-weight: 700;
+            width: 100%;
           }
           #${rootId} .codex-usage-hud-overlay-side-control select {
             min-width: 0;
@@ -2625,6 +2627,15 @@ TEXT = r"""
             flex: 0 0 6px;
             border-radius: 50%;
             background: var(--codex-usage-hud-warning, #ffb86b);
+          }
+          #${rootId} .codex-usage-hud-pricing-apply-action {
+            position: relative;
+          }
+          #${rootId} .codex-usage-hud-pricing-apply-dirty-dot {
+            position: absolute;
+            top: -3px;
+            right: -3px;
+            border: 1px solid var(--codex-usage-hud-panel-surface, #18202b);
           }
           #${rootId} .codex-usage-hud-provider-context {
             min-width: 0;
@@ -3264,6 +3275,22 @@ TEXT = r"""
           }
           #${rootId} .codex-usage-hud-settings-footnote .codex-usage-hud-settings-status {
             text-align: right;
+          }
+          #${rootId} .codex-usage-hud-settings-lock-toggle {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            min-width: 0;
+            color: var(--codex-usage-hud-request-muted, #a9bcd2);
+            font-size: 11px;
+            cursor: pointer;
+          }
+          #${rootId} .codex-usage-hud-settings-lock-toggle input {
+            flex: 0 0 auto;
+            width: 14px;
+            height: 14px;
+            margin: 0;
+            accent-color: var(--codex-usage-hud-accent, #f3d27a);
           }
           #${rootId} .codex-usage-hud-settings-status[data-kind="error"] {
             color: var(--codex-usage-hud-warning, #ffb86b);
@@ -4106,6 +4133,25 @@ TEXT = r"""
             align-content: start;
             gap: 5px;
             padding: 2px;
+          }
+          #${rootId} .codex-usage-hud-session-transfer-list[data-state="progress"] {
+            min-height: 300px;
+            max-height: none;
+            overflow: hidden;
+            display: grid;
+            grid-template-rows: auto minmax(0, 1fr);
+            gap: 0;
+            padding: 0;
+          }
+          #${rootId} .codex-usage-hud-session-transfer-progress-state {
+            min-width: 0;
+            min-height: 0;
+            height: 100%;
+            display: grid;
+            grid-template-rows: auto minmax(0, 1fr);
+          }
+          #${rootId} .codex-usage-hud-session-transfer-progress-state .codex-usage-hud-cleanup-empty-state {
+            min-height: 220px;
           }
           #${rootId} .codex-usage-hud-session-transfer-row {
             min-width: 0;
@@ -5634,6 +5680,9 @@ TEXT = r"""
               padding: 12px;
             }
             #${rootId} .codex-usage-hud-settings-compact-row {
+              grid-template-columns: minmax(0, 1fr);
+            }
+            #${rootId} .codex-usage-hud-settings-compact-inputs {
               grid-template-columns: minmax(0, 1fr);
             }
             #${rootId} .codex-usage-hud-rest-reminder-grid {

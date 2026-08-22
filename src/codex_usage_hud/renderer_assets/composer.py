@@ -15,6 +15,12 @@ TEXT = r"""
         Array.from(document.querySelectorAll("div")).forEach((node) => {
           if (hasAllClasses(node, composerClasses) && visible(node)) candidates.add(node);
         });
+        // Current Desktop uses CSS-module names such as
+        // _ComposerLayoutRoot_*. Prefer that structural root when it exists
+        // so the cached anchor includes the complete footer action row.
+        Array.from(document.querySelectorAll("[class*='ComposerLayoutRoot']"))
+          .filter((node) => visible(node))
+          .forEach((node) => candidates.add(node));
         Array.from(document.querySelectorAll(".composer-footer")).forEach((footer) => {
           if (!visible(footer)) return;
           let node = footer;

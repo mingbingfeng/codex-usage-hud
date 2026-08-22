@@ -394,25 +394,127 @@ class CodexAppServerClient:
         """
         thread_id = _canonical_uuid(session_id)
         provider = _provider_id(target_provider)
-        if not thread_id:
-            raise SessionTransferError("目标会话标识无效。")
-        if not provider:
-            raise SessionTransferError("目标 Provider 标识无效。")
-        last_error = ""
+        outcomes = self.verify_persistent_threads(((thread_id, provider),))
+        outcome = outcomes.get(thread_id)
+        if outcome is True:
+            return True
+        raise SessionTransferError(
+            str(outcome or "Codex 目标会话尚未通过持久化和列表可见性验证。")
+        )
+
+    def verify_persistent_threads(
+        self,
+        sessions: Sequence[tuple[str, str]],
+        progress_callback: Callable[[str, str, bool, str], None] | None = None,
+    ) -> dict[str, object]:
+        """Verify several targets while sharing each Provider list traversal.
+
+        ``thread/read`` and ``thread/resume`` remain per target because they
+        establish target-specific persistence and rehydration.  The filtered
+        ``thread/list`` result is shared for all targets of the same Provider,
+        avoiding a full paginated traversal for every copied session.
+        """
+        normalized: list[tuple[str, str]] = []
+        seen_ids: set[str] = set()
+        for session_id, target_provider in sessions:
+            thread_id = _canonical_uuid(session_id)
+            provider = _provider_id(target_provider)
+            if not thread_id:
+                raise SessionTransferError("目标会话标识无效。")
+            if not provider:
+                raise SessionTransferError("目标 Provider 标识无效。")
+            if thread_id in seen_ids:
+                raise SessionTransferError("目标会话标识重复。")
+            seen_ids.add(thread_id)
+            normalized.append((thread_id, provider))
+        if not normalized:
+            raise SessionTransferError("目标会话列表为空。")
+
+        pending = {thread_id: provider for thread_id, provider in normalized}
+        outcomes: dict[str, object] = {}
+        last_errors: dict[str, str] = {}
+        reported_ids: set[str] = set()
+
+        def report_result(
+            thread_id: str,
+            success: bool,
+            error: str = "",
+        ) -> None:
+            if not callable(progress_callback) or thread_id in reported_ids:
+                return
+            reported_ids.add(thread_id)
+            try:
+                progress_callback(
+                    thread_id,
+                    "verify",
+                    success,
+                    "" if success else str(error or "目标会话验证失败。"),
+                )
+            except Exception:
+                pass
+
         for index, delay in enumerate(self.target_visibility_retry_delays):
+            if not pending:
+                break
             if index and delay:
                 self._sleep(delay)
-            try:
-                thread_payload = self._verify_persistent_thread_read(thread_id, provider)
-                if self._target_is_visible_in_provider_list(thread_id, provider):
-                    self._verify_target_resume(thread_id, provider, thread_payload)
-                    return True
-                last_error = "Codex 目标会话尚未出现在目标 Provider 的会话列表中。"
-            except SessionTransferError as exc:
-                last_error = str(exc) or type(exc).__name__
-        raise SessionTransferError(
-            last_error or "Codex 目标会话尚未通过持久化和列表可见性验证。"
-        )
+
+            readable: dict[str, Mapping[str, object]] = {}
+            for thread_id, provider in tuple(pending.items()):
+                try:
+                    readable[thread_id] = self._verify_persistent_thread_read(
+                        thread_id,
+                        provider,
+                    )
+                except SessionTransferError as exc:
+                    last_errors[thread_id] = str(exc) or type(exc).__name__
+
+            by_provider: dict[str, set[str]] = {}
+            for thread_id in readable:
+                by_provider.setdefault(pending[thread_id], set()).add(thread_id)
+            visible_by_provider: dict[str, set[str]] = {}
+            for provider, thread_ids in by_provider.items():
+                try:
+                    visible_by_provider[provider] = (
+                        self._target_ids_visible_in_provider_list(
+                            thread_ids,
+                            provider,
+                        )
+                    )
+                except SessionTransferError as exc:
+                    detail = str(exc) or type(exc).__name__
+                    for thread_id in thread_ids:
+                        last_errors[thread_id] = detail
+
+            for thread_id, thread_payload in readable.items():
+                provider = pending.get(thread_id)
+                if not provider:
+                    continue
+                if thread_id not in visible_by_provider.get(provider, set()):
+                    last_errors[thread_id] = (
+                        "Codex 目标会话尚未出现在目标 Provider 的会话列表中。"
+                    )
+                    continue
+                try:
+                    self._verify_target_resume(
+                        thread_id,
+                        provider,
+                        thread_payload,
+                    )
+                except SessionTransferError as exc:
+                    last_errors[thread_id] = str(exc) or type(exc).__name__
+                    continue
+                outcomes[thread_id] = True
+                pending.pop(thread_id, None)
+                report_result(thread_id, True)
+
+        for thread_id in pending:
+            outcomes[thread_id] = last_errors.get(
+                thread_id,
+                "Codex 目标会话尚未通过持久化和列表可见性验证。",
+            )
+            report_result(thread_id, False, str(outcomes[thread_id] or ""))
+        return outcomes
 
     def _verify_persistent_thread_read(
         self,
@@ -496,9 +598,29 @@ class CodexAppServerClient:
         thread_id: str,
         provider: str,
     ) -> bool:
-        """Return whether the target is indexed by the filtered session list."""
+        """Return whether one target is indexed by the filtered session list."""
+        return bool(
+            _canonical_uuid(thread_id)
+            in self._target_ids_visible_in_provider_list(
+                {_canonical_uuid(thread_id)},
+                _provider_id(provider),
+            )
+        )
+
+    def _target_ids_visible_in_provider_list(
+        self,
+        thread_ids: set[str],
+        provider: str,
+    ) -> set[str]:
+        """Return all requested targets found by one paginated list traversal."""
+        desired = {
+            thread_id for thread_id in thread_ids if _canonical_uuid(thread_id)
+        }
+        normalized_provider = _provider_id(provider)
+        if not desired or not normalized_provider:
+            return set()
         params: dict[str, object] = {
-            "modelProviders": [provider],
+            "modelProviders": [normalized_provider],
             "sourceKinds": list(_THREAD_LIST_SOURCE_KINDS),
             "limit": 100,
             "sortKey": "updated_at",
@@ -510,6 +632,7 @@ class CodexAppServerClient:
             # successful resume before its source can be deleted.
             "useStateDbOnly": False,
         }
+        found: set[str] = set()
         seen_cursors: set[str] = set()
         for _page in range(_MAX_TARGET_LIST_PAGES):
             result = self.request("thread/list", params)
@@ -531,14 +654,16 @@ class CodexAppServerClient:
                 candidate_provider = _provider_id(
                     candidate.get("modelProvider") or candidate.get("model_provider")
                 )
-                if candidate_id == thread_id and candidate_provider == provider:
-                    return True
+                if candidate_id in desired and candidate_provider == normalized_provider:
+                    found.add(candidate_id)
+            if found == desired:
+                return found
             next_cursor = str(result.get("nextCursor") or "").strip()
             if not next_cursor or next_cursor in seen_cursors:
                 break
             seen_cursors.add(next_cursor)
             params["cursor"] = next_cursor
-        return False
+        return found
 
     def _write(self, payload: Mapping[str, object]) -> None:
         process = self._process

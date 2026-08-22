@@ -6,6 +6,8 @@ import argparse
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 import logging
+import sys
+import threading
 import time
 from typing import Any
 
@@ -19,6 +21,7 @@ from .daemon import (
 )
 from .instance_lock import HudAlreadyRunningError, HudInstanceLock
 from .runtime_diagnostics import append_renderer_diagnostic, attach_cli_logger_to_daemon_log
+from .session_activity import WindowsSessionLockMonitor
 
 
 DEFAULT_DAEMON_STARTUP_WAIT = "wait"
@@ -29,6 +32,7 @@ RENDERER_HUD_UNAVAILABLE = 20
 HUD_SWITCH_TO_RENDERER = 31
 HUD_SWITCH_TO_RENDERER_RESTART_CODEX = 32
 HUD_AUTO_RESTART_CODEX = 33
+HUD_SUSPEND_FOR_SESSION_LOCK = 34
 WORK_OVERLAY_RESTART_ACTION_ID = "restart-codex-for-renderer"
 DAEMON_RENDERER_RECOVERY_FAILURE_LIMIT = 3
 RENDERER_RECOVERY_NOTICE_TITLE = "检测到 Codex App 未启用 CDP"
@@ -306,6 +310,22 @@ def _wait_for_renderer_recovery_retry(
             close()
 
 
+def _wait_for_session_unlock() -> None:
+    """Block on the native unlock notification while the daemon stays alive."""
+    if not sys.platform.startswith("win"):
+        return
+    unlocked = threading.Event()
+    monitor = WindowsSessionLockMonitor(
+        on_lock=lambda: None,
+        on_unlock=unlocked.set,
+    )
+    monitor.start(initial_locked=True)
+    try:
+        unlocked.wait()
+    finally:
+        monitor.close()
+
+
 def legacy_hud_session_unavailable(surface: str) -> int:
     _LOGGER.info("legacy_hud_session_unavailable surface=%s renderer_only=true", surface)
     return RENDERER_HUD_UNAVAILABLE
@@ -552,6 +572,24 @@ def run_daemon(
                     force_renderer_retry = True
                     renderer_recovery_failures = 0
                     continue
+                if exit_code == HUD_SUSPEND_FOR_SESSION_LOCK:
+                    if session_loading is not None:
+                        session_loading.close()
+                    startup_loading = None
+                    _close_overlay_handoff(overlay_handoff)
+                    _LOGGER.info("daemon_renderer_suspended_for_session_lock")
+                    try:
+                        _wait_for_session_unlock()
+                    except KeyboardInterrupt:
+                        return 130
+                    _LOGGER.info("daemon_session_unlock_detected renderer_restart=scheduled")
+                    force_renderer_retry = False
+                    launched_codex_for_renderer = False
+                    observed_codex_launch = False
+                    renderer_recovery_failures = 0
+                    seamless_recovery = False
+                    pending_codex_replacement_pid = None
+                    continue
                 if exit_code == HUD_SWITCH_TO_RENDERER_RESTART_CODEX:
                     seamless_recovery = False
                     if _show_renderer_system_notice(
@@ -624,7 +662,8 @@ def run_daemon(
 __all__ = [
     "DAEMON_RESTART_REQUESTED", "DEFAULT_DAEMON_STARTUP_CANCEL",
     "DEFAULT_DAEMON_STARTUP_RENDERER", "DEFAULT_DAEMON_STARTUP_WAIT",
-    "HUD_AUTO_RESTART_CODEX", "HUD_SWITCH_TO_RENDERER",
+    "HUD_AUTO_RESTART_CODEX", "HUD_SUSPEND_FOR_SESSION_LOCK",
+    "HUD_SWITCH_TO_RENDERER",
     "HUD_SWITCH_TO_RENDERER_RESTART_CODEX", "RENDERER_HUD_UNAVAILABLE",
     "DaemonServices", "DaemonStartupDecision", "clone_args_with_display_mode",
     "clone_args_with_renderer_preference", "daemon_startup_decision",

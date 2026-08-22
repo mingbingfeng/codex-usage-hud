@@ -19,6 +19,7 @@ class RendererSessionPorts:
     DAEMON_RENDERER_WINDOW_READY_TIMEOUT_SECONDS: object
     DAEMON_RESTART_REQUESTED: object
     HUD_AUTO_RESTART_CODEX: object
+    HUD_SUSPEND_FOR_SESSION_LOCK: object
     HUD_SWITCH_TO_RENDERER_RESTART_CODEX: object
     HudAlreadyRunningError: object
     HudInstanceLock: object
