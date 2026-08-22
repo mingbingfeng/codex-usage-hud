@@ -1488,6 +1488,12 @@ TEXT = r"""
     if ("sessionSwitch" in domains) {
       sessionViewDomain.apply(root, { ...(payload || {}), ...(domains.sessionSwitch || {}) }, "sessionSwitch");
     }
+    // A session switch is exactly when the active conversation's provider can
+    // change (e.g. migrated threads); keep the menubar label in step without
+    // waiting for the next settings-domain payload.
+    if ("currentSession" in domains || "sessionSwitch" in domains) {
+      settingsShellDomain.syncCodexCliQuickLaunchMenu?.();
+    }
     if ("budget" in domains) {
       budgetDomain.apply(root, { ...(payload || {}), ...(domains.budget || {}) });
     }

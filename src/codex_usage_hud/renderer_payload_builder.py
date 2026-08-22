@@ -89,6 +89,16 @@ def _payload_domains(payload: dict[str, object]) -> dict[str, dict[str, object]]
     return payload_domains(payload)
 
 
+def _active_session_provider(snapshot: ParsedSession) -> str:
+    """Normalize the followed session's rollout provider for the renderer.
+
+    ``unknown`` comes from the parser when a rollout has no provider yet
+    (new/pending sessions); the renderer falls back to the config default.
+    """
+    provider = str(getattr(snapshot, "model_provider", "") or "").strip().lower()
+    return "" if provider in {"", "unknown"} else provider
+
+
 def payload_from_snapshot(
     snapshot: ParsedSession,
     *,
@@ -176,6 +186,7 @@ def payload_from_snapshot(
         request_line=request_line,
         session=_session_label(snapshot),
         model=snapshot.request.model or "n/a",
+        active_session_provider=_active_session_provider(snapshot),
         source=snapshot.selection_source or "activity",
         request_status=snapshot.request.status or "waiting",
         last_event=_format_time(snapshot.last_event_time),
@@ -294,6 +305,7 @@ def session_switch_payload_from_snapshot(
         ],
         "backgroundUsageNotification": dict(background_usage_notification or {}),
         "connectionHealth": _connection_health_payload(connection_health),
+        "activeSessionProvider": _active_session_provider(snapshot),
     }
     payload = dict(domain)
     payload["payloadDomains"] = {"sessionSwitch": dict(domain)}

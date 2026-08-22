@@ -8,10 +8,16 @@ TEXT = r"""
         positionStartupBubble(root);
         positionRestReminderBubble(root);
         applyPanelStates(root);
+        const chromeMissing = desktopChromeMissing();
         const panelNames = Array.isArray(names) ? names.filter((name) => PANEL[name]) : Object.keys(PANEL);
         for (const name of panelNames) {
           const panel = root.querySelector(`[data-panel="${name}"]`);
           if (!panel) continue;
+          if (chromeMissing) {
+            panel.dataset.awaitingChrome = "true";
+            continue;
+          }
+          delete panel.dataset.awaitingChrome;
           const state = getPanelState(name);
           const expanded = panel.dataset.expanded === "true";
           const height = desiredHeight(name, state, expanded);
@@ -292,7 +298,18 @@ TEXT = r"""
           invalidateComposerAnchor();
           const headerNode = conversationHeaderElement();
           const composerNode = composerElement();
-          if (!headerNode && !composerNode) return;
+          if (!headerNode && !composerNode) {
+            // While Codex Desktop is still on its splash screen the panels are
+            // hidden and this observer is the only wake-up for their reveal,
+            // so re-arm its lifetime instead of letting the 5s guard kill it.
+            ctx.lifecycle.clearTimeout(window[bootstrapTimerName] || 0);
+            window[bootstrapTimerName] = ctx.lifecycle.timeout(
+              "layout_bootstrap",
+              stopBootstrapObserver,
+              5000,
+            );
+            return;
+          }
           scheduleForPanels(Object.keys(PANEL), { invalidateTop: true });
           if (headerNode && composerNode) stopBootstrapObserver();
         }));

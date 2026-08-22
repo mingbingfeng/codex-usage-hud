@@ -58,6 +58,9 @@ TEXT = r"""
           #${rootId}[data-hud-ready="false"] .codex-usage-hud-panel {
             display: none !important;
           }
+          #${rootId} .codex-usage-hud-panel[data-awaiting-chrome="true"] {
+            display: none !important;
+          }
           #${rootId} .codex-usage-hud-startup-bubble {
             position: fixed;
             top: 72px;

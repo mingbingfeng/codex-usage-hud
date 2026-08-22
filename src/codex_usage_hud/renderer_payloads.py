@@ -37,6 +37,7 @@ class RendererHudPayload:
     request_rows_total: int = 0
     observed_models: list[str] = field(default_factory=list)
     settings: dict[str, object] = field(default_factory=dict)
+    active_session_provider: str = ""
     active_display_mode: str = "renderer"
     settings_path: str = ""
     settings_bridge_url: str = ""
@@ -96,6 +97,7 @@ class RendererHudPayload:
             "requestRowsTotal": max(0, int(self.request_rows_total or 0)),
             "observedModels": list(self.observed_models),
             "settings": dict(self.settings),
+            "activeSessionProvider": str(self.active_session_provider or ""),
             "activeDisplayMode": self.active_display_mode,
             "settingsPath": self.settings_path,
             "settingsBridgeUrl": self.settings_bridge_url,
@@ -165,7 +167,7 @@ def payload_domains(payload: dict[str, object]) -> dict[str, dict[str, object]]:
         "rendererSessionId", "cachedPreview", "selectionObservedAt",
         "followState", "followReason", "followElapsedMs", "followTiming",
         "matchCandidates",
-        "backgroundUsageNotification", "connectionHealth",
+        "backgroundUsageNotification", "connectionHealth", "activeSessionProvider",
     )
     current_session_keys = (
         "topLine", "requestLine", "session", "model", "source",
@@ -178,12 +180,12 @@ def payload_domains(payload: dict[str, object]) -> dict[str, dict[str, object]]:
         "preSendEstimate", "preSendBaseTokens", "preSendBreakdown",
         "preSendInputPrice", "preSendTotalCost", "preSendHasPrices",
         "activityWarning", "activityReadingFile", "backgroundUsageNotification",
-        "connectionHealth",
+        "connectionHealth", "activeSessionProvider",
     )
     settings_keys = (
         "settings", "activeDisplayMode", "settingsPath", "settingsBridgeUrl",
         "settingsCommandStatus", "restReminder", "supportImages", "theme",
-        "updateState", "appVersion",
+        "updateState", "appVersion", "activeSessionProvider",
     )
 
     def pick(keys: tuple[str, ...]) -> dict[str, object]:

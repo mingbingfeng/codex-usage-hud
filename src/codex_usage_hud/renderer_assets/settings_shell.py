@@ -5675,6 +5675,29 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
             0% { transform: translateX(-115%); }
             55%, 100% { transform: translateX(260%); }
           }
+          .codex-usage-hud-cli-provider-label {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            cursor: default;
+            user-select: none;
+            opacity: .78;
+          }
+          .codex-usage-hud-cli-provider-label:empty { display: none; }
+          .codex-usage-hud-cli-provider-label::before {
+            content: "";
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: color-mix(in srgb, currentColor 55%, transparent);
+          }
+          .codex-usage-hud-cli-provider-label[data-mismatch="true"] {
+            color: var(--status-warning, #e2a23a);
+            opacity: 1;
+          }
+          .codex-usage-hud-cli-provider-label[data-mismatch="true"]::before {
+            background: var(--status-warning, #e2a23a);
+          }
           @media (prefers-reduced-motion: reduce) {
             [data-codex-cli-quick-launch="true"],
             .codex-usage-hud-cli-quick-surface,
@@ -5779,6 +5802,63 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
         }
       }
 
+      function codexCliQuickLaunchProviderLabelState() {
+        const active = String(currentPayload()?.activeSessionProvider || "").trim().toLowerCase();
+        const fallback = String(hudSettingsFromPayload().app_provider || "").trim().toLowerCase();
+        if (active) {
+          const mismatch = !!fallback && fallback !== active;
+          return {
+            provider: active,
+            mismatch,
+            text: `供应商 ${active}`,
+            title: mismatch
+              ? `当前会话供应商：${active}（config.toml 默认：${fallback}）`
+              : `当前会话供应商：${active}`,
+          };
+        }
+        if (fallback) {
+          return {
+            provider: fallback,
+            mismatch: false,
+            text: `供应商 ${fallback}（默认）`,
+            title: `默认供应商：${fallback}（当前无活跃会话）`,
+          };
+        }
+        return null;
+      }
+
+      function syncCodexCliQuickLaunchProviderLabel(menubar, toggle) {
+        let label = menubar.querySelector('[data-codex-usage-hud-cli-provider-label="true"]');
+        const state = codexCliQuickLaunchProviderLabelState();
+        if (!state) {
+          label?.remove();
+          return;
+        }
+        if (!label) {
+          label = document.createElement("span");
+          label.dataset.codexUsageHudCliProviderLabel = "true";
+          const template = menubar.querySelector('button[role="menuitem"][aria-haspopup="menu"]');
+          label.className = `${template?.className || ""} codex-usage-hud-cli-provider-label`.trim();
+          label.setAttribute("aria-label", "当前会话供应商");
+        }
+        // The body-wide MutationObserver re-runs this sync on every DOM write,
+        // so steady state must write nothing: touch the DOM only when the
+        // placement or content actually differs, otherwise the renderer ends
+        // in a mutation/observer feedback loop and freezes the app.
+        if (label.parentElement !== menubar || label.previousElementSibling !== toggle) {
+          toggle.insertAdjacentElement("afterend", label);
+        }
+        if (
+          label.dataset.provider !== state.provider
+          || label.dataset.mismatch !== String(state.mismatch)
+        ) {
+          label.dataset.provider = state.provider;
+          label.dataset.mismatch = String(state.mismatch);
+          label.textContent = state.text;
+          label.title = state.title;
+        }
+      }
+
       function syncCodexCliQuickLaunchMenu() {
         const providers = codexCliQuickLaunchMenuProviders();
         const menubar = codexDesktopApplicationMenu();
@@ -5786,6 +5866,7 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
         if (!providers.length || !menubar) {
           closeCodexCliQuickLaunchMenu();
           existing?.remove();
+          menubar?.querySelector('[data-codex-usage-hud-cli-provider-label="true"]')?.remove();
           codexCliQuickLaunchMenuState.toggle = null;
           codexCliQuickLaunchMenuState.providers = [];
           return;
@@ -5810,6 +5891,7 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
         codexCliQuickLaunchMenuState.toggle = toggle;
         const previousProviders = codexCliQuickLaunchMenuState.providers.join("\u0000");
         codexCliQuickLaunchMenuState.providers = providers;
+        syncCodexCliQuickLaunchProviderLabel(menubar, toggle);
         if (codexCliQuickLaunchMenuState.open && previousProviders !== providers.join("\u0000")) {
           renderCodexCliQuickLaunchMenu();
         }
@@ -5859,6 +5941,7 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
         ctx.observers.clear("codex_cli_quick_launch_menu");
         closeCodexCliQuickLaunchMenu();
         document.querySelector('[data-codex-usage-hud-cli-menu-toggle="true"]')?.remove();
+        document.querySelector('[data-codex-usage-hud-cli-provider-label="true"]')?.remove();
         document.getElementById("codex-usage-hud-codex-cli-menu-style")?.remove();
         codexCliQuickLaunchLayer()?.remove();
         codexCliQuickLaunchMenuState.toggle = null;
@@ -6016,6 +6099,7 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
       openSettingsDiscardConfirm,
       closeSettingsModal,
       applySettingsPayload,
+      syncCodexCliQuickLaunchMenu,
     };
   }
 
@@ -6083,6 +6167,7 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
     activateSettingsProviderTab,
     switchSettingsProvider,
     providerConfigDialogLayer,
+    syncCodexCliQuickLaunchMenu,
     toggleProviderApiKeyVisibility,
     testProviderConnectivityFromDialog,
     applyProviderConnectivityStatus,

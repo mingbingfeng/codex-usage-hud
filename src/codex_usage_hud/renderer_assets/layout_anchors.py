@@ -135,6 +135,15 @@ TEXT = r"""
         return visible(header) ? header.getBoundingClientRect() : null;
       }
 
+      function desktopChromeMissing() {
+        // Splash/loading state: Codex Desktop has not mounted its shell yet.
+        // Panels stay hidden instead of floating over the loading logo; the
+        // menubar check keeps the panels visible when only one anchor lookup
+        // drifts after a Desktop update.
+        if (conversationHeaderElement() || composerElement()) return false;
+        return !document.querySelector('[role="menubar"]');
+      }
+
       function hasAllClasses(node, classes) {
         const set = new Set(String(node?.className || "").split(/\s+/).filter(Boolean));
         return classes.every((name) => set.has(name));

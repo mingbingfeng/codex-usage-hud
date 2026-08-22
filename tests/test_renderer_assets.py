@@ -367,6 +367,40 @@ def test_codex_cli_quick_launch_menu_is_idempotent_and_provider_scoped() -> None
     assert "MutationObserver" in SETTINGS_SHELL
 
 
+def test_codex_cli_menu_shows_active_session_provider_label() -> None:
+    assert "function syncCodexCliQuickLaunchProviderLabel(menubar, toggle)" in SETTINGS_SHELL
+    assert 'data-codex-usage-hud-cli-provider-label="true"' in SETTINGS_SHELL
+    assert "function codexCliQuickLaunchProviderLabelState()" in SETTINGS_SHELL
+    assert "currentPayload()?.activeSessionProvider" in SETTINGS_SHELL
+    assert "hudSettingsFromPayload().app_provider" in SETTINGS_SHELL
+    assert '供应商 ${active}' in SETTINGS_SHELL
+    assert '（默认）' in SETTINGS_SHELL
+    assert ".codex-usage-hud-cli-provider-label[data-mismatch=\"true\"] {" in SETTINGS_SHELL
+    assert "syncCodexCliQuickLaunchProviderLabel(menubar, toggle);" in SETTINGS_SHELL
+    assert 'document.querySelector(\'[data-codex-usage-hud-cli-provider-label="true"]\')?.remove();' in SETTINGS_SHELL
+    # The label sync runs inside the body-wide MutationObserver callback, so
+    # steady state must be DOM-write free or the renderer freezes in a
+    # mutation feedback loop.
+    assert (
+        "label.parentElement !== menubar || label.previousElementSibling !== toggle"
+    ) in SETTINGS_SHELL
+    assert "toggle.insertAdjacentElement(\"afterend\", label);" in SETTINGS_SHELL
+
+
+def test_hud_panels_hide_while_desktop_chrome_is_missing() -> None:
+    assert "function desktopChromeMissing()" in LAYOUT_ANCHORS
+    assert "return !document.querySelector('[role=\"menubar\"]');" in LAYOUT_ANCHORS
+    assert "const chromeMissing = desktopChromeMissing();" in LAYOUT_OBSERVERS
+    assert 'panel.dataset.awaitingChrome = "true";' in LAYOUT_OBSERVERS
+    assert "delete panel.dataset.awaitingChrome;" in LAYOUT_OBSERVERS
+    # While the splash screen is up, the bootstrap observer is the only
+    # wake-up for the panel reveal and must not be killed by its 5s guard.
+    assert "ctx.lifecycle.clearTimeout(window[bootstrapTimerName] || 0);" in LAYOUT_OBSERVERS
+    assert '.codex-usage-hud-panel[data-awaiting-chrome="true"] {' in LAYOUT_STYLE
+    # Session-domain payloads must refresh the label without a settings push.
+    assert "settingsShellDomain.syncCodexCliQuickLaunchMenu?.();" in ROUTER
+
+
 def test_codex_cli_quick_launch_menu_controls_exit_desktop_drag_region() -> None:
     style_start = SETTINGS_SHELL.index('[data-codex-usage-hud-cli-menu-surface="true"] {')
     style_end = SETTINGS_SHELL.index("@keyframes codexUsageHudCliQuickFade", style_start)
