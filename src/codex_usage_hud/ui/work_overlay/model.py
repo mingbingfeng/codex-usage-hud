@@ -135,6 +135,21 @@ def _format_rest_duration(value: object) -> str:
         return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
     return f"{minutes:02d}:{seconds:02d}"
 
+def _rest_credit_actions() -> list[dict[str, object]]:
+    return [
+        *(
+            {
+                "action": "restReminderCredit",
+                "label": f"{minutes}分钟",
+                "minutes": minutes,
+                "primary": False,
+            }
+            for minutes in (3, 5, 10)
+        ),
+        {"action": "restReminderCreditMore", "label": "更多", "primary": False},
+    ]
+
+
 def _rest_reminder_card_copy(
     item: Mapping[str, object],
     *,
@@ -173,16 +188,7 @@ def _rest_reminder_card_copy(
                     "primary": False,
                 }
             )
-        actions.extend(
-            {
-                "action": "restReminderCredit",
-                "label": f"{minutes}分钟",
-                "minutes": minutes,
-                "primary": False,
-            }
-            for minutes in (3, 5, 10)
-        )
-        actions.append({"action": "restReminderCreditMore", "label": "更多", "primary": False})
+        actions.extend(_rest_credit_actions())
         actions.append({"action": "restReminderStart", "label": "开始休息", "primary": True})
     elif phase == "postponed":
         remaining = max(
@@ -191,8 +197,10 @@ def _rest_reminder_card_copy(
         title = "☕ 休息已延迟"
         header_meta = f"今日已休息 {_format_rest_duration(completed_today)}"
         detail = f"{_format_rest_duration(remaining)} 后再次提醒"
+        hint = "如果您已经休息过了，可以点击分钟数按钮标记已休息"
         status = "延迟不计入休息"
         color_status = "tool"
+        actions.extend(_rest_credit_actions())
         actions.append(
             {"action": "restReminderStart", "label": "开始休息", "primary": True}
         )
@@ -208,8 +216,10 @@ def _rest_reminder_card_copy(
         title = "☕ 正在休息"
         header_meta = f"今日已休息 {_format_rest_duration(today)}"
         detail = f"本次已休息 {_format_rest_duration(elapsed)}"
+        hint = "实际休息比计时更长？点击分钟数按钮按实际时长记录并结束"
         status = f"目标 {_format_rest_duration(target)}"
         color_status = "running"
+        actions.extend(_rest_credit_actions())
         actions.append(
             {"action": "restReminderFinish", "label": "提前结束", "primary": True}
         )

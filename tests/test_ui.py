@@ -4040,7 +4040,20 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertEqual(postponed_copy["headerMeta"], "今日已休息 01:05")
         self.assertEqual(postponed_copy["detail"], "10:00 后再次提醒")
         self.assertEqual(postponed_copy["statusText"], "延迟不计入休息")
-        self.assertEqual(postponed_copy["actions"][0]["action"], "restReminderStart")
+        self.assertEqual(
+            [action["action"] for action in postponed_copy["actions"]],
+            [
+                "restReminderCredit",
+                "restReminderCredit",
+                "restReminderCredit",
+                "restReminderCreditMore",
+                "restReminderStart",
+            ],
+        )
+        self.assertEqual(
+            [action.get("minutes") for action in postponed_copy["actions"] if "minutes" in action],
+            [3, 5, 10],
+        )
 
         resting = _rest_reminder_overlay_item(
             {
@@ -4054,7 +4067,16 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertEqual(resting_copy["headerMeta"], "今日已休息 01:35")
         self.assertEqual(resting_copy["detail"], "本次已休息 00:30")
         self.assertEqual(resting_copy["statusText"], "目标 02:00")
-        self.assertEqual(resting_copy["actions"][0]["action"], "restReminderFinish")
+        self.assertEqual(
+            [action["action"] for action in resting_copy["actions"]],
+            [
+                "restReminderCredit",
+                "restReminderCredit",
+                "restReminderCredit",
+                "restReminderCreditMore",
+                "restReminderFinish",
+            ],
+        )
 
     def test_rest_reminder_normalization_rejects_hidden_or_unknown_phase(self) -> None:
         self.assertIsNone(_normalized_rest_reminder({"bubbleVisible": False, "phase": "prompt"}))

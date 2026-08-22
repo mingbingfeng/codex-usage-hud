@@ -358,6 +358,84 @@ class RestReminderSchedulerTests(unittest.TestCase):
         self.assertIsNone(scheduler.seconds_until_prompt_end())
         self.assertIsNotNone(scheduler.seconds_until_wake())
 
+    def test_credit_early_rest_during_postponed_credits_and_rearms(self) -> None:
+        clock = {"now": 0.0}
+        wall = {"now": self.WORK_WALL}
+        scheduler = RestReminderScheduler(
+            idle_seconds_provider=lambda: 0.0,
+            message_picker=lambda: "rest",
+            clock=lambda: clock["now"],
+            wall_clock=lambda: wall["now"],
+        )
+        scheduler.configure(
+            RestReminderConfig(
+                enabled=True,
+                interval_minutes=1,
+                postpone_minutes=10,
+                idle_reset_minutes=0,
+            ),
+            force_reset=True,
+        )
+        clock["now"] = 61.0
+        wall["now"] += 61.0
+        self.assertIsNotNone(scheduler.tick())
+        self.assertTrue(scheduler.postpone())
+        self.assertEqual(scheduler.phase, "postponed")
+
+        wall["now"] += 120.0
+        self.assertTrue(scheduler.credit_early_rest(5))
+        self.assertEqual(scheduler.phase, "focus")
+        self.assertFalse(scheduler.resting)
+        self.assertEqual(scheduler.today_rested_seconds, 300)
+        self.assertEqual(scheduler.today_rested_count, 1)
+        self.assertEqual(scheduler.last_rest_duration_seconds, 300)
+        transition = scheduler.take_transition()
+        assert transition is not None
+        self.assertEqual(transition["kind"], "credited_early")
+        self.assertEqual(transition["restDurationSeconds"], 300)
+        self.assertEqual(scheduler.next_fire_at, clock["now"] + 60.0)
+
+    def test_credit_early_rest_during_resting_replaces_elapsed_with_stated_minutes(self) -> None:
+        clock = {"now": 0.0}
+        wall = {"now": self.WORK_WALL}
+        scheduler = RestReminderScheduler(
+            idle_seconds_provider=lambda: 0.0,
+            message_picker=lambda: "rest",
+            clock=lambda: clock["now"],
+            wall_clock=lambda: wall["now"],
+        )
+        scheduler.configure(
+            RestReminderConfig(
+                enabled=True,
+                interval_minutes=1,
+                break_minutes=10,
+                idle_reset_minutes=0,
+            ),
+            force_reset=True,
+        )
+        clock["now"] = 61.0
+        wall["now"] += 61.0
+        self.assertIsNotNone(scheduler.tick())
+        self.assertTrue(scheduler.start_rest())
+        self.assertTrue(scheduler.resting)
+
+        clock["now"] += 90.0
+        wall["now"] += 90.0
+        self.assertEqual(scheduler.today_rested_seconds, 90)
+        self.assertTrue(scheduler.credit_early_rest(5))
+        self.assertEqual(scheduler.phase, "focus")
+        self.assertFalse(scheduler.resting)
+        self.assertEqual(scheduler.rest_started_at_wall, 0.0)
+        # The stated minutes replace the in-app elapsed rest, not add to it.
+        self.assertEqual(scheduler.today_rested_seconds, 300)
+        self.assertEqual(scheduler.today_rested_count, 1)
+        self.assertEqual(scheduler.last_rest_duration_seconds, 300)
+        transition = scheduler.take_transition()
+        assert transition is not None
+        self.assertEqual(transition["kind"], "credited_early")
+        self.assertEqual(transition["todayRestedSeconds"], 300)
+        self.assertEqual(scheduler.next_fire_at, clock["now"] + 60.0)
+
     def test_presenter_keeps_due_prompt_visible_until_explicit_choice(self) -> None:
         clock = {"now": 0.0}
         scheduler = RestReminderScheduler(

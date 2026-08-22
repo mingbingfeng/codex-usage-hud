@@ -20,9 +20,12 @@ from .core.session_cleanup import (
 from .core.session_transfer import CodexAppServerClient
 from .core.deleted_usage import DeletedUsageLedger, DeletedUsageLedgerError
 from .platforms.codex_desktop_threads import CodexDesktopThreadLifecycle
+from .runtime_paths import hud_runtime_dir
 
 
 _LOGGER = logging.getLogger("codex_usage_hud.session_cleanup_runtime")
+
+MIGRATED_SESSION_SOURCES_FILENAME = "migrated_session_sources.json"
 
 
 class DeletedUsageTransactions:
@@ -640,5 +643,10 @@ def _build_session_cleanup_manager(context: object) -> SessionCleanupManager:
         transfer_max_workers=max(
             1,
             min(8, int(getattr(context, "session_transfer_max_workers", 4) or 4)),
+        ),
+        # Migrated sources must stay hidden even after a HUD restart while
+        # Desktop's state-db deletion lags behind its confirmed notification.
+        migrated_source_store=(
+            hud_runtime_dir() / MIGRATED_SESSION_SOURCES_FILENAME
         ),
     )

@@ -1255,9 +1255,9 @@ def handle_general_command(
                 except (TypeError, ValueError):
                     minutes = 0
                 return _status(
-                    f"已记录提前休息 {minutes} 分钟。"
+                    f"已记录休息 {minutes} 分钟，新一轮专注计时已开始。"
                     if ok
-                    else "提前休息时长无效或当前状态不能记录。",
+                    else "休息时长无效或当前状态不能记录。",
                     kind="" if ok else "error",
                 )
             if action == "restReminderPostpone":

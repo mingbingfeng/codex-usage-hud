@@ -3453,6 +3453,10 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
         }).filter((item) => (
           (item?.transferable !== false || item?.archived === true)
           && !completedSourceIds.has(String(item?.id || "").trim())
+          // A verified target copy already exists for this source; its
+          // deletion is still pending, so do not offer a duplicate copy.
+          // (The source stays listed in storage management for deletion.)
+          && item?.pendingSourceCleanup !== true
           && String(item?.modelProvider || "").trim().toLowerCase() === source
         )).map((item) => item?.archived === true
           ? {
@@ -3752,6 +3756,25 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
         return true;
       }
 
+      function sessionTransferErrorHint(error) {
+        const text = String(error || "");
+        if (
+          /thread[- ]store internal error/i.test(text)
+          || /thread history projection/i.test(text)
+          || /expected ordinal/i.test(text)
+          || /failed to prepare paginated fork/i.test(text)
+        ) {
+          return "该会话的本地历史记录不一致（Codex 已知问题，暂未修复）：会话仍可在原 Provider 打开继续使用，但目前无法被复制或迁移。可先升级 Codex CLI 后重试。";
+        }
+        return "";
+      }
+
+      function sessionTransferErrorHtml(title, error) {
+        const errorText = String(error || "未知错误");
+        const hint = sessionTransferErrorHint(errorText);
+        return `<div class="codex-usage-hud-session-transfer-error">${escapeHtml(title)}：${escapeHtml(errorText)}${hint ? `<small data-kind="hint">${escapeHtml(hint)}</small>` : ""}</div>`;
+      }
+
       function sessionTransferResultHtml(operation) {
         const action = String(operation?.action || "");
         const state = String(operation?.state || "").toLowerCase();
@@ -3784,12 +3807,12 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
           : "";
         const errors = [
           operationError
-            ? `<div class="codex-usage-hud-session-transfer-error">${escapeHtml(operationError)}</div>`
+            ? sessionTransferErrorHtml("会话迁移", operationError)
             : "",
           ...(Array.isArray(operation?.results) && state !== "completed" ? operation.results : [])
           .filter((item) => String(item?.error || "").trim())
           .slice(0, 4)
-          .map((item) => `<div class="codex-usage-hud-session-transfer-error">${escapeHtml(item?.title || "会话")}：${escapeHtml(item?.error || "未知错误")}</div>`),
+          .map((item) => sessionTransferErrorHtml(item?.title || "会话", item?.error)),
         ].join("");
         return `<div class="codex-usage-hud-session-transfer-result" data-kind="${state === "completed" ? "success" : "error"}"><strong>${escapeHtml(headline)}</strong><span>${escapeHtml(details)}</span>${targetNotice}${errors}</div>`;
       }

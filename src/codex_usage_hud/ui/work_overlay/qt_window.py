@@ -484,10 +484,17 @@ class OverlayWindow(OverlayTransitionsMixin, OverlayRenderingMixin, QWidget):
                 return
             action = str(item.get("action") or "").strip()
             if action == "restReminderCreditMore":
+                phase = str(item.get("phase") or "").strip()
+                if phase == "resting":
+                    dialog_title, dialog_label = "记录休息", "本次实际已休息了多少分钟？"
+                elif phase == "postponed":
+                    dialog_title, dialog_label = "记录休息", "我已休息了多少分钟？"
+                else:
+                    dialog_title, dialog_label = "提前休息", "我已提前休息了多少分钟？"
                 minutes, accepted = QInputDialog.getInt(
                     self,
-                    "提前休息",
-                    "我已提前休息了多少分钟？",
+                    dialog_title,
+                    dialog_label,
                     15,
                     1,
                     1440,

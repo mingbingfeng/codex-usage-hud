@@ -4250,6 +4250,13 @@ TEXT = r"""
             overflow-wrap: anywhere;
             color: #ffcf9a;
           }
+          #${rootId} .codex-usage-hud-session-transfer-error small[data-kind="hint"] {
+            display: block;
+            margin-top: 3px;
+            color: #b8c0cc;
+            font-size: 11px;
+            line-height: 1.5;
+          }
           #${rootId} .codex-usage-hud-session-transfer-target-notice {
             overflow-wrap: anywhere;
             color: #ffcf9a;

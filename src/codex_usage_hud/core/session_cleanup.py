@@ -86,7 +86,7 @@ class SessionCleanupItem:
     _descendant_ids: tuple[str, ...] = field(default=(), repr=False, compare=False)
     _rollout_paths: tuple[Path, ...] = field(default=(), repr=False, compare=False)
 
-    def to_payload(self) -> dict[str, object]:
+    def to_payload(self, *, pending_source_cleanup: bool = False) -> dict[str, object]:
         return {
             "id": self.id,
             "title": self.title,
@@ -102,6 +102,7 @@ class SessionCleanupItem:
             "transferBlockedReason": self.transfer_blocked_reason,
             "modelProvider": self.model_provider,
             "clientKind": self.client_kind,
+            "pendingSourceCleanup": bool(pending_source_cleanup),
         }
 
 
@@ -146,6 +147,94 @@ def _normalise_fork_target_uuid(value: object) -> str:
         return str(uuid.UUID(candidate))
     except (AttributeError, TypeError, ValueError):
         return ""
+
+
+_MIGRATED_SOURCE_STORE_KEY = "migratedSourceIds"
+_PENDING_CLEANUP_SOURCE_STORE_KEY = "pendingCleanupSourceIds"
+
+
+def _load_migrated_source_store(path: Path | None) -> dict[str, set[str]]:
+    """Read persisted transfer bookkeeping, tolerating any damage.
+
+    Returns ``{"migrated": ..., "pendingCleanup": ...}`` where ``migrated``
+    holds ids whose source deletion was confirmed and ``pendingCleanup``
+    holds ids whose target copy is verified but the source is retained.
+    """
+    empty = {"migrated": set(), "pendingCleanup": set()}
+    if path is None:
+        return {
+            key: set(value) for key, value in empty.items()
+        }
+    try:
+        raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {key: set(value) for key, value in empty.items()}
+    if not isinstance(raw, Mapping):
+        return {key: set(value) for key, value in empty.items()}
+    loaded: dict[str, set[str]] = {}
+    for store_key, name in (
+        (_MIGRATED_SOURCE_STORE_KEY, "migrated"),
+        (_PENDING_CLEANUP_SOURCE_STORE_KEY, "pendingCleanup"),
+    ):
+        values = raw.get(store_key)
+        if not isinstance(values, Sequence) or isinstance(
+            values,
+            (str, bytes, bytearray),
+        ):
+            values = []
+        loaded[name] = {
+            canonical
+            for value in values
+            if (canonical := _canonical_uuid(value))
+        }
+    return loaded
+
+
+def _write_migrated_source_store(
+    path: Path | None,
+    migrated: Iterable[str],
+    pending_cleanup: Iterable[str],
+) -> bool:
+    """Persist transfer bookkeeping atomically; best effort only.
+
+    A failed write must never fail a transfer whose Desktop deletion already
+    committed: the in-memory sets keep protecting the current HUD process and
+    only restart resilience is lost.
+    """
+    if path is None:
+        return False
+    path = Path(path)
+    payload = json.dumps(
+        {
+            _MIGRATED_SOURCE_STORE_KEY: sorted(
+                canonical
+                for value in migrated
+                if (canonical := _canonical_uuid(value))
+            ),
+            _PENDING_CLEANUP_SOURCE_STORE_KEY: sorted(
+                canonical
+                for value in pending_cleanup
+                if (canonical := _canonical_uuid(value))
+            ),
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+    temporary = path.with_name(f"{path.name}.tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with temporary.open("w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except (OSError, UnicodeError):
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return False
+    return True
 
 
 def _read_only_connection(path: Path) -> sqlite3.Connection:
@@ -309,6 +398,7 @@ class SessionCleanupManager:
         ] = _TRANSFER_READY_RETRY_DELAYS_SECONDS,
         transfer_max_workers: int = 1,
         sleep: Callable[[float], None] = time.sleep,
+        migrated_source_store: Path | None = None,
     ) -> None:
         self.state_db_path = Path(state_db_path)
         self.sessions_root = Path(sessions_root)
@@ -343,7 +433,20 @@ class SessionCleanupManager:
         # fresh scan cannot resurrect a session that already belongs to
         # another provider. Keyed by canonical thread id (stable across
         # scans and opaque-id regeneration), never by the ephemeral item id.
-        self._migrated_source_ids: set[str] = set()
+        # Desktop's state-db deletion can lag behind its confirmed delete
+        # notification, so both sets are also persisted across HUD restarts.
+        # ``_pending_cleanup_source_ids`` records sources whose target copy
+        # is verified but whose deletion is not confirmed yet; they stay in
+        # the inventory (still deletable) but are flagged so the transfer
+        # dialog cannot offer a duplicate copy.
+        self._migrated_source_store = (
+            Path(migrated_source_store)
+            if migrated_source_store is not None
+            else None
+        )
+        _stored_sources = _load_migrated_source_store(self._migrated_source_store)
+        self._migrated_source_ids: set[str] = _stored_sources["migrated"]
+        self._pending_cleanup_source_ids: set[str] = _stored_sources["pendingCleanup"]
 
     @staticmethod
     def _idle_operation() -> dict[str, object]:
@@ -382,7 +485,14 @@ class SessionCleanupManager:
             "operation": dict(self._operation),
         }
         if include_sessions:
-            payload["sessions"] = [item.to_payload() for item in sessions]
+            payload["sessions"] = [
+                item.to_payload(
+                    pending_source_cleanup=(
+                        item._session_id in self._pending_cleanup_source_ids
+                    ),
+                )
+                for item in sessions
+            ]
         return payload
 
     def mark_migrated_sources(self, session_ids: Iterable[str]) -> None:
@@ -397,6 +507,59 @@ class SessionCleanupManager:
             canonical = _canonical_uuid(session_id)
             if canonical:
                 self._migrated_source_ids.add(canonical)
+                self._pending_cleanup_source_ids.discard(canonical)
+        # Persist so a HUD restart still hides sources whose Desktop state-db
+        # deletion lags behind its confirmed delete notification.
+        self._persist_source_transfer_store()
+
+    def mark_pending_cleanup_sources(self, session_ids: Iterable[str]) -> None:
+        """Record sources with a verified target copy but a retained source.
+
+        The transfer is usable from the target provider, yet the source
+        remains locally.  These stay in the inventory (they are still real,
+        deletable sessions) but carry ``pendingSourceCleanup`` so the
+        transfer dialog will not offer a duplicate copy while the Desktop
+        deletion is unresolved.
+        """
+        changed = False
+        for session_id in session_ids:
+            canonical = _canonical_uuid(session_id)
+            if canonical and canonical not in self._pending_cleanup_source_ids:
+                self._pending_cleanup_source_ids.add(canonical)
+                changed = True
+        if changed:
+            self._persist_source_transfer_store()
+
+    def _persist_source_transfer_store(self) -> None:
+        _write_migrated_source_store(
+            self._migrated_source_store,
+            self._migrated_source_ids,
+            self._pending_cleanup_source_ids,
+        )
+
+    def _prune_migrated_source_ids(
+        self,
+        records: Mapping[str, "_ThreadRecord"],
+    ) -> None:
+        """Drop persisted bookkeeping ids whose state rows are finally gone.
+
+        Once Desktop's deletion has landed in the state DB the id can no
+        longer resurrect from a scan, so pruning only keeps the persisted
+        store bounded across long-lived installations.
+        """
+        changed = False
+        for attribute in ("_migrated_source_ids", "_pending_cleanup_source_ids"):
+            current = getattr(self, attribute)
+            if not current:
+                continue
+            lingering = {
+                session_id for session_id in current if session_id in records
+            }
+            if len(lingering) != len(current):
+                setattr(self, attribute, lingering)
+                changed = True
+        if changed:
+            self._persist_source_transfer_store()
 
     def workdir_for_item(self, item_id: object, revision: object) -> Path | None:
         """Resolve one current inventory item without exposing its path in the payload."""
@@ -547,6 +710,7 @@ class SessionCleanupManager:
         report("sessions", "Reading session index", 1, 10)
         capability = self.probe_capability()
         records, parents, edge_states, unsafe_ids, unresolved = self._load_state()
+        self._prune_migrated_source_ids(records)
         report("merge", "Merging root sessions and subagents", 2, 55)
         titles = self._session_index_titles()
         current_ids = self._protected_ids(self.current_session_ids)
@@ -1834,6 +1998,30 @@ class SessionCleanupManager:
         failed_count = total - copied_count
         target_failed_count = total - copied_count
         unmigrated_count = total - copied_count if normalized_mode == "migrate" else 0
+        if normalized_mode == "migrate":
+            # Verified targets with a retained source must not be offered for a
+            # duplicate copy when the dialog reopens (the operation-results
+            # filter only survives while the payload operation still matches
+            # the dialog's current provider pair).  They stay listed for the
+            # storage surface, flagged via ``pendingSourceCleanup``.
+            items_by_id = {item.id: item for item in items}
+            pending_family_ids: list[str] = []
+            for result in results:
+                if (
+                    not (
+                        result.get("targetVisible")
+                        and result.get("targetResumable")
+                    )
+                    or result.get("sourceDeleted")
+                ):
+                    continue
+                source_item = items_by_id.get(str(result.get("id")))
+                if source_item is None:
+                    continue
+                pending_family_ids.append(source_item._session_id)
+                pending_family_ids.extend(source_item._descendant_ids)
+            if pending_family_ids:
+                self.mark_pending_cleanup_sources(pending_family_ids)
         # A transfer is successful once every destination is durable, visible,
         # and resumable.  Source cleanup is deliberately best effort: a stale
         # Desktop rollout must not invalidate a usable cross-provider copy.

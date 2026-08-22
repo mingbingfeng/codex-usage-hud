@@ -171,6 +171,10 @@ def test_provider_settings_expose_session_copy_and_transfer_workflow() -> None:
     assert "operationSource" in SETTINGS_SHELL
     assert "function sessionTransferCompletedSourceIds" in SETTINGS_SHELL
     assert "targetVisible === true && item?.targetResumable === true" in SETTINGS_SHELL
+    # Sources with a verified target copy but a retained source must never be
+    # re-offered for a duplicate copy after the dialog reopens.
+    assert "pendingSourceCleanup" in SETTINGS_SHELL
+    assert "item?.pendingSourceCleanup !== true" in SETTINGS_SHELL
     assert 'availability: "all"' in SETTINGS_SHELL
     assert "item?.transferable !== false || item?.archived === true" in SETTINGS_SHELL
     assert "已归档，请先解除归档后再复制或迁移" in SETTINGS_SHELL
@@ -209,6 +213,33 @@ def test_provider_settings_expose_session_copy_and_transfer_workflow() -> None:
         assert function_source.index(
             "normaliseSessionTransferTargetProvider(settings, source)"
         ) < function_source.index("const operation = sessionTransferOperation();")
+
+
+def test_session_transfer_failure_errors_explain_thread_store_ordinal_issue() -> None:
+    # Codex upstream rejects thread/fork for rollouts whose history ordinals
+    # are inconsistent (openai/codex#38248, #38317).  The dialog must append
+    # an actionable Chinese hint instead of only echoing the raw error.
+    assert "function sessionTransferErrorHint" in SETTINGS_SHELL
+    assert "function sessionTransferErrorHtml" in SETTINGS_SHELL
+    assert "/failed to prepare paginated fork/i" in SETTINGS_SHELL
+    assert "/thread history projection/i" in SETTINGS_SHELL
+    assert "/expected ordinal/i" in SETTINGS_SHELL
+    assert "目前无法被复制或迁移" in SETTINGS_SHELL
+    assert "仍可在原 Provider 打开继续使用" in SETTINGS_SHELL
+    assert '<small data-kind="hint">' in SETTINGS_SHELL
+    assert ".codex-usage-hud-session-transfer-error small[data-kind=\"hint\"]" in (
+        LAYOUT_STYLE
+    )
+    hint_start = SETTINGS_SHELL.index("function sessionTransferErrorHint")
+    hint_end = SETTINGS_SHELL.index("\n      function ", hint_start + 1)
+    hint_source = SETTINGS_SHELL[hint_start:hint_end]
+    # Non-matching errors must keep the original rendering untouched.
+    assert 'return "";' in hint_source
+    error_html_start = SETTINGS_SHELL.index("function sessionTransferErrorHtml")
+    error_html_end = SETTINGS_SHELL.index("\n      function ", error_html_start + 1)
+    error_html_source = SETTINGS_SHELL[error_html_start:error_html_end]
+    assert "sessionTransferErrorHint(errorText)" in error_html_source
+    assert 'escapeHtml(title)' in error_html_source
 
 
 def test_session_transfer_reuses_session_management_scan_state_and_controls() -> None:

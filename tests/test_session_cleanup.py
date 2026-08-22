@@ -699,6 +699,191 @@ class SessionCleanupManagerTests(unittest.TestCase):
         fresh_titles = [row["title"] for row in fresh["sessions"]]
         self.assertEqual(fresh_titles, ["Archived"])
 
+    def test_migrated_sources_persist_across_manager_restart(self) -> None:
+        # Regression: reopening the transfer dialog after a HUD restart builds
+        # a fresh manager.  A migrated source whose Desktop state-db deletion
+        # lags behind its confirmed notification must stay hidden.
+        fixture = self._fixture()
+        temporary, root, state, index, _rollouts, _manager = fixture
+        self.addCleanup(temporary.cleanup)
+        store = root / "hud" / "migrated_session_sources.json"
+        manager = SessionCleanupManager(
+            state_db_path=state,
+            sessions_root=_manager.sessions_root,
+            session_index_path=index,
+            token_factory=iter(f"persist-{i}" for i in range(100)).__next__,
+            migrated_source_store=store,
+        )
+        payload = manager.scan(request_id="transfer-scan")
+        root_row = next(row for row in payload["sessions"] if row["title"] == "Root")
+
+        def confirmed_but_lagging(thread_id: str, _cwd: str) -> dict[str, object]:
+            return {
+                "threadId": thread_id,
+                "archived": True,
+                "deleted": True,
+                "archiveNotification": True,
+                "deleteNotification": True,
+                "verified": True,
+                "error": "",
+            }
+
+        result = manager.transfer(
+            [root_row["id"]],
+            payload["revision"],
+            "openai-custom",
+            "routin",
+            "migrate",
+            fork=lambda *_args: "10000000-0000-4000-8000-000000000035",
+            materialize=lambda *_args: None,
+            verify=lambda *_args: True,
+            desktop_source_preflight=self._confirmed_desktop_preflight,
+            desktop_source_lifecycle=confirmed_but_lagging,
+            request_id="transfer-persist",
+        )
+        self.assertEqual(result["operation"]["state"], "completed")
+
+        restarted = SessionCleanupManager(
+            state_db_path=state,
+            sessions_root=_manager.sessions_root,
+            session_index_path=index,
+            token_factory=iter(f"restart-{i}" for i in range(100)).__next__,
+            migrated_source_store=store,
+        )
+        fresh = restarted.scan(request_id="restart-scan")
+        self.assertEqual(
+            [row["title"] for row in fresh["sessions"]],
+            ["Archived"],
+        )
+
+    def test_migrated_source_store_prunes_fully_deleted_rows(self) -> None:
+        fixture = self._fixture()
+        temporary, root, state, index, _rollouts, _manager = fixture
+        self.addCleanup(temporary.cleanup)
+        store = root / "migrated_session_sources.json"
+        manager = SessionCleanupManager(
+            state_db_path=state,
+            sessions_root=_manager.sessions_root,
+            session_index_path=index,
+            token_factory=iter(f"prune-{i}" for i in range(100)).__next__,
+            migrated_source_store=store,
+        )
+        manager.mark_migrated_sources((ROOT_ID, CHILD_ID))
+        persisted = json.loads(store.read_text(encoding="utf-8"))
+        self.assertEqual(
+            sorted(persisted["migratedSourceIds"]),
+            sorted([ROOT_ID, CHILD_ID]),
+        )
+
+        # Desktop deletion finally lands in the state DB; the next scan may
+        # drop the ids because they can no longer resurrect from any scan.
+        with closing(sqlite3.connect(state)) as connection, connection:
+            connection.execute(
+                "DELETE FROM threads WHERE id IN (?, ?)", (ROOT_ID, CHILD_ID)
+            )
+        manager.scan(request_id="prune-scan")
+
+        persisted = json.loads(store.read_text(encoding="utf-8"))
+        self.assertEqual(persisted["migratedSourceIds"], [])
+
+    def test_retained_sources_are_recorded_as_pending_cleanup(self) -> None:
+        fixture = self._fixture()
+        temporary, root, state, index, _rollouts, _manager = fixture
+        self.addCleanup(temporary.cleanup)
+        store = root / "migrated_session_sources.json"
+        manager = SessionCleanupManager(
+            state_db_path=state,
+            sessions_root=_manager.sessions_root,
+            session_index_path=index,
+            token_factory=iter(f"retain-{i}" for i in range(100)).__next__,
+            migrated_source_store=store,
+        )
+        payload = manager.scan(request_id="transfer-scan")
+        root_row = next(row for row in payload["sessions"] if row["title"] == "Root")
+
+        def rejected_lifecycle(thread_id: str, _cwd: str) -> dict[str, object]:
+            return {
+                "threadId": thread_id,
+                "archived": True,
+                "deleted": False,
+                "archiveNotification": True,
+                "deleteNotification": False,
+                "verified": False,
+                "error": "desktop-delete-failed",
+            }
+
+        result = manager.transfer(
+            [root_row["id"]],
+            payload["revision"],
+            "openai-custom",
+            "routin",
+            "migrate",
+            fork=lambda *_args: "10000000-0000-4000-8000-000000000036",
+            materialize=lambda *_args: None,
+            verify=lambda *_args: True,
+            desktop_source_preflight=self._confirmed_desktop_preflight,
+            desktop_source_lifecycle=rejected_lifecycle,
+            request_id="transfer-retained",
+        )
+        row = result["operation"]["results"][0]
+        self.assertTrue(row["sourceRetained"])
+        self.assertFalse(row["sourceDeleted"])
+
+        # Retained sources must never be recorded as fully migrated...
+        persisted = json.loads(store.read_text(encoding="utf-8"))
+        self.assertEqual(persisted["migratedSourceIds"], [])
+        # ...but their verified copy is bookkept so the transfer dialog can
+        # refuse a duplicate copy after a reopen or restart.
+        self.assertEqual(
+            sorted(persisted["pendingCleanupSourceIds"]),
+            sorted([ROOT_ID, CHILD_ID]),
+        )
+        # The source stays listed for storage management, now flagged.
+        rows = {item["title"]: item for item in result["sessions"]}
+        self.assertTrue(rows["Root"]["pendingSourceCleanup"])
+        self.assertFalse(rows["Archived"]["pendingSourceCleanup"])
+
+    def test_pending_cleanup_flag_survives_rescan_and_restart(self) -> None:
+        fixture = self._fixture()
+        temporary, root, state, index, _rollouts, _manager = fixture
+        self.addCleanup(temporary.cleanup)
+        store = root / "migrated_session_sources.json"
+        manager = SessionCleanupManager(
+            state_db_path=state,
+            sessions_root=_manager.sessions_root,
+            session_index_path=index,
+            token_factory=iter(f"flag-{i}" for i in range(100)).__next__,
+            migrated_source_store=store,
+        )
+        payload = manager.scan(request_id="transfer-scan")
+        root_row = next(row for row in payload["sessions"] if row["title"] == "Root")
+        manager.mark_pending_cleanup_sources((ROOT_ID, CHILD_ID))
+
+        fresh = manager.scan(request_id="rescan")
+        rows = {item["title"]: item for item in fresh["sessions"]}
+        self.assertTrue(rows["Root"]["pendingSourceCleanup"])
+
+        restarted = SessionCleanupManager(
+            state_db_path=state,
+            sessions_root=_manager.sessions_root,
+            session_index_path=index,
+            token_factory=iter(f"restart-{i}" for i in range(100)).__next__,
+            migrated_source_store=store,
+        )
+        restarted_payload = restarted.scan(request_id="restart-scan")
+        rows = {item["title"]: item for item in restarted_payload["sessions"]}
+        self.assertTrue(rows["Root"]["pendingSourceCleanup"])
+
+        # A later confirmed deletion moves the id out of pending cleanup.
+        restarted.mark_migrated_sources((ROOT_ID, CHILD_ID))
+        self.assertNotIn(ROOT_ID, restarted._pending_cleanup_source_ids)
+        persisted = json.loads(store.read_text(encoding="utf-8"))
+        self.assertEqual(persisted["pendingCleanupSourceIds"], [])
+        self.assertEqual(
+            sorted(persisted["migratedSourceIds"]),
+            sorted([ROOT_ID, CHILD_ID]),
+        )
+
     def test_session_transfer_migrate_retains_source_without_desktop_cleanup_channel(
         self,
     ) -> None:

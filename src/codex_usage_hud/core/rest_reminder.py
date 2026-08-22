@@ -755,8 +755,12 @@ class RestReminderScheduler:
         return True
 
     def credit_early_rest(self, minutes: object, now: float | None = None) -> bool:
-        """Credit a rest the user already took before this reminder."""
-        if self._phase not in {"prompt", "postponed"}:
+        """Credit a rest the user reports already having taken.
+
+        During an active rest the stated minutes replace the in-app timing,
+        so the wall interval measured so far is discarded rather than added.
+        """
+        if self._phase not in {"prompt", "postponed", "resting"}:
             return False
         try:
             amount = int(minutes)  # type: ignore[arg-type]
@@ -771,6 +775,8 @@ class RestReminderScheduler:
         current = self._clock() if now is None else float(now)
         wall_now = float(self._wall_clock())
         duration = float(amount) * 60.0
+        if self.resting:
+            self._clear_rest()
         self._refresh_daily_date(wall_now)
         self._daily_rested_seconds += duration
         self._daily_rested_count += 1
