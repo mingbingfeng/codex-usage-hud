@@ -3394,6 +3394,9 @@ class BudgetHelperTests(unittest.TestCase):
             _work_overlay_terminal_item_tasks={
                 "copied-session": source_task_started_at.isoformat(),
             },
+            _work_overlay_terminal_completion_prompts={
+                "copied-session": "source task",
+            },
         )
         cached_inherited = WorkStatusItem(
             id="copied-session",
@@ -3424,6 +3427,7 @@ class BudgetHelperTests(unittest.TestCase):
             session_started_at=target_started_at,
             task_started_at=source_task_started_at,
             task_completed_at=now,
+            task_prompt="continue after copy",
         )
         completed.request.updated_at = now
 
@@ -7340,7 +7344,7 @@ with tempfile.TemporaryDirectory() as temp_dir:
 
         self.assertEqual([item.id for item in items], ["session-current"])
 
-    def test_fresh_historical_completed_overlay_item_shows_on_startup(self) -> None:
+    def test_fresh_historical_completed_overlay_item_hides_on_startup(self) -> None:
         now = datetime.now().astimezone()
         current_snapshot = ParsedSession(
             session_id="session-current",
@@ -7393,10 +7397,12 @@ with tempfile.TemporaryDirectory() as temp_dir:
 
         self.assertEqual(
             [item.id for item in items],
-            ["session-current", "session-history"],
+            ["session-current"],
         )
 
-    def test_current_completed_overlay_item_shows_on_startup(self) -> None:
+    def test_current_completed_overlay_item_hides_on_startup_without_active_state(
+        self,
+    ) -> None:
         parser = JsonlSessionParser()
         now = datetime.now().astimezone()
 
@@ -7442,7 +7448,143 @@ with tempfile.TemporaryDirectory() as temp_dir:
 
             items = active_work_items_for_snapshot(context, current_snapshot, paths[0])
 
-        self.assertEqual([item.id for item in items], ["session-history-0"])
+        self.assertEqual(items, [])
+
+    def test_two_unseen_recent_sessions_do_not_create_completion_bubbles(self) -> None:
+        now = datetime.now().astimezone()
+        seen_task_keys: set[str] = set()
+        completed_items = [
+            WorkStatusItem(
+                id="old-session-a",
+                session_id="old-session-a",
+                title="Old session A",
+                status="recent",
+                status_label="刚完成",
+                detail="old completion",
+                task_started_at=now - timedelta(seconds=10),
+                started_at=now - timedelta(seconds=10),
+                updated_at=now - timedelta(seconds=2),
+                current=True,
+            ),
+            WorkStatusItem(
+                id="old-session-b",
+                session_id="old-session-b",
+                title="Old session B",
+                status="recent",
+                status_label="刚完成",
+                detail="old completion",
+                task_started_at=now - timedelta(seconds=9),
+                started_at=now - timedelta(seconds=9),
+                updated_at=now - timedelta(seconds=1),
+                current=False,
+            ),
+        ]
+
+        visible = overlay_projection.select_visible_items(
+            completed_items,
+            item_limit=4,
+            seen_task_keys=seen_task_keys,
+            now=now,
+            stale_seconds=20.0,
+            runtime_started_at=now,
+        )
+
+        self.assertEqual(visible, [])
+        self.assertEqual(seen_task_keys, set())
+
+    def test_same_task_final_answer_then_complete_stays_suppressed(self) -> None:
+        now = datetime.now().astimezone()
+        task_started_at = now - timedelta(seconds=20)
+        final_answer_at = now - timedelta(seconds=3)
+        context = SimpleNamespace(
+            sessions_root=Path(tempfile.gettempdir()) / "missing-codex-work-root",
+            parser=JsonlSessionParser(),
+            active_session_tracker=None,
+            work_overlay_started_at=now - timedelta(seconds=10),
+        )
+        final_answer = ParsedSession(
+            session_id="same-task-session",
+            task_prompt="same task",
+            task_started_at=task_started_at,
+            final_answer_at=final_answer_at,
+            request=RequestTokens(
+                status="confirmed",
+                started_at=task_started_at,
+                updated_at=final_answer_at,
+            ),
+        )
+        task_complete = replace(
+            final_answer,
+            task_completed_at=now - timedelta(seconds=2),
+            request=replace(
+                final_answer.request,
+                started_at=now - timedelta(seconds=1),
+                updated_at=now - timedelta(seconds=2),
+            ),
+        )
+
+        self.assertEqual(active_work_items_for_snapshot(context, final_answer, None), [])
+        self.assertEqual(
+            active_work_items_for_snapshot(context, task_complete, None),
+            [],
+        )
+
+    def test_work_overlay_does_not_complete_task_started_before_runtime(self) -> None:
+        now = datetime.now().astimezone()
+        runtime_started_at = now - timedelta(seconds=10)
+        task_started_at = runtime_started_at - timedelta(seconds=1)
+        context = SimpleNamespace(
+            sessions_root=Path(tempfile.gettempdir()) / "missing-codex-work-root",
+            parser=JsonlSessionParser(),
+            active_session_tracker=None,
+            work_overlay_started_at=runtime_started_at,
+        )
+        running = ParsedSession(
+            session_id="pre-runtime-session",
+            task_started_at=task_started_at,
+            request=RequestTokens(status="running", started_at=task_started_at),
+        )
+        completed = replace(
+            running,
+            task_completed_at=now,
+            request=replace(running.request, status="confirmed", updated_at=now),
+        )
+
+        running_items = active_work_items_for_snapshot(context, running, None)
+        completed_items = active_work_items_for_snapshot(context, completed, None)
+
+        self.assertEqual(running_items[0].status, "running")
+        self.assertEqual(completed_items, [])
+
+    def test_work_overlay_completed_transition_requires_runtime_active_state(self) -> None:
+        now = datetime.now().astimezone()
+        runtime_started_at = now - timedelta(seconds=10)
+        task_started_at = runtime_started_at + timedelta(seconds=1)
+        context = SimpleNamespace(
+            sessions_root=Path(tempfile.gettempdir()) / "missing-codex-work-root",
+            parser=JsonlSessionParser(),
+            active_session_tracker=None,
+            work_overlay_started_at=runtime_started_at,
+        )
+        running = ParsedSession(
+            session_id="post-runtime-session",
+            task_started_at=task_started_at,
+            request=RequestTokens(status="running", started_at=task_started_at),
+        )
+        completed = replace(
+            running,
+            task_completed_at=now,
+            request=replace(running.request, status="confirmed", updated_at=now),
+        )
+
+        self.assertEqual(
+            active_work_items_for_snapshot(context, running, None)[0].status,
+            "running",
+        )
+        completed_items = active_work_items_for_snapshot(context, completed, None)
+
+        self.assertEqual(len(completed_items), 1)
+        self.assertEqual(completed_items[0].status, "recent")
 
     def test_aborted_task_does_not_stay_active(self) -> None:
         parser = JsonlSessionParser()

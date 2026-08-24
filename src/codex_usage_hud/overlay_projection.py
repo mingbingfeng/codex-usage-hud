@@ -191,6 +191,27 @@ def item_updated_seconds(item: WorkStatusItem) -> float:
     return updated_at.timestamp() if updated_at is not None else 0.0
 
 
+def _item_started_at(item: WorkStatusItem) -> datetime | None:
+    return item.task_started_at or item.started_at or item.session_started_at
+
+
+def _item_started_after_runtime_start(
+    item: WorkStatusItem,
+    runtime_started_at: datetime | None,
+) -> bool:
+    if runtime_started_at is None:
+        return True
+    started_at = _item_started_at(item)
+    if started_at is None:
+        return False
+    try:
+        return started_at >= runtime_started_at
+    except TypeError:
+        return started_at.replace(tzinfo=None) >= runtime_started_at.replace(
+            tzinfo=None
+        )
+
+
 def select_visible_items(
     items: list[WorkStatusItem] | tuple[WorkStatusItem, ...],
     *,
@@ -198,7 +219,9 @@ def select_visible_items(
     seen_task_keys: set[str],
     now: datetime,
     stale_seconds: float,
+    runtime_started_at: datetime | None = None,
 ) -> list[WorkStatusItem]:
+    del now, stale_seconds
     previously_seen = set(seen_task_keys)
     visible: list[WorkStatusItem] = []
     for item in items:
@@ -206,28 +229,18 @@ def select_visible_items(
             break
         task_key = runtime_task_key(item)
         if item.status == "recent":
-            updated_at = item.updated_at or item.started_at or item.task_started_at
-            fresh = bool(
-                updated_at is not None
-                and max(0.0, (now - updated_at).total_seconds()) <= stale_seconds
-            )
-            current_startup_summary = (
-                item.current
-                and not previously_seen
-                and item.tokens_text in {"", "0"}
-                and item.cost_text in {"", "$0"}
-            )
-            if (
-                current_startup_summary
-                or (not item.current and fresh)
-                or (task_key and task_key in previously_seen)
-            ):
+            # Completion is a state transition, not a recent-history notice.
+            # A session must have been observed as active in this runtime
+            # before its terminal state can become a circular completion bubble.
+            if task_key and task_key in previously_seen:
                 visible.append(item)
-                if task_key:
-                    seen_task_keys.add(task_key)
+                seen_task_keys.add(task_key)
             continue
         visible.append(item)
-        if task_key:
+        if task_key and _item_started_after_runtime_start(
+            item,
+            runtime_started_at,
+        ):
             seen_task_keys.add(task_key)
     return visible
 
@@ -552,4 +565,5 @@ def _select_runtime_work_overlay_items(
         seen_task_keys=seen_task_keys,
         now=datetime.now().astimezone(),
         stale_seconds=WORK_OVERLAY_STALE_SECONDS,
+        runtime_started_at=getattr(context, "work_overlay_started_at", None),
     )

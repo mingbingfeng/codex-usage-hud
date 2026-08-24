@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime
 import logging
 from pathlib import Path
 import argparse
@@ -106,6 +107,11 @@ class RuntimeContext:
     rest_reminder: object | None = None
     session_lock_monitor: object | None = None
     config_overrides: dict[str, object] = field(default_factory=dict)
+    work_overlay_started_at: datetime = field(
+        default_factory=lambda: datetime.now().astimezone(),
+        init=False,
+        repr=False,
+    )
     config_reload: Callable[..., object] | None = field(
         default=None,
         repr=False,

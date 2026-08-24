@@ -19,6 +19,7 @@ from .overlay_projection import (
     _work_overlay_item_limit_for_context,
     _work_overlay_item_sort_key,
     _work_overlay_runtime_task_key,
+    _work_overlay_seen_task_keys,
     _work_overlay_terminal_item_tasks,
     _work_overlay_visible_item_cache,
 )
@@ -463,30 +464,101 @@ def _should_suppress_inherited_completion(
     )
 
 
-def _parse_task_marker(value: object) -> datetime | None:
-    text = str(value or "").strip()
-    if not text:
-        return None
+def _completion_was_seen_active(
+    context: object | None,
+    item: WorkStatusItem,
+    prior_items: Sequence[WorkStatusItem] = (),
+) -> bool:
+    task_key = _work_overlay_runtime_task_key(item)
+    if not task_key:
+        return False
+    if task_key in _work_overlay_seen_task_keys(context):
+        return True
+    return any(
+        existing.status != "recent"
+        and _work_overlay_runtime_task_key(existing) == task_key
+        for existing in prior_items
+    )
+
+
+def _terminal_task_marker(item: WorkStatusItem) -> str:
+    return _iso_or_empty(item.task_started_at or item.started_at)
+
+
+def _segment_started_after_runtime_start(
+    context: object | None,
+    snapshot: ParsedSession,
+) -> bool:
+    runtime_started_at = getattr(context, "work_overlay_started_at", None)
+    if not isinstance(runtime_started_at, datetime):
+        return True
+    segment_started_at = snapshot.request.started_at or (
+        snapshot.task_completed_at or snapshot.final_answer_at
+    )
+    if segment_started_at is None:
+        return False
+    return _datetime_age_seconds(segment_started_at, runtime_started_at) >= 0
+
+
+def _terminal_completion_prompts(context: object) -> dict[str, str]:
+    values = getattr(context, "_work_overlay_terminal_completion_prompts", None)
+    if isinstance(values, dict):
+        return values
+    values = {}
     try:
-        return datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except ValueError:
-        return None
+        setattr(context, "_work_overlay_terminal_completion_prompts", values)
+    except Exception:
+        pass
+    return values
+
+
+def _remember_suppressed_completion(
+    context: object,
+    session_id: str,
+    task_key: str,
+    snapshot: ParsedSession,
+) -> None:
+    if not session_id or not task_key:
+        return
+    _work_overlay_terminal_item_tasks(context)[session_id] = task_key
+    prompt = str(getattr(snapshot, "task_prompt", "") or "").strip()
+    if prompt:
+        _terminal_completion_prompts(context)[session_id] = prompt
+
+
+def _remember_released_segment(
+    context: object | None,
+    snapshot: ParsedSession,
+    item: WorkStatusItem | None,
+    *,
+    released: bool,
+) -> None:
+    if not released or item is None or not _segment_started_after_runtime_start(
+        context,
+        snapshot,
+    ):
+        return
+    task_key = _work_overlay_runtime_task_key(item)
+    if task_key:
+        _work_overlay_seen_task_keys(context).add(task_key)
 
 
 def _clear_terminal_item_task_for_new_segment(
     context: object,
     snapshot: ParsedSession,
-) -> None:
+) -> bool:
     """Release inherited suppression once a later user-steer starts."""
     session_id = str(snapshot.session_id or "").strip()
-    request_started_at = snapshot.request.started_at
-    if not session_id or request_started_at is None:
-        return
+    if not session_id:
+        return False
     terminal_tasks = _work_overlay_terminal_item_tasks(context)
-    marker = terminal_tasks.get(session_id)
-    marker_at = _parse_task_marker(marker)
-    if marker_at is not None and _datetime_age_seconds(marker_at, request_started_at) > 0:
+    prompt = str(getattr(snapshot, "task_prompt", "") or "").strip()
+    previous_prompt = _terminal_completion_prompts(context).get(session_id, "")
+    if prompt and previous_prompt and prompt != previous_prompt:
         terminal_tasks.pop(session_id, None)
+        _terminal_completion_prompts(context).pop(session_id, None)
+        return True
+    return False
 
 
 def _work_item_model_startup_timed_out(
@@ -667,28 +739,66 @@ def _refresh_visible_current_work_item(
         source=snapshot.selection_source,
         context=context,
     )
+    segment_released = bool(
+        refreshed is not None
+        and refreshed.status == "recent"
+        and _clear_terminal_item_task_for_new_segment(context, snapshot)
+    )
+    _remember_released_segment(
+        context,
+        snapshot,
+        refreshed,
+        released=segment_released,
+    )
+    if (
+        refreshed is not None
+        and refreshed.status == "recent"
+        and not (
+            segment_released
+            or _completion_was_seen_active(context, refreshed, items)
+        )
+    ):
+        if session_id:
+            task_key = _terminal_task_marker(refreshed)
+            _remember_suppressed_completion(
+                context,
+                session_id,
+                task_key,
+                snapshot,
+            )
+        if existing_index is None:
+            return list(items)
+        return [item for index, item in enumerate(items) if index != existing_index]
     if existing_index is None:
         if refreshed is not None and refreshed.status == "recent":
             # The inherited terminal may already have removed the current item.
             # Replace it directly when a later real completion arrives, rather
             # than clearing the tombstone and allowing the old cache to return.
             _work_overlay_terminal_item_tasks(context).pop(session_id, None)
+            _terminal_completion_prompts(context).pop(session_id, None)
             return [*items, refreshed]
         if _should_suppress_inherited_completion(context, snapshot):
             task_key = _iso_or_empty(
                 snapshot.task_started_at or snapshot.request.started_at
             )
-            if task_key:
-                _work_overlay_terminal_item_tasks(context)[session_id] = task_key
+            _remember_suppressed_completion(
+                context,
+                session_id,
+                task_key,
+                snapshot,
+            )
         return list(items)
-    _clear_terminal_item_task_for_new_segment(context, snapshot)
     if refreshed is None:
         if _should_suppress_inherited_completion(context, snapshot):
             task_key = _iso_or_empty(
                 snapshot.task_started_at or snapshot.request.started_at
             )
-            if task_key:
-                _work_overlay_terminal_item_tasks(context)[session_id] = task_key
+            _remember_suppressed_completion(
+                context,
+                session_id,
+                task_key,
+                snapshot,
+            )
             return [item for index, item in enumerate(items) if index != existing_index]
         if snapshot.task_aborted_at is None:
             return list(items)
@@ -700,6 +810,7 @@ def _refresh_visible_current_work_item(
         # A later completion is a new terminal event even when the parser
         # reuses the inherited task_started marker after a user steer.
         _work_overlay_terminal_item_tasks(context).pop(session_id, None)
+        _terminal_completion_prompts(context).pop(session_id, None)
     updated = list(items)
     updated[existing_index] = refreshed
     return updated
@@ -757,7 +868,10 @@ def active_work_items_for_snapshot(
     # Internal collaboration agents stay folded into their parent. Desktop can
     # promote a delegation to an independent visible thread; those do bubble.
     if not _hide_from_work_overlay(snapshot):
-        _clear_terminal_item_task_for_new_segment(context, snapshot)
+        current_segment_released = _clear_terminal_item_task_for_new_segment(
+            context,
+            snapshot,
+        )
         current_item = _work_item_from_snapshot(
             snapshot,
             current=True,
@@ -766,14 +880,46 @@ def active_work_items_for_snapshot(
             context=context,
             now=now,
         )
+        _remember_released_segment(
+            context,
+            snapshot,
+            current_item,
+            released=current_segment_released,
+        )
         if current_item is not None:
-            items[str(current_item.id)] = current_item
-            if current_item.status == "recent" and snapshot.session_id:
-                terminal_item_tasks.pop(str(snapshot.session_id), None)
+            if current_item.status == "recent" and not _completion_was_seen_active(
+                context,
+                current_item,
+            ):
+                if snapshot.session_id:
+                    task_key = _terminal_task_marker(current_item)
+                    _remember_suppressed_completion(
+                        context,
+                        str(snapshot.session_id),
+                        task_key,
+                        snapshot,
+                    )
+                    if task_key:
+                        terminal_item_ids[str(snapshot.session_id)] = task_key
+            else:
+                items[str(current_item.id)] = current_item
+                if current_item.status == "recent" and snapshot.session_id:
+                    terminal_item_tasks.pop(str(snapshot.session_id), None)
+                    _terminal_completion_prompts(context).pop(
+                        str(snapshot.session_id),
+                        None,
+                    )
         elif _should_suppress_inherited_completion(context, snapshot) and snapshot.session_id:
-            terminal_item_ids[str(snapshot.session_id)] = _iso_or_empty(
+            task_key = _iso_or_empty(
                 snapshot.task_started_at or snapshot.request.started_at
             )
+            _remember_suppressed_completion(
+                context,
+                str(snapshot.session_id),
+                task_key,
+                snapshot,
+            )
+            terminal_item_ids[str(snapshot.session_id)] = task_key
         elif snapshot.task_aborted_at is not None and snapshot.session_id:
             terminal_item_ids[str(snapshot.session_id)] = _iso_or_empty(
                 snapshot.task_started_at
@@ -795,7 +941,10 @@ def active_work_items_for_snapshot(
             continue
         if _hide_from_work_overlay(parsed):
             continue
-        _clear_terminal_item_task_for_new_segment(context, parsed)
+        parsed_segment_released = _clear_terminal_item_task_for_new_segment(
+            context,
+            parsed,
+        )
         title = ""
         if context.active_session_tracker is not None:
             title = context.active_session_tracker.title_for_session(
@@ -810,14 +959,46 @@ def active_work_items_for_snapshot(
             context=context,
             now=now,
         )
+        _remember_released_segment(
+            context,
+            parsed,
+            item,
+            released=parsed_segment_released,
+        )
         if item is not None:
-            items[str(item.id)] = item
-            if item.status == "recent" and parsed.session_id:
-                terminal_item_tasks.pop(str(parsed.session_id), None)
+            if item.status == "recent" and not _completion_was_seen_active(
+                context,
+                item,
+            ):
+                if parsed.session_id:
+                    task_key = _terminal_task_marker(item)
+                    _remember_suppressed_completion(
+                        context,
+                        str(parsed.session_id),
+                        task_key,
+                        parsed,
+                    )
+                    if task_key:
+                        terminal_item_ids[str(parsed.session_id)] = task_key
+            else:
+                items[str(item.id)] = item
+                if item.status == "recent" and parsed.session_id:
+                    terminal_item_tasks.pop(str(parsed.session_id), None)
+                    _terminal_completion_prompts(context).pop(
+                        str(parsed.session_id),
+                        None,
+                    )
         elif _should_suppress_inherited_completion(context, parsed) and parsed.session_id:
-            terminal_item_ids[str(parsed.session_id)] = _iso_or_empty(
+            task_key = _iso_or_empty(
                 parsed.task_started_at or parsed.request.started_at
             )
+            _remember_suppressed_completion(
+                context,
+                str(parsed.session_id),
+                task_key,
+                parsed,
+            )
+            terminal_item_ids[str(parsed.session_id)] = task_key
         elif parsed.task_aborted_at is not None and parsed.session_id:
             terminal_item_ids[str(parsed.session_id)] = _iso_or_empty(
                 parsed.task_started_at
