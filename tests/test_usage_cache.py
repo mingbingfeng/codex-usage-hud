@@ -131,6 +131,71 @@ def test_usage_cache_append_reuses_tail_state_and_matches_full_rebuild(
     assert incremental.tokens == 25
 
 
+def test_usage_cache_deduplicates_continuation_files_by_session_id(
+    tmp_path: Path,
+) -> None:
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    session_id = "00000000-0000-0000-0000-000000000001"
+    child_id = "00000000-0000-0000-0000-000000000002"
+    first = sessions / "first.jsonl"
+    continuation = sessions / "continuation.jsonl"
+    child = sessions / "child.jsonl"
+
+    for path, cumulative_input in ((first, 10), (continuation, 25)):
+        path.write_text(
+            json.dumps(
+                _record(
+                    "2026-07-30T00:00:00Z",
+                    "session_meta",
+                    {"id": session_id, "model_provider": "custom"},
+                )
+            )
+            + "\n"
+            + json.dumps(_token_count("2026-07-30T00:00:01Z", cumulative_input))
+            + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+    child.write_text(
+        json.dumps(
+            _record(
+                "2026-07-30T00:00:02Z",
+                "session_meta",
+                {
+                    "id": child_id,
+                    "model_provider": "custom",
+                    "thread_source": "subagent",
+                    "parent_thread_id": session_id,
+                },
+            )
+        )
+        + "\n"
+        + json.dumps(_token_count("2026-07-30T00:00:03Z", 7))
+        + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    cache = UsageSummaryCache(JsonlSessionParser())
+    day = datetime(2026, 7, 30, tzinfo=timezone.utc)
+    week = datetime(2026, 7, 27, tzinfo=timezone.utc)
+
+    summary, _ = cache.summarize(sessions, day, week, force_rescan=True)
+    family = cache.family_lifetime_usage(session_id, included_providers={"custom"})
+    insights = cache.insights(
+        sessions,
+        day,
+        week,
+        included_providers={"custom"},
+    )
+
+    assert summary.tokens == 32
+    assert family.tokens == 32
+    assert insights["today"]["totals"]["tokens"] == 32
+    assert insights["today"]["totals"]["sessionCount"] == 1
+
+
 def test_usage_cache_does_not_build_full_session_snapshots_for_aggregate_scan(
     tmp_path: Path,
 ) -> None:

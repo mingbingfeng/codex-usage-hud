@@ -690,9 +690,13 @@ class UsageInsightsProjector:
                 for provider in included_providers
                 if str(provider or "").strip()
             }
+        raw_entries = list(self._state._entries.items())
+        deduplicate = getattr(self._state, "_deduplicated_entries", None)
+        if callable(deduplicate):
+            raw_entries = deduplicate(raw_entries)
         entries = [
             entry
-            for path, entry in self._state._entries.items()
+            for path, entry in raw_entries
             if ready
             and entry.day_start == day_start
             and entry.week_start == week_start

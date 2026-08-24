@@ -27,7 +27,6 @@ from .core.deleted_usage import (
 from .session_cleanup_runtime import DeletedUsageTransactions
 from .runtime_usage import (
     merge_usage as _merge_usage,
-    replace_usage as _replace_usage,
     workdir_leaf as _workdir_leaf,
 )
 from .usage_insights import UsageInsightsProjector
@@ -312,6 +311,44 @@ class UsageSummaryCache:
             return ""
         return canonical if candidate.casefold() == canonical else ""
 
+    @staticmethod
+    def _entry_lifetime_rank(
+        key: object,
+        entry: _UsageCacheEntry,
+    ) -> tuple[int, int, int, int, int, float, str]:
+        summary = entry.summary_all
+        return (
+            int(summary.tokens or 0),
+            int(summary.input_tokens or 0),
+            int(summary.cached_tokens or 0),
+            int(summary.output_tokens or 0),
+            int(summary.total_event_count or 0),
+            float(entry.mtime or 0.0),
+            str(key),
+        )
+
+    def _deduplicated_entries(
+        self,
+        items: Iterable[tuple[object, _UsageCacheEntry]],
+    ) -> list[tuple[object, _UsageCacheEntry]]:
+        """Keep one cumulative snapshot per logical session ID.
+
+        Codex Desktop can write several continuation JSONL files for one
+        thread. Their cumulative counters include the preceding files, so
+        aggregating every path would charge the same history repeatedly.
+        Files without a session ID remain independent contributions.
+        """
+        selected: dict[tuple[str, str], tuple[object, _UsageCacheEntry]] = {}
+        for key, entry in items:
+            session_id = str(entry.session_id or "").strip()
+            group_key = ("session", session_id) if session_id else ("path", str(key))
+            previous = selected.get(group_key)
+            if previous is None or self._entry_lifetime_rank(
+                key, entry
+            ) > self._entry_lifetime_rank(*previous):
+                selected[group_key] = (key, entry)
+        return list(selected.values())
+
     @classmethod
     def _delegated_source_session_id(
         cls,
@@ -517,14 +554,12 @@ class UsageSummaryCache:
                 seen_paths.add(path)
                 scan_items.append((path, archived))
         for path, archived in scan_items:
-            summary_day, summary_week, _summary_month = self._summaries_for_file(
+            self._summaries_for_file(
                 path,
                 day_start,
                 week_start,
                 archived=archived,
             )
-            _merge_usage(day_total, summary_day)
-            _merge_usage(week_total, summary_week)
 
         removed_paths: list[Path] = []
         for cached_path in list(self._entries):
@@ -535,6 +570,12 @@ class UsageSummaryCache:
                 self._touch_insights()
         self._delete_persisted_entries(removed_paths)
         self._flush_persisted_entries()
+
+        for _path, entry in self._deduplicated_entries(self._entries.items()):
+            if entry.day_start != day_start or entry.week_start != week_start:
+                continue
+            _merge_usage(day_total, entry.summary_day)
+            _merge_usage(week_total, entry.summary_week)
 
         live_session_ids = {
             entry.session_id for entry in self._entries.values() if entry.session_id
@@ -582,7 +623,7 @@ class UsageSummaryCache:
         }
         day_total = UsageSummary()
         week_total = UsageSummary()
-        for path, entry in self._entries.items():
+        for path, entry in self._deduplicated_entries(self._entries.items()):
             if entry.day_start != day_start or entry.week_start != week_start:
                 continue
             if entry.model_provider not in providers:
@@ -616,9 +657,16 @@ class UsageSummaryCache:
                 for provider in included_providers
                 if str(provider or "").strip()
             }
+        all_items = self._deduplicated_entries(
+            list(self._entries.items())
+            + [
+                (f"deleted:{index}:{entry.session_key}", entry)
+                for index, entry in enumerate(self._deleted_entries)
+            ]
+        )
         session_entries = {
             entry.session_id: entry
-            for entry in list(self._entries.values()) + list(self._deleted_entries)
+            for _key, entry in all_items
             if entry.session_id
         }
 
@@ -638,7 +686,7 @@ class UsageSummaryCache:
                 current = parent
             return current.session_id
 
-        for entry in list(self._entries.values()) + list(self._deleted_entries):
+        for _key, entry in all_items:
             if providers is not None and entry.model_provider not in providers:
                 continue
             member_id = entry.session_id or ""
@@ -654,22 +702,6 @@ class UsageSummaryCache:
     def _path_under_scan_roots(self, path: Path, scan_roots: Sequence[Path]) -> bool:
         return path_under_usage_roots(path, scan_roots)
 
-    def _entry_for_window(
-        self,
-        path: Path,
-        day_start: datetime,
-        week_start: datetime,
-    ) -> _UsageCacheEntry | None:
-        entry = self._entries.get(path)
-        if (
-            entry is not None
-            and entry.day_start == day_start
-            and entry.week_start == week_start
-            and entry.month_start == day_start - timedelta(days=29)
-        ):
-            return entry
-        return None
-
     def _refresh_paths(
         self,
         paths: Sequence[Path],
@@ -677,19 +709,12 @@ class UsageSummaryCache:
         day_start: datetime,
         week_start: datetime,
     ) -> None:
-        day_total = replace(self._last_day_total)
-        week_total = replace(self._last_week_total)
-        empty = UsageSummary()
-
         for path in paths:
             if not self._path_under_scan_roots(path, scan_roots):
                 continue
-            old_entry = self._entry_for_window(path, day_start, week_start)
-            old_day = old_entry.summary_day if old_entry is not None else empty
-            old_week = old_entry.summary_week if old_entry is not None else empty
 
             if path.exists():
-                new_day, new_week, _new_month = self._summaries_for_file(
+                self._summaries_for_file(
                     path,
                     day_start,
                     week_start,
@@ -701,11 +726,20 @@ class UsageSummaryCache:
                     self._touch_insights()
                 self._dirty_entries.discard(path)
                 self._delete_persisted_entries((path,))
-                new_day = empty
-                new_week = empty
-
-            day_total = _replace_usage(day_total, old_day, new_day)
-            week_total = _replace_usage(week_total, old_week, new_week)
+        day_total = UsageSummary()
+        week_total = UsageSummary()
+        for path, entry in self._deduplicated_entries(self._entries.items()):
+            if (
+                entry.day_start != day_start
+                or entry.week_start != week_start
+                or not self._path_under_scan_roots(path, scan_roots)
+            ):
+                continue
+            _merge_usage(day_total, entry.summary_day)
+            _merge_usage(week_total, entry.summary_week)
+        for entry in self._deleted_entries:
+            _merge_usage(day_total, entry.summary_day)
+            _merge_usage(week_total, entry.summary_week)
 
         self._last_day_total = day_total
         self._last_week_total = week_total
