@@ -856,6 +856,15 @@ class JsonlSessionParserTests(unittest.TestCase):
         self.assertIn("分析一个很大的日志文件", rounds[0].copy_text)
         self.assertEqual(rounds[1].activity_summary, "输出：输出了很长的分析结果")
         self.assertIn("输出了很长的分析结果", rounds[1].copy_text)
+        # 定位流程用整轮条目文本在聊天 DOM 里找可见段落，不能只有首选条目。
+        self.assertEqual(
+            rounds[0].activity_texts,
+            ("分析一个很大的日志文件",),
+        )
+        self.assertEqual(
+            rounds[1].activity_texts,
+            ("输出了很长的分析结果",),
+        )
 
     def test_slow_summary_ignores_tool_calls_before_latest_task(self) -> None:
         parser = JsonlSessionParser()

@@ -1358,6 +1358,11 @@ def _top_heavy_rounds(snapshot: ParsedSession) -> list[dict[str, object]]:
         )
         if rolled_back:
             tooltip = f"该轮次已被回滚，聊天中不可见；点击仅复制，不滚动定位\n{tooltip}"
+        locate_texts = [
+            text[:600]
+            for text in (getattr(item, "activity_texts", ()) or ())
+            if str(text).strip()
+        ][:6]
         details.append(
             {
                 "title": title,
@@ -1369,6 +1374,7 @@ def _top_heavy_rounds(snapshot: ParsedSession) -> list[dict[str, object]]:
                 "taskTurnId": task_turn_ids.get(task_index, "") or fallback_turn_id,
                 "rolledBack": rolled_back,
                 "tooltip": tooltip,
+                "locateTexts": locate_texts,
             }
         )
     return details

@@ -876,6 +876,299 @@ console.log("session-view-activity-scroll-ok");
     assert "session-view-activity-scroll-ok" in completed.stdout
 
 
+def test_session_view_activity_scroll_expands_collapsed_round_output() -> None:
+    session_view_factory = SESSION_VIEW.split(
+        "  const sessionViewDomain = ctx.domains.register(",
+        1,
+    )[0]
+    script = """
+const assert = require("node:assert/strict");
+const rootId = "codex-usage-hud-root";
+const warningClass = "warning";
+const errorClass = "error";
+const runningTimerName = "__running";
+const payload = {
+  rendererSessionId: "session-test",
+  topDetails: {
+    activityTaskIndex: 1,
+    activityTasks: [{ index: 1, count: 1, turnId: "t1", currentTask: "目标需求" }],
+  },
+};
+const events = [];
+const timeline = { scrollHeight: 1000, clientHeight: 100, scrollTop: 0 };
+const root = { dataset: { activityTaskIndex: "1" }, contains: () => false };
+
+const makeNode = ({ key = "", user = false, text = "", hidden = false }) => {
+  let revealed = !hidden;
+  const node = {
+    dataset: {},
+    isConnected: true,
+    innerText: hidden ? "" : text,
+    textContent: text,
+    parentElement: null,
+    reveal() { revealed = true; },
+    getAttribute(name) {
+      if (name === "data-content-search-unit-key") return key;
+      return null;
+    },
+    matches(selector) {
+      if (selector.includes("data-local-conversation-user-anchor")) return user;
+      if (selector.includes("data-content-search-unit-key")) return !!key;
+      return false;
+    },
+    querySelector(selector) {
+      return selector.includes("data-local-conversation-user-anchor") && user ? {} : null;
+    },
+    querySelectorAll() { return []; },
+    closest(selector) {
+      if (selector.includes("data-content-search-unit-key") && key) return node;
+      return null;
+    },
+    scrollIntoView(options = {}) { events.push({ kind: "scroll", node, behavior: options.behavior || "auto" }); },
+    animate() { events.push({ kind: "animate", node }); return { cancel() {} }; },
+    // Codex hides mounted collapsed content in a height:0 box that still
+    // reports a client rect, so visibility must hinge on width/height.
+    getBoundingClientRect() { return { top: 0, bottom: 10, height: revealed ? 10 : 0, width: revealed ? 100 : 0 }; },
+    getClientRects() { return [{}]; },
+  };
+  return node;
+};
+const makeToggle = (label, { aria = "false", mounted = null, onExpand = null } = {}) => ({
+  dataset: {},
+  isConnected: true,
+  innerText: label,
+  textContent: label,
+  parentElement: null,
+  ariaExpanded: aria,
+  clicked: false,
+  mounted,
+  onExpand,
+  getAttribute(name) { return name === "aria-expanded" ? this.ariaExpanded : null; },
+  click() {
+    this.clicked = true;
+    this.ariaExpanded = "true";
+    if (this.mounted) turn.units.push(this.mounted);
+    if (this.onExpand) this.onExpand();
+  },
+  scrollIntoView(options = {}) { events.push({ kind: "scroll", node: this, behavior: options.behavior || "auto" }); },
+  animate() { events.push({ kind: "animate", node: this }); return { cancel() {} }; },
+  getBoundingClientRect() { return { top: 0, bottom: 10, height: 10, width: 100 }; },
+  getClientRects() { return [{}]; },
+});
+const turn = {
+  dataset: {},
+  isConnected: true,
+  innerText: "",
+  textContent: "",
+  units: [],
+  buttons: [],
+  getAttribute(name) {
+    if (name === "data-content-search-turn-key") return "t1";
+    return null;
+  },
+  querySelectorAll(selector) {
+    if (selector.includes("data-content-search-unit-key")) return turn.units;
+    if (selector === "button, [role='button']") return turn.buttons;
+    return [];
+  },
+  closest() { return null; },
+};
+const document = {
+  body: {},
+  documentElement: {},
+  getElementById: (id) => (id === rootId ? root : null),
+  querySelector(selector) {
+    return selector === "[data-app-action-timeline-scroll]" ? timeline : null;
+  },
+  querySelectorAll(selector) {
+    if (selector === "[data-content-search-turn-key]") return [turn];
+    if (selector === "[data-content-search-unit-key]") return turn.units;
+    if (selector === "[data-turn-key]") return [turn];
+    return [];
+  },
+};
+global.window = {
+  requestAnimationFrame(callback) { callback(0); return 0; },
+  cancelAnimationFrame() {},
+  setTimeout,
+  clearTimeout,
+};
+global.document = document;
+global.currentPayload = () => payload;
+global.clamp = (value, min, max) => Math.max(min, Math.min(max, value));
+global.budgetDomain = { refreshProgressRailLabel() {}, refreshCollapsedProgressStrip() {} };
+global.diagnosticsDomain = { applyConnectionHealth() {} };
+const ctx = {
+  lifecycle: {
+    active: () => true,
+    frame: (_owner, callback) => window.requestAnimationFrame(callback),
+    clearFrame() {},
+    timeout: (_owner, callback, ms = 0) => setTimeout(callback, Math.min(Number(ms) || 0, 8)),
+    clearTimeout: (id) => clearTimeout(id),
+    interval: () => 0,
+    clearInterval() {},
+  },
+};
+const shared = {};
+""" + session_view_factory + r"""
+const domain = createSessionViewDomain(ctx, shared);
+
+(async () => {
+// A needle that matches content Codex keeps mounted but collapsed (height:0)
+// must first expand the disclosure, then pulse the now-visible content.
+const user = makeNode({ key: "t1:user", user: true, text: "你说：目标需求详细内容" });
+const hiddenOutput = makeNode({ key: "t1:round-1", hidden: true, text: "折叠输出精确内容 ABCDEFGH" });
+const revealToggle = makeToggle("已处理 3m 45s", { onExpand: () => hiddenOutput.reveal() });
+turn.units = [user, hiddenOutput];
+turn.buttons = [revealToggle];
+events.length = 0;
+let result = await domain.scrollToActivityRound(
+  "输出：\n折叠输出精确内容 ABCDEFGH",
+  "目标需求",
+  5,
+  "t1",
+);
+assert.equal(result, true, JSON.stringify({ result, events }));
+assert.equal(revealToggle.clicked, true, "精确命中落在折叠隐藏内容时应展开折叠区");
+assert.deepEqual(
+  events.filter((event) => event.kind === "scroll").map((event) => [event.node, event.behavior]),
+  [[user, "auto"], [hiddenOutput, "smooth"]],
+  JSON.stringify(events),
+);
+assert.ok(events.some((event) => event.kind === "animate" && event.node === hiddenOutput));
+assert.equal(hiddenOutput.dataset.codexHudLocateRound, "5");
+
+// A collapsed round output that is not mounted until the disclosure expands:
+// the locate flow clicks the toggle, waits for the mount, then pulses the
+// mounted content itself.
+events.length = 0;
+const mounted = makeNode({ key: "t1:round-2", text: "展开后输出精确内容 XYZ12345" });
+const expandToggle = makeToggle("已处理 3m 45s");
+expandToggle.mounted = mounted;
+turn.units = [user];
+turn.buttons = [expandToggle];
+result = await domain.scrollToActivityRound(
+  "输出：\n展开后输出精确内容 XYZ12345",
+  "目标需求",
+  6,
+  "t1",
+);
+assert.equal(result, true, JSON.stringify({ result, events }));
+assert.equal(expandToggle.clicked, true, "未命中时应点击折叠开关展开内容");
+assert.equal(expandToggle.ariaExpanded, "true");
+assert.ok(events.some((event) => event.kind === "animate" && event.node === mounted));
+assert.ok(events.some(
+  (event) => event.kind === "scroll" && event.node === mounted && event.behavior === "smooth",
+));
+
+// When both a hidden search-index copy and the visible rendering contain the
+// needle, the visible rendering must win the pulse.
+events.length = 0;
+const visibleOutput = makeNode({ key: "t1:round-3", text: "可见渲染输出精确内容 MMMMMMMM" });
+const indexCopy = makeNode({ hidden: true, text: "前缀 可见渲染输出精确内容 MMMMMMMM 后缀" });
+turn.units = [user, visibleOutput, indexCopy];
+turn.buttons = [];
+result = await domain.scrollToActivityRound(
+  "输出：\n可见渲染输出精确内容 MMMMMMMM",
+  "目标需求",
+  7,
+  "t1",
+);
+assert.equal(result, true, JSON.stringify({ result, events }));
+assert.ok(events.some((event) => event.kind === "animate" && event.node === visibleOutput));
+assert.ok(events.every((event) => event.kind !== "animate" || event.node === visibleOutput));
+
+// A copyText needle that only exists in the hidden index copy must not win
+// over a locateTexts needle that matches the visible paragraph.
+events.length = 0;
+const indexCopy2 = makeNode({ hidden: true, text: "推理原文全文只在隐藏索引里 NNNNNNNN" });
+const visiblePara = makeNode({ key: "t1:round-4", text: "段落可见渲染输出 OOOOOOOO" });
+turn.units = [user, indexCopy2, visiblePara];
+turn.buttons = [];
+result = await domain.scrollToActivityRound(
+  "推理：\n推理原文全文只在隐藏索引里 NNNNNNNN",
+  "目标需求",
+  8,
+  "t1",
+  ["段落可见渲染输出 OOOOOOOO"],
+);
+assert.equal(result, true, JSON.stringify({ result, events }));
+assert.ok(events.some((event) => event.kind === "animate" && event.node === visiblePara));
+assert.ok(events.every((event) => event.kind !== "animate" || event.node === visiblePara));
+
+// A needle that can never match (image-heavy output renders no matching text):
+// image-preview buttons must never be clicked, and the pulse falls back to
+// the round's own work-summary header by ordinal instead of the request.
+events.length = 0;
+const imageButton = makeToggle("查看图片大图");
+const workHeader = makeToggle("已处理 1m 02s");
+turn.units = [user];
+turn.buttons = [imageButton, workHeader];
+result = await domain.scrollToActivityRound(
+  "输出：\n图示输出内容 QQQQQQQQ",
+  "目标需求",
+  1,
+  "t1",
+);
+assert.equal(result, true, JSON.stringify({ result, events }));
+assert.equal(imageButton.clicked, false, "图片预览等非工作摘要按钮绝不能被点击");
+assert.equal(workHeader.clicked, true, "未命中时应展开工作摘要折叠区");
+assert.ok(events.some((event) => event.kind === "animate" && event.node === workHeader));
+assert.ok(events.some(
+  (event) => event.kind === "scroll" && event.node === workHeader && event.behavior === "smooth",
+));
+
+// An already-expanded disclosure (chevron ∨, no aria-expanded) must not be
+// clicked again: toggling it would fold the group shut.
+events.length = 0;
+const expandedHeader = makeToggle("已处理 2m 00s ∨", { aria: null });
+turn.units = [user];
+turn.buttons = [expandedHeader];
+result = await domain.scrollToActivityRound(
+  "输出：\n图示输出内容 QQQQQQQQ",
+  "目标需求",
+  1,
+  "t1",
+);
+assert.equal(result, true, JSON.stringify({ result, events }));
+assert.equal(expandedHeader.clicked, false, "∨ 展开态的折叠头不应被再次点击");
+assert.ok(events.some((event) => event.kind === "animate" && event.node === expandedHeader));
+
+// A collapsed disclosure this locator opened in an earlier pass keeps the
+// codexHudLocateExpanded marker when no other state signal exists, so the
+// next locate pulses it instead of folding it shut.
+events.length = 0;
+const markerHeader = makeToggle("已处理 4m 05s", { aria: null });
+markerHeader.dataset.codexHudLocateExpanded = "true";
+turn.units = [user];
+turn.buttons = [markerHeader];
+result = await domain.scrollToActivityRound(
+  "输出：\n图示输出内容 QQQQQQQQ",
+  "目标需求",
+  1,
+  "t1",
+);
+assert.equal(result, true, JSON.stringify({ result, events }));
+assert.equal(markerHeader.clicked, false, "本定位器已展开且无状态信号的折叠头不应被再次点击");
+assert.ok(events.some((event) => event.kind === "animate" && event.node === markerHeader));
+console.log("session-view-activity-expand-ok");
+})().catch((error) => {
+  console.error(error.stack || error);
+  process.exitCode = 1;
+});
+"""
+    completed = subprocess.run(
+        ["node", "--input-type=commonjs"],
+        input=script,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+    assert "session-view-activity-expand-ok" in completed.stdout
+
+
 def test_leaf_bundle_keeps_one_iife_and_one_boot_placeholder() -> None:
     script = manifest.RENDERER_HUD_SCRIPT_TEMPLATE
     assert script.lstrip().startswith("(() => {")

@@ -493,6 +493,10 @@ TEXT = r"""
       if (item.roundIndex) row.dataset.activityRoundIndex = String(item.roundIndex);
       if (item.taskPrompt) row.dataset.activityTaskPrompt = String(item.taskPrompt);
       if (item.taskTurnId) row.dataset.activityTaskTurnId = String(item.taskTurnId);
+      const locateTexts = Array.isArray(item.locateTexts)
+        ? item.locateTexts.filter((text) => typeof text === "string" && text.trim())
+        : [];
+      if (locateTexts.length) row.dataset.locateTexts = JSON.stringify(locateTexts);
       if (rolledBack) row.dataset.rolledBack = "true";
       const title = document.createElement("span");
       title.className = "codex-usage-hud-heavy-round-title";
@@ -1199,13 +1203,25 @@ TEXT = r"""
     return null;
   }
 
+  function activityComparableText(value) {
+    // Strip markdown that rendering removes (**, `, headings, lists, links)
+    // so JSONL needles can match the rendered DOM text on both sides.
+    return String(value || "")
+      .split(/\r?\n/)
+      .map((line) => line
+        .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
+        .replace(/(\*\*|__|\*|~~|`)/g, "")
+        .replace(/^\s*(?:(?:#{1,6}|[-*+]|\d+[.)]|>)\s+|(?:输入|输出|工具调用|工具返回|推理|活动)\s*[：:]\s*)/, ""))
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
   function activityRoundNeedles(copyText) {
-    const source = normalizedActivityText(copyText);
+    const source = activityComparableText(copyText);
     const lines = String(copyText || "")
       .split(/\r?\n/)
-      .map((line) => normalizedActivityText(
-        line.replace(/^(?:输入|输出|工具调用|工具返回|推理|活动)\s*[：:]\s*/, ""),
-      ))
+      .map(activityComparableText)
       .filter((line) => (
         line.length >= 10
         && !/^Req\d+-#\d+/.test(line)
@@ -1216,6 +1232,11 @@ TEXT = r"""
     return Array.from(new Set(lines))
       .sort((left, right) => right.length - left.length)
       .map((line) => line.slice(0, 600));
+  }
+
+  function activityNodeIsEffectivelyVisible(node) {
+    const rect = node.getBoundingClientRect?.();
+    return !!rect && rect.width > 0 && rect.height > 0;
   }
 
   function smallestActivityTextNode(scope, needle) {
@@ -1236,30 +1257,214 @@ TEXT = r"""
     ];
     return Array.from(scope.querySelectorAll?.(selectors.join(",")) || [])
       .filter((node) => !hudRoot?.contains(node))
-      .map((node) => ({ node, text: normalizedActivityText(node.innerText || node.textContent) }))
+      // Match against textContent: Codex keeps a height:0 search-index copy
+      // of collapsed round output whose innerText is empty, so a
+      // visibility-aware read would never match it even when mounted.
+      .map((node) => ({
+        node,
+        visible: activityNodeIsEffectivelyVisible(node),
+        text: activityComparableText(node.textContent),
+      }))
       .filter(({ text }) => text.includes(needle))
-      .sort((left, right) => {
-        const leftExact = left.text === needle ? -1000 : 0;
-        const rightExact = right.text === needle ? -1000 : 0;
-        return (leftExact + left.text.length) - (rightExact + right.text.length);
-      })[0]?.node || null;
+      // Prefer visible renderings over the hidden search-index copy, then the
+      // smallest exact container.
+      .sort((left, right) => (
+        Number(right.visible) - Number(left.visible)
+        || (left.text.length - needle.length) - (right.text.length - needle.length)
+      ))[0]?.node || null;
   }
 
-  function findActivityRoundTarget(copyText, requestTarget, roundIndex = 0) {
-    const needles = activityRoundNeedles(copyText);
+  function activityRoundNeedlePool(copyText, locateTexts) {
+    const pool = [];
+    const seen = new Set();
+    const add = (source) => {
+      for (const needle of activityRoundNeedles(source)) {
+        if (needle && !seen.has(needle)) {
+          seen.add(needle);
+          pool.push(needle);
+        }
+      }
+    };
+    add(copyText);
+    for (const text of Array.isArray(locateTexts) ? locateTexts : []) {
+      add(String(text || ""));
+    }
+    return pool.slice(0, 24);
+  }
+
+  function findActivityRoundTarget(copyText, requestTarget, roundIndex = 0, locateTexts = []) {
+    const needles = activityRoundNeedlePool(copyText, locateTexts);
     const requestScope = requestTarget?.turn || requestTarget?.unit || null;
     const scopes = requestScope ? [requestScope] : [];
     for (const scope of scopes) {
+      // Prefer the first needle with a visible match: the longest copyText
+      // needle often only exists in Codex's hidden search-index copy, while a
+      // shorter line or another round entry (agent message, tool call) can
+      // match the visible paragraph the user should actually see.
+      let hiddenMatch = null;
       for (const needle of needles) {
         const match = smallestActivityTextNode(scope, needle);
-        if (match) {
-          return match.closest?.(
-            "[data-content-search-unit-key], [data-markdown-text-style='assistant-message'], [data-message-author-role]",
-          ) || match;
-        }
+        if (!match) continue;
+        if (visibleActivityNode(match) === match) return match;
+        if (!hiddenMatch) hiddenMatch = match;
       }
+      if (hiddenMatch) return hiddenMatch;
     }
     return null;
+  }
+
+  function visibleActivityNode(node) {
+    let current = node;
+    for (let depth = 0; current && depth < 24; depth += 1) {
+      // Collapsed subtrees hide either via display:none (no rects) or, for
+      // Codex's 已处理 group, a height:0 container that still reports a
+      // client rect — both must count as hidden.
+      if (activityNodeIsEffectivelyVisible(current)) return current;
+      current = current.parentElement;
+    }
+    return null;
+  }
+
+  function scrollActivityNodeIntoView(node, behavior = "smooth") {
+    const visibleNode = visibleActivityNode(node) || node;
+    visibleNode.scrollIntoView?.({ block: "center", inline: "nearest", behavior });
+    return visibleNode;
+  }
+
+  function activityLooksLikeWorkDisclosure(node) {
+    // Only the work-summary header (已处理/Worked) is safe to click: generic
+    // aria-expanded buttons include image previews, and clicking those pops
+    // an overlay over the conversation.
+    const label = normalizedActivityText(
+      node.getAttribute?.("aria-label")
+      || node.getAttribute?.("title")
+      || node.innerText
+      || node.textContent,
+    );
+    if (/^(?:已处理|处理了|worked(?:\s+for)?\s)/i.test(label)) return true;
+    // Chevron-only buttons carry no text; accept them when the header row
+    // they sit in is the work summary itself.
+    const rowText = normalizedActivityText(
+      node.parentElement?.innerText || node.parentElement?.textContent,
+    );
+    return /^(?:已处理|处理了|worked(?:\s+for)?\s)/i.test(rowText);
+  }
+
+  function activityWorkDisclosureToggles(scope) {
+    const hudRoot = document.getElementById(rootId);
+    return Array.from(scope?.querySelectorAll?.("button, [role='button']") || [])
+      .filter((node) => !hudRoot?.contains?.(node) && activityLooksLikeWorkDisclosure(node));
+  }
+
+  function activityDisclosureIsCollapsed(node) {
+    const expanded = node.getAttribute?.("aria-expanded");
+    if (expanded === "true") return false;
+    if (expanded === "false") return true;
+    // Codex Desktop lacks aria-expanded on the work-summary toggle; its
+    // chevron reads ">" while collapsed and "∨" while expanded.
+    const text = normalizedActivityText(node.innerText || node.textContent);
+    if (/[∨⌄▾▼]/.test(text)) return false;
+    if (/[>›▸❯]/.test(text)) return true;
+    // No state signal (chevron may be an SVG glyph): only trust toggles this
+    // locator has not already opened as collapsed.
+    return node.dataset?.codexHudLocateExpanded !== "true";
+  }
+
+  function activityExpandSettleDelay(ms, operation) {
+    return new Promise((resolve) => {
+      let timer = 0;
+      let settled = false;
+      const finish = (result) => {
+        if (settled) return;
+        settled = true;
+        if (timer) ctx.lifecycle.clearTimeout(timer);
+        if (operation?.cancelWait === cancel) operation.cancelWait = null;
+        resolve(result);
+      };
+      const cancel = () => finish(false);
+      if (operation) operation.cancelWait = cancel;
+      timer = ctx.lifecycle.timeout(
+        "activity_round_expand_settle",
+        () => finish(true),
+        Math.max(0, Number(ms || 0)),
+      );
+    });
+  }
+
+  function clickActivityDisclosureToggle(toggle) {
+    if (!toggle || typeof toggle.click !== "function") return false;
+    // Mirror the CDP probe's click sequence: some Codex controls only react
+    // to the full pointer event chain, not to a bare .click().
+    if (typeof MouseEvent === "function" && typeof toggle.dispatchEvent === "function") {
+      for (const type of ["pointerdown", "mousedown", "mouseup"]) {
+        toggle.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+      }
+    }
+    toggle.click();
+    // Remember what this locator opened: with no aria-expanded and an SVG
+    // chevron there is no other way to tell expanded from collapsed on the
+    // next locate, and clicking again would fold the group shut.
+    if (toggle.dataset) toggle.dataset.codexHudLocateExpanded = "true";
+    return true;
+  }
+
+  async function ensureActivityDisclosuresExpanded(requestTarget, operation) {
+    if (!activityScrollIsCurrent(operation)) return false;
+    const scope = requestTarget?.turn || requestTarget?.unit || null;
+    if (!scope) return false;
+    let clicked = false;
+    for (const toggle of activityWorkDisclosureToggles(scope)
+      .filter(activityDisclosureIsCollapsed)
+      .slice(0, 12)) {
+      if (!activityScrollIsCurrent(operation)) return clicked;
+      if (clickActivityDisclosureToggle(toggle)) clicked = true;
+    }
+    if (!clicked) return false;
+    if (!(await waitForActivityVirtualization(2, operation))) return clicked;
+    await activityExpandSettleDelay(320, operation);
+    return clicked;
+  }
+
+  async function expandActivityRoundContent(
+    copyText,
+    requestTarget,
+    roundIndex,
+    operation,
+    locateTexts = [],
+  ) {
+    if (!activityScrollIsCurrent(operation)) return null;
+    const scope = requestTarget?.turn || requestTarget?.unit || null;
+    if (!scope) return null;
+    // Expansion is an on-demand side effect: stop at the first hit and never
+    // re-collapse, mirroring the sidebar project reveal in the CDP probe.
+    const deadline = Date.now() + 4000;
+    const toggles = activityWorkDisclosureToggles(scope)
+      .filter(activityDisclosureIsCollapsed)
+      .slice(0, 12);
+    for (const toggle of toggles) {
+      if (!activityScrollIsCurrent(operation) || Date.now() > deadline) return null;
+      if (!clickActivityDisclosureToggle(toggle)) continue;
+      if (!(await waitForActivityVirtualization(2, operation))) return null;
+      if (!await activityExpandSettleDelay(320, operation)) return null;
+      const target = findActivityRoundTarget(copyText, requestTarget, roundIndex, locateTexts);
+      if (target) return target;
+    }
+    return null;
+  }
+
+  function activityRoundDisclosureFallback(requestTarget, roundIndex) {
+    // Reasoning-heavy or image-heavy rounds never re-render their JSONL text
+    // in the DOM, so text needles cannot match.  Work summaries appear one
+    // per round in DOM order; land on the round's own summary header by
+    // ordinal instead of jumping back to the user request.
+    const scope = requestTarget?.turn || requestTarget?.unit || null;
+    if (!scope) return null;
+    const headers = activityWorkDisclosureToggles(scope);
+    if (!headers.length) return null;
+    const ordinal = Math.round(Number(roundIndex || 0));
+    const index = ordinal >= 1 ? Math.min(ordinal, headers.length) - 1 : headers.length - 1;
+    const header = headers[index];
+    return visibleActivityNode(header) || header;
   }
 
   function pulseActivityConversationTarget(target, roundIndex = 0) {
@@ -1295,7 +1500,13 @@ TEXT = r"""
     return true;
   }
 
-  async function scrollToActivityRound(copyText, taskPrompt, roundIndex = 0, taskTurnId = "") {
+  async function scrollToActivityRound(
+    copyText,
+    taskPrompt,
+    roundIndex = 0,
+    taskTurnId = "",
+    locateTexts = [],
+  ) {
     const operation = beginActivityScroll();
     const context = selectedActivityTaskContext(taskPrompt, taskTurnId);
     const timeline = document.querySelector("[data-app-action-timeline-scroll]");
@@ -1322,13 +1533,40 @@ TEXT = r"""
         requestUnitTarget = null;
       }
     }
-    let preciseTarget = findActivityRoundTarget(copyText, requestTarget, roundIndex);
-    let target = preciseTarget || requestUnitTarget;
+    let preciseTarget = findActivityRoundTarget(copyText, requestTarget, roundIndex, locateTexts);
+    let disclosureFallback = null;
+    if (!preciseTarget) {
+      // Codex Desktop collapses round output under disclosures like
+      // "已处理 3m 45s".  Expand them one by one so the needle text becomes
+      // matchable, then retry the precise lookup before falling back.
+      preciseTarget = await expandActivityRoundContent(
+        copyText,
+        requestTarget,
+        roundIndex,
+        operation,
+        locateTexts,
+      );
+      if (!activityScrollIsCurrent(operation)) return false;
+      if (!preciseTarget) {
+        disclosureFallback = activityRoundDisclosureFallback(requestTarget, roundIndex);
+      }
+    } else if (visibleActivityNode(preciseTarget) !== preciseTarget) {
+      // The needle matched content that Codex keeps mounted but collapsed
+      // (height:0).  Without expanding the group the pulse would land on an
+      // invisible node; expand, then re-resolve the now-visible content.
+      const expanded = await ensureActivityDisclosuresExpanded(requestTarget, operation);
+      if (!activityScrollIsCurrent(operation)) return false;
+      if (expanded) {
+        preciseTarget = findActivityRoundTarget(copyText, requestTarget, roundIndex, locateTexts)
+          || preciseTarget;
+      }
+    }
+    let target = preciseTarget || disclosureFallback || requestUnitTarget;
     if (!target) {
       finishActivityScroll(operation);
       return false;
     }
-    target.scrollIntoView?.({ block: "center", inline: "nearest", behavior: "smooth" });
+    target = scrollActivityNodeIntoView(target, "smooth");
     if (!(await waitForActivityVirtualization(2, operation))) return false;
     const correctedRequest = findActivityRequestTarget(
       context.prompt,
@@ -1340,15 +1578,24 @@ TEXT = r"""
         : null);
     if (!activityScrollIsCurrent(operation)) return false;
     if (correctedRequest) {
-      const correctedPrecise = findActivityRoundTarget(copyText, correctedRequest, roundIndex);
-      const correctedTarget = correctedPrecise || correctedRequest.unit || correctedRequest.turn;
+      const correctedPrecise = findActivityRoundTarget(
+        copyText,
+        correctedRequest,
+        roundIndex,
+        locateTexts,
+      );
+      const correctedTarget = correctedPrecise
+        || disclosureFallback
+        || correctedRequest.unit
+        || correctedRequest.turn;
       if (correctedTarget) {
         requestTarget = correctedRequest;
         preciseTarget = correctedPrecise;
-        if (correctedTarget !== target) {
-          correctedTarget.scrollIntoView?.({ block: "center", inline: "nearest", behavior: "smooth" });
+        const correctedVisible = visibleActivityNode(correctedTarget) || correctedTarget;
+        if (correctedVisible !== target) {
+          correctedVisible.scrollIntoView?.({ block: "center", inline: "nearest", behavior: "smooth" });
+          target = correctedVisible;
         }
-        target = correctedTarget;
       }
     }
     if (!target.isConnected) {

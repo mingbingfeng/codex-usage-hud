@@ -613,7 +613,13 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("node.scrollTop = offset > 0 ? -offset : 0;", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn('data-locate-highlight="true"', renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn(
-            'async function scrollToActivityRound(copyText, taskPrompt, roundIndex = 0, taskTurnId = "")',
+            'async function scrollToActivityRound(\n'
+            "    copyText,\n"
+            "    taskPrompt,\n"
+            '    roundIndex = 0,\n'
+            '    taskTurnId = "",\n'
+            "    locateTexts = [],\n"
+            "  )",
             renderer_hud.RENDERER_HUD_SCRIPT,
         )
         self.assertIn('data-field="topActivityLoadMore"', renderer_hud.RENDERER_HUD_SCRIPT)
@@ -2620,6 +2626,7 @@ class RendererHudPayloadTests(unittest.TestCase):
                 completed_at=completed_at,
                 activity_summary="输入：分析一个很大的日志文件",
                 copy_text="输入：\n分析一个很大的日志文件",
+                activity_texts=("分析一个很大的日志文件", "工具调用 shell"),
             ),
             RequestRound(
                 index=7,
@@ -2656,6 +2663,10 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertEqual(heavy["taskPrompt"], "分析一个很大的日志文件")
         self.assertEqual(heavy["detail"], "输入：分析一个很大的日志文件")
         self.assertIn("分析一个很大的日志文件", heavy["copyText"])
+        self.assertEqual(
+            heavy["locateTexts"],
+            ["分析一个很大的日志文件", "工具调用 shell"],
+        )
         self.assertNotIn("gpt-5.5", heavy["detail"])
         self.assertNotIn("已确认", heavy["detail"])
 

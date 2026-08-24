@@ -512,11 +512,21 @@ TEXT = r"""
           // 已回滚的轮次在 Codex 聊天里没有对应消息，materialize 扫描只会
           // 白白拖动视口约 6 秒后失败，因此只复制并高亮 HUD 内轨迹。
           if (copyNode.dataset.rolledBack !== "true") {
+            let locateTexts = [];
+            try {
+              const parsed = JSON.parse(copyNode.dataset.locateTexts || "[]");
+              if (Array.isArray(parsed)) {
+                locateTexts = parsed.filter((text) => typeof text === "string" && text.trim());
+              }
+            } catch (_) {
+              locateTexts = [];
+            }
             void sessionViewDomain.scrollToActivityRound(
               copyNode.dataset.copyText || "",
               copyNode.dataset.activityTaskPrompt || "",
               roundIndex,
               copyNode.dataset.activityTaskTurnId || "",
+              locateTexts,
             );
           }
         }

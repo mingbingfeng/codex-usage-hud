@@ -308,6 +308,10 @@ class RequestRound:
     completed_at: datetime | None = None
     activity_summary: str = ""
     copy_text: str = ""
+    # All activity entry texts of the round (输入/输出/工具调用/工具返回/推理).
+    # The locate flow matches these against the chat DOM; copy_text alone only
+    # carries the preferred entry, whose text may never render verbatim.
+    activity_texts: tuple[str, ...] = ()
 
 
 @dataclass
@@ -1966,6 +1970,11 @@ class JsonlSessionParser:
                     continue
                 seen_usage_keys.add(usage_key)
 
+            round_activity_texts: list[str] = []
+            for _side, _label, entry_text in round_activity_entries:
+                cleaned = str(entry_text or "").strip()
+                if cleaned and cleaned not in round_activity_texts:
+                    round_activity_texts.append(cleaned)
             rounds.append(
                 RequestRound(
                     index=len(rounds) + 1,
@@ -1991,6 +2000,7 @@ class JsonlSessionParser:
                     completed_at=timestamp,
                     activity_summary=activity_summary,
                     copy_text=copy_text,
+                    activity_texts=tuple(round_activity_texts[:8]),
                 )
             )
             round_started_at = timestamp
