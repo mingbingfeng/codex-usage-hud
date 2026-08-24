@@ -143,6 +143,49 @@ class RendererHudClient:
             cache_seconds=max(0.35, self.target_cache_seconds),
             failure_cooldown_seconds=4.0,
         )
+        # When True, the HUD issues no CDP traffic at all (session lock / sleep).
+        self._quiesced = False
+
+    def quiesce(self) -> None:
+        """Stop all CDP activity toward the Codex renderer without exiting.
+
+        Session-lock/sleep: the renderer is about to enter a power-saving or
+        suspended state. Keeping persistent CDP sessions and periodic
+        ``Runtime.evaluate`` traffic alive through it pins the page and is what
+        wedges the renderer main thread after a long lock (blank Codex UI).
+        Quiescing disconnects locally (no CDP round-trip, safe while the
+        renderer is suspending) so the page can freeze/resume cleanly. The HUD
+        process, its DOM injection, the binding objects, and their callbacks
+        all stay in place; ``resume`` + the next ``update`` re-attach them.
+        """
+        self._quiesced = True
+        for attr in (
+            "_active_session_binding",
+            "_settings_command_binding",
+            "_attachments_binding",
+            "_layout_binding",
+            "_theme_binding",
+        ):
+            binding = getattr(self, attr, None)
+            if binding is not None:
+                try:
+                    # Local socket close only; the object and its callback are
+                    # retained so the normal update path re-ensures it.
+                    binding.close()
+                except Exception:
+                    pass
+        # Drop target/script identifiers so the first post-resume update does a
+        # full reinstall and re-ensures every persistent binding.
+        self._clear_target_cache(clear_script=True)
+
+    def resume(self) -> None:
+        """Re-enable CDP activity after unlock/wake; next update re-attaches."""
+        self._quiesced = False
+        self._clear_target_cache(clear_script=True)
+
+    @property
+    def quiesced(self) -> bool:
+        return bool(self._quiesced)
 
     def set_active_session_callback(self, callback: Any) -> None:
         """Receive renderer active-session events over CDP instead of HTTP fetch."""
@@ -384,6 +427,8 @@ class RendererHudClient:
         request_rows_limit: int = 30,
         startup_retry: bool = False,
     ) -> bool:
+        if self._quiesced:
+            return False
         started = time.perf_counter()
         if not startup_retry:
             deferred = self._update_gate_state()
@@ -456,6 +501,8 @@ class RendererHudClient:
         *,
         startup_retry: bool = False,
     ) -> bool:
+        if self._quiesced:
+            return False
         if not self.enabled:
             self.last_status = "disabled"
             return False
@@ -868,6 +915,8 @@ class RendererHudClient:
         ticks avoid a fresh WebSocket handshake. Falls back to one ephemeral
         Runtime.evaluate against the current page target.
         """
+        if self._quiesced:
+            return False
         if not self.enabled:
             self.last_status = "disabled"
             return False
@@ -929,6 +978,8 @@ class RendererHudClient:
 
         Used by session-follow self-heal after sticky new-session or binding loss.
         """
+        if self._quiesced:
+            return False
         if not self.enabled:
             self.last_status = "disabled"
             return False
@@ -1007,7 +1058,15 @@ class RendererHudClient:
             self.last_error = f"{type(exc).__name__}: {exc}"
             return False
 
-    def close(self) -> None:
+    def close(self, *, remove_from_page: bool = True) -> None:
+        """Release local sockets and best-effort remove the HUD from the page.
+
+        ``remove_from_page=False`` skips the CDP round-trips that uninstall the
+        injected HUD. The session-lock exit path uses it: against a renderer
+        that is suspending/frozen the cleanup cannot succeed anyway, and the
+        attempt only delays the stop. The fresh session after unlock performs
+        the real cleanup before it reinstalls.
+        """
         if self._active_session_binding is not None:
             self._active_session_binding.close()
             self._active_session_binding = None
@@ -1027,6 +1086,9 @@ class RendererHudClient:
         self._theme_callback = None
         self._theme_bootstrap_target_id = ""
         if not self.enabled:
+            return
+        if not remove_from_page:
+            self._clear_target_cache(clear_script=True)
             return
         try:
             for websocket_url in self._close_websocket_candidates():

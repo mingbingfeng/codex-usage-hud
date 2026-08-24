@@ -328,7 +328,7 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn('data-action="settings-exit"', renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn('data-action="settings-exit-confirm"', renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn('data-setting-key="stop_hud_on_lock_screen"', renderer_hud.RENDERER_HUD_SCRIPT)
-        self.assertIn("锁屏后停止HUD一切活动", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("锁屏后完全退出HUD进程", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertLess(
             renderer_hud.RENDERER_HUD_SCRIPT.index('data-action="settings-exit"'),
             renderer_hud.RENDERER_HUD_SCRIPT.index('data-setting-key="stop_hud_on_lock_screen"'),

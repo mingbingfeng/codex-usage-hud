@@ -99,6 +99,24 @@ def test_renderer_session_resources_close_is_idempotent() -> None:
     assert order == ["context"]
 
 
+def test_renderer_session_resources_close_skips_cdp_removal_when_requested() -> None:
+    client = SimpleNamespace(close=MagicMock())
+    resources = RendererSessionResources(client=client)
+
+    resources.close(remove_renderer=False)
+
+    client.close.assert_called_once_with(remove_from_page=False)
+
+
+def test_renderer_session_resources_close_removes_page_by_default() -> None:
+    client = SimpleNamespace(close=MagicMock())
+    resources = RendererSessionResources(client=client)
+
+    resources.close()
+
+    client.close.assert_called_once_with()
+
+
 def test_renderer_session_resources_continue_after_close_error() -> None:
     order: list[str] = []
     resources = RendererSessionResources(
@@ -191,6 +209,7 @@ def test_renderer_session_loop_controls_maintain_connection_after_iteration() ->
         activity_wake=MagicMock(),
         maybe_heal=MagicMock(),
         maybe_probe=MagicMock(),
+        maybe_escalate_renderer_hung=MagicMock(),
     )
     controls = RendererSessionLoopControls(
         state=state,
@@ -221,6 +240,7 @@ def test_renderer_session_loop_controls_maintain_connection_after_iteration() ->
     )
     manager.maybe_heal.assert_called_once_with(snapshot)
     manager.maybe_probe.assert_called_once_with(snapshot, update_failures=3)
+    manager.maybe_escalate_renderer_hung.assert_called_once_with()
 
 
 def test_renderer_session_loop_controls_return_codex_restart_result() -> None:

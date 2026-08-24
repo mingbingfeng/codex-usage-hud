@@ -347,6 +347,232 @@ def test_event_loop_idle_iteration_does_not_build_scan_or_push() -> None:
     }
 
 
+def _minimal_inputs() -> RendererTickInputs:
+    return RendererTickInputs(
+        started=0.0,
+        update_state={"phase": "idle"},
+        bridge_wakeup=False,
+        active_session_wakeup=False,
+        file_change_reasons=set(),
+        file_change_paths=set(),
+        command=None,
+        budget_window_keys=("day", "week"),
+        runtime_events=[],
+        event_refresh_request=RefreshPlan(),
+    )
+
+
+def test_event_loop_quiesce_does_no_snapshot_or_cdp_work() -> None:
+    class StopLoop(Exception):
+        pass
+
+    calls = {"sample": 0, "apply": 0, "after": 0, "daemon": 0}
+    wait_delays: list[float] = []
+
+    def wait(delay: float) -> object:
+        wait_delays.append(delay)
+        raise StopLoop()
+
+    loop = RendererEventLoop(
+        RendererLoopState(),
+        RendererLoopExecutorPorts(
+            sample_inputs=lambda: calls.__setitem__("sample", calls["sample"] + 1),
+            apply_inputs=lambda value: calls.__setitem__("apply", calls["apply"] + 1),
+            exit_requested=lambda: False,
+            restart_requested=lambda: False,
+            restart_result=lambda: 10,
+            daemon_tick=lambda: calls.__setitem__("daemon", calls["daemon"] + 1),
+            compute_force_fast=lambda value: False,
+            apply_refresh=lambda value, force_fast: object(),
+            current_snapshot=lambda: None,
+            apply_domain_update=lambda value: False,
+            keep_alive=lambda: None,
+            after_iteration=lambda snapshot: calls.__setitem__(
+                "after", calls["after"] + 1
+            ),
+            compute_wait_delay=lambda snapshot, value, force_fast: 30.0,
+            wait=wait,
+            quiesce_active=lambda: True,
+            quiesce_wait_delay=lambda: 5.0,
+        ),
+    )
+
+    with pytest.raises(StopLoop):
+        loop.run()
+
+    # 静默期间：只做守护检测 + 等待，绝不 sample/apply/after_iteration。
+    assert calls == {"sample": 0, "apply": 0, "after": 0, "daemon": 1}
+    assert wait_delays == [5.0]
+
+
+def test_event_loop_quiesce_honors_exit_and_restart() -> None:
+    def make_loop(*, exit_now: bool, restart_now: bool) -> int:
+        state = RendererLoopState()
+        return RendererEventLoop(
+            state,
+            RendererLoopExecutorPorts(
+                sample_inputs=lambda: (_ for _ in ()).throw(AssertionError("no sample")),
+                apply_inputs=lambda value: None,
+                exit_requested=lambda: exit_now,
+                restart_requested=lambda: restart_now,
+                restart_result=lambda: 42,
+                daemon_tick=lambda: None,
+                compute_force_fast=lambda value: False,
+                apply_refresh=lambda value, force_fast: object(),
+                current_snapshot=lambda: None,
+                apply_domain_update=lambda value: False,
+                keep_alive=lambda: None,
+                after_iteration=lambda snapshot: None,
+                compute_wait_delay=lambda snapshot, value, force_fast: 30.0,
+                wait=lambda delay: None,
+                quiesce_active=lambda: True,
+                quiesce_wait_delay=lambda: 5.0,
+            ),
+        ).run()
+
+    assert make_loop(exit_now=True, restart_now=False) == 0
+    assert make_loop(exit_now=False, restart_now=True) == 42
+
+
+def test_event_loop_quiesce_resume_returns_to_normal_iteration() -> None:
+    class StopLoop(Exception):
+        pass
+
+    quiesced = [True, True, False]  # 前两次静默，第三次恢复
+    calls = {"sample": 0}
+
+    def sample() -> RendererTickInputs:
+        calls["sample"] += 1
+        raise StopLoop()
+
+    loop = RendererEventLoop(
+        RendererLoopState(),
+        RendererLoopExecutorPorts(
+            sample_inputs=sample,
+            apply_inputs=lambda value: None,
+            exit_requested=lambda: False,
+            restart_requested=lambda: False,
+            restart_result=lambda: 10,
+            daemon_tick=lambda: None,
+            compute_force_fast=lambda value: False,
+            apply_refresh=lambda value, force_fast: object(),
+            current_snapshot=lambda: None,
+            apply_domain_update=lambda value: False,
+            keep_alive=lambda: None,
+            after_iteration=lambda snapshot: None,
+            compute_wait_delay=lambda snapshot, value, force_fast: 30.0,
+            wait=lambda delay: None,
+            quiesce_active=lambda: quiesced.pop(0) if quiesced else False,
+            quiesce_wait_delay=lambda: 5.0,
+        ),
+    )
+
+    with pytest.raises(StopLoop):
+        loop.run()
+
+    # 两次静默（不 sample），恢复后立即进入正常 sample 流程。
+    assert calls["sample"] == 1
+
+
+def test_event_loop_quiesce_uses_dedicated_quiesce_wait() -> None:
+    class StopLoop(Exception):
+        pass
+
+    used: list[str] = []
+
+    def normal_wait(delay: float) -> object:
+        used.append(f"wait:{delay}")
+        raise StopLoop()
+
+    def quiesce_wait(delay: float) -> object:
+        used.append(f"quiesce_wait:{delay}")
+        raise StopLoop()
+
+    loop = RendererEventLoop(
+        RendererLoopState(),
+        RendererLoopExecutorPorts(
+            sample_inputs=lambda: None,
+            apply_inputs=lambda value: None,
+            exit_requested=lambda: False,
+            restart_requested=lambda: False,
+            restart_result=lambda: 10,
+            daemon_tick=lambda: None,
+            compute_force_fast=lambda value: False,
+            apply_refresh=lambda value, force_fast: object(),
+            current_snapshot=lambda: None,
+            apply_domain_update=lambda value: False,
+            keep_alive=lambda: None,
+            after_iteration=lambda snapshot: None,
+            compute_wait_delay=lambda snapshot, value, force_fast: 30.0,
+            wait=normal_wait,
+            quiesce_active=lambda: True,
+            quiesce_wait_delay=lambda: 5.0,
+            quiesce_wait=quiesce_wait,
+        ),
+    )
+
+    with pytest.raises(StopLoop):
+        loop.run()
+
+    assert used == ["quiesce_wait:5.0"]
+
+
+def test_event_loop_quiesce_wait_clears_stale_wake_event_no_busy_spin() -> None:
+    """A set wake event must not make the quiesce branch busy-spin.
+
+    The shared wake event is only cleared by the sampler, which the quiesce
+    branch never runs. The dedicated quiesce wait clears it first, so even with
+    the event stuck in the set state each iteration still blocks for the delay.
+    """
+    import threading
+    import time
+
+    wake = threading.Event()
+    wake.set()  # 模拟锁屏瞬间 / 静默期被命令泵置位
+    calls = {"daemon": 0}
+
+    def quiesce_wait(delay: float) -> object:
+        wake.clear()
+        return wake.wait(delay)
+
+    def daemon_tick() -> int | None:
+        calls["daemon"] += 1
+        if calls["daemon"] >= 2:
+            return 99  # 第二次迭代停止循环
+        return None
+
+    loop = RendererEventLoop(
+        RendererLoopState(),
+        RendererLoopExecutorPorts(
+            sample_inputs=lambda: None,
+            apply_inputs=lambda value: None,
+            exit_requested=lambda: False,
+            restart_requested=lambda: False,
+            restart_result=lambda: 10,
+            daemon_tick=daemon_tick,
+            compute_force_fast=lambda value: False,
+            apply_refresh=lambda value, force_fast: object(),
+            current_snapshot=lambda: None,
+            apply_domain_update=lambda value: False,
+            keep_alive=lambda: None,
+            after_iteration=lambda snapshot: None,
+            compute_wait_delay=lambda snapshot, value, force_fast: 30.0,
+            wait=lambda delay: wake.wait(delay),
+            quiesce_active=lambda: True,
+            quiesce_wait_delay=lambda: 0.05,
+            quiesce_wait=quiesce_wait,
+        ),
+    )
+
+    started = time.perf_counter()
+    result = loop.run()
+    elapsed = time.perf_counter() - started
+    assert result == 99
+    # 事件虽 stuck set，但静默 wait 先 clear，第一轮真正阻塞了 0.05s。
+    assert elapsed >= 0.04
+    assert wake.is_set() is False  # clear 生效
+
+
 def test_event_loop_snapshot_plan_runs_refresh_before_wait() -> None:
     class StopLoop(Exception):
         pass

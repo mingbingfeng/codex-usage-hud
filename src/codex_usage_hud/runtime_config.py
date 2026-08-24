@@ -140,7 +140,10 @@ def apply_to_context(
     session_lock_monitor = getattr(context, "session_lock_monitor", None)
     set_enabled = getattr(session_lock_monitor, "set_enabled", None)
     if callable(set_enabled):
-        set_enabled(bool(getattr(next_config, "stop_hud_on_lock_screen", False)))
+        # The monitor always listens now: lock/sleep quiesces the renderer by
+        # default, and stop_hud_on_lock_screen only changes on_lock to a full
+        # HUD exit instead of a quiesce. It must never be switched off here.
+        set_enabled(True)
     background = getattr(context, "background_usage_runtime", None)
     reconfigure = getattr(background, "reconfigure", None)
     if callable(reconfigure):

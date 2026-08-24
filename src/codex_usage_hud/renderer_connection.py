@@ -8,9 +8,22 @@ import threading
 import time
 
 from .core.connection_health import ConnectionHealth
+from .session_activity import windows_session_locked
 
 
 _LOGGER = logging.getLogger(__name__)
+
+# A renderer that has not acknowledged a single CDP round-trip for this long
+# while the user is at the desktop is considered hung. Healthy idle sessions
+# still answer 0.35s liveness probes every ~5s, so any real unresponsiveness
+# of this duration means the Codex renderer main thread is wedged and the app
+# window is showing blank content that only a Codex restart can recover.
+RENDERER_HUNG_GRACE_SECONDS = 90.0
+# After an unlock/resume, give a frozen-but-recoverable renderer time to thaw
+# before the HUD escalates to a Codex restart.
+RENDERER_HUNG_POST_UNLOCK_GRACE_SECONDS = 45.0
+# Minimum interval between escalations so a wedge + restart cycle cannot loop.
+RENDERER_HUNG_MIN_REESCALATE_SECONDS = 300.0
 
 
 def diagnostics_light_payload(
@@ -44,6 +57,7 @@ class RendererConnectionManager:
         runtime_errors: Callable[[], list[object]],
         health: ConnectionHealth | None = None,
         wall_time: Callable[[], float] = time.time,
+        escalate_renderer_hung: Callable[[str], None] | None = None,
     ) -> None:
         self.client = client
         self.tracker_provider = tracker_provider
@@ -53,9 +67,15 @@ class RendererConnectionManager:
         self.runtime_errors = runtime_errors
         self.health = health or ConnectionHealth()
         self.wall_time = wall_time
+        self.escalate_renderer_hung = escalate_renderer_hung
         self._light_push_enabled = False
         self._connection_attempt_lock = threading.Lock()
         self._connection_attempt_generation = 0
+        # Renderer-hung escalation bookkeeping.
+        self._hung_escalated = False
+        self._hung_escalated_at = 0.0
+        self._escalate_not_before = 0.0
+        self._last_locked_probe: bool | None = None
 
     def enable_light_push(self) -> None:
         self._light_push_enabled = True
@@ -283,6 +303,86 @@ class RendererConnectionManager:
         self.health.note_failure("heal-failed")
         self.push_light()
         return False
+
+    def note_session_resumed(self) -> None:
+        """Give a thawing renderer a grace window before hung-escalation.
+
+        Called when the HUD resumes from a session-lock quiesce. ``last_ok_at``
+        is stale from before the lock, so without this the escalation would fire
+        immediately even when the renderer is merely still waking up.
+        """
+        self._escalate_not_before = max(
+            self._escalate_not_before,
+            time.monotonic() + RENDERER_HUNG_POST_UNLOCK_GRACE_SECONDS,
+        )
+        self._hung_escalated = False
+
+    def maybe_escalate_renderer_hung(self) -> bool:
+        """Detect a permanently unresponsive Codex renderer and escalate.
+
+        The blank-UI failure after a long lock is a wedged renderer main
+        thread: CDP ``Runtime.evaluate`` stops being acknowledged (visible as
+        hours of ``cdp.update_failed``/``persistentFallbackReason`` timeouts),
+        the window paints nothing, and every HUD cleanup path fails because it
+        also needs CDP. When the renderer has not acknowledged anything for
+        ``RENDERER_HUNG_GRACE_SECONDS`` while the desktop is unlocked, request
+        a Codex restart through the existing restart-codex escalation path so
+        the user is not left with a permanently blank app.
+
+        Must run after the probe in the same loop iteration: a healthy renderer
+        refreshes ``last_ok_at`` first and never escalates.
+        """
+        if self.escalate_renderer_hung is None:
+            return False
+        health = self.health
+        now = time.monotonic()
+        last_ok = float(getattr(health, "last_ok_at", 0.0) or 0.0)
+        if last_ok <= 0.0:
+            # Never connected yet; startup attach failure is handled elsewhere.
+            return False
+        unresponsive = now - last_ok
+        if unresponsive < RENDERER_HUNG_GRACE_SECONDS:
+            self._hung_escalated = False
+            return False
+        locked = bool(windows_session_locked())
+        if locked != self._last_locked_probe:
+            if self._last_locked_probe is True and not locked:
+                # Just unlocked/resumed: let a thawing renderer recover before
+                # the HUD escalates to a disruptive Codex restart.
+                self._escalate_not_before = max(
+                    self._escalate_not_before,
+                    now + RENDERER_HUNG_POST_UNLOCK_GRACE_SECONDS,
+                )
+            self._last_locked_probe = locked
+        if locked:
+            return False
+        if now < float(self._escalate_not_before or 0.0):
+            return False
+        if self._hung_escalated:
+            return False
+        if self._hung_escalated_at and (
+            now - self._hung_escalated_at
+        ) < RENDERER_HUNG_MIN_REESCALATE_SECONDS:
+            return False
+        self._hung_escalated = True
+        self._hung_escalated_at = now
+        reason = f"renderer-hung:{int(unresponsive)}s"
+        _LOGGER.warning(
+            "renderer_hung_escalation reason=%s status=%s error=%s",
+            reason,
+            getattr(self.client, "last_status", ""),
+            getattr(self.client, "last_error", ""),
+        )
+        try:
+            self.escalate_renderer_hung(reason)
+        except Exception:
+            _LOGGER.exception("renderer_hung_escalation_callback_failed")
+            return False
+        try:
+            self.push_light()
+        except Exception:
+            pass
+        return True
 
     def activity_wake(self, snapshot: object | None, *, reason: str) -> bool:
         gate = getattr(self.client, "update_gate_state", None)

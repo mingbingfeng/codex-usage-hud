@@ -3074,9 +3074,9 @@ _TEXT_PREFIX = r"""
             </div>
             <div class="codex-usage-hud-settings-footnote">
               <button type="button" class="codex-usage-hud-settings-action" data-action="settings-exit" data-variant="ghost">退出 HUD</button>
-              <label class="codex-usage-hud-settings-lock-toggle" title="锁屏后退出 HUD，解锁后自动重新启动">
-                <input type="checkbox" data-setting-key="stop_hud_on_lock_screen" ${settings.stop_hud_on_lock_screen ? "checked" : ""} aria-label="锁屏后停止HUD一切活动">
-                <span>锁屏后停止HUD一切活动</span>
+              <label class="codex-usage-hud-settings-lock-toggle" title="默认锁屏/睡眠时已自动暂停对 Codex 的一切活动（HUD 保留，解锁恢复）。勾选此项则完全退出 HUD 进程，解锁后由守护重启">
+                <input type="checkbox" data-setting-key="stop_hud_on_lock_screen" ${settings.stop_hud_on_lock_screen ? "checked" : ""} aria-label="锁屏后完全退出HUD进程">
+                <span>锁屏后完全退出HUD进程</span>
               </label>
               <div class="codex-usage-hud-settings-status">配置文件：${escapeHtml(path || "未提供")} ${bridge ? "" : "（桥接未连接）"}</div>
             </div>

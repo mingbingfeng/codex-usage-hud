@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import codex_usage_hud.renderer_connection as _rc
 from codex_usage_hud.core.connection_health import ConnectionHealth
 from codex_usage_hud.renderer_connection import RendererConnectionManager
 
@@ -37,6 +38,7 @@ def _manager(
     health: ConnectionHealth | None = None,
     wake: MagicMock | None = None,
     schedule: MagicMock | None = None,
+    escalate: object | None = None,
 ) -> tuple[RendererConnectionManager, object, MagicMock, MagicMock]:
     client = client or SimpleNamespace(update_payload=MagicMock(return_value=True))
     wake = wake or MagicMock()
@@ -50,6 +52,7 @@ def _manager(
         runtime_errors=lambda: [{"code": "sample"}],
         health=health,
         wall_time=lambda: 20.0,
+        escalate_renderer_hung=escalate,
     )
     return manager, client, wake, schedule
 
@@ -176,3 +179,141 @@ def test_activity_wake_rematerializes_pending_mapping_before_dom_report() -> Non
     )
     client.report_active_session.assert_not_called()
     wake.assert_called_once_with()
+
+
+def _hung_health(now: float, last_ok: float) -> ConnectionHealth:
+    health = ConnectionHealth()
+    health.last_ok_at = last_ok
+    health.last_fail_at = now
+    health.consecutive_failures = 3
+    health.transport_state = "failed"
+    return health
+
+
+def test_hung_escalation_fires_after_grace_when_unlocked(monkeypatch) -> None:
+    now = [10_000.0]
+    monkeypatch.setattr(_rc.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(_rc, "windows_session_locked", lambda: False)
+    escalations: list[str] = []
+    health = _hung_health(
+        now[0],
+        now[0] - _rc.RENDERER_HUNG_GRACE_SECONDS - 1.0,
+    )
+    manager, _, _, _ = _manager(health=health, escalate=escalations.append)
+    manager.enable_light_push()
+
+    assert manager.maybe_escalate_renderer_hung()
+    assert escalations == [f"renderer-hung:{int(_rc.RENDERER_HUNG_GRACE_SECONDS + 1.0)}s"]
+    # A second call in the same episode must not re-escalate.
+    assert not manager.maybe_escalate_renderer_hung()
+    assert len(escalations) == 1
+
+
+def test_hung_escalation_does_not_fire_while_locked(monkeypatch) -> None:
+    now = [10_000.0]
+    monkeypatch.setattr(_rc.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(_rc, "windows_session_locked", lambda: True)
+    escalations: list[str] = []
+    health = _hung_health(
+        now[0],
+        now[0] - _rc.RENDERER_HUNG_GRACE_SECONDS - 1.0,
+    )
+    manager, _, _, _ = _manager(health=health, escalate=escalations.append)
+
+    assert not manager.maybe_escalate_renderer_hung()
+    assert escalations == []
+
+
+def test_hung_escalation_does_not_fire_when_healthy(monkeypatch) -> None:
+    now = [10_000.0]
+    monkeypatch.setattr(_rc.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(_rc, "windows_session_locked", lambda: False)
+    escalations: list[str] = []
+    health = ConnectionHealth()
+    health.note_success(now=now[0])
+    manager, _, _, _ = _manager(health=health, escalate=escalations.append)
+
+    assert not manager.maybe_escalate_renderer_hung()
+    assert escalations == []
+
+
+def test_hung_escalation_does_not_fire_before_any_success(monkeypatch) -> None:
+    now = [10_000.0]
+    monkeypatch.setattr(_rc.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(_rc, "windows_session_locked", lambda: False)
+    escalations: list[str] = []
+    health = ConnectionHealth()  # last_ok_at == 0.0 -> never connected
+    manager, _, _, _ = _manager(health=health, escalate=escalations.append)
+
+    assert not manager.maybe_escalate_renderer_hung()
+    assert escalations == []
+
+
+def test_hung_escalation_gives_post_unlock_grace(monkeypatch) -> None:
+    now = [10_000.0]
+    monkeypatch.setattr(_rc.time, "monotonic", lambda: now[0])
+    locked = [True]
+    monkeypatch.setattr(_rc, "windows_session_locked", lambda: locked[0])
+    escalations: list[str] = []
+    health = _hung_health(
+        now[0],
+        now[0] - 2 * _rc.RENDERER_HUNG_GRACE_SECONDS,
+    )
+    manager, _, _, _ = _manager(health=health, escalate=escalations.append)
+
+    # First pass while still locked: records the locked probe, no escalation.
+    assert not manager.maybe_escalate_renderer_hung()
+    assert escalations == []
+
+    # Unlock: the renderer gets the post-unlock grace to thaw.
+    locked[0] = False
+    assert not manager.maybe_escalate_renderer_hung()
+    assert escalations == []
+
+    # After the post-unlock grace elapses, escalation fires.
+    now[0] += _rc.RENDERER_HUNG_POST_UNLOCK_GRACE_SECONDS + 1.0
+    assert manager.maybe_escalate_renderer_hung()
+    assert len(escalations) == 1
+
+
+def test_note_session_resumed_arms_thaw_grace_and_rearms_escalation(monkeypatch) -> None:
+    now = [10_000.0]
+    monkeypatch.setattr(_rc.time, "monotonic", lambda: now[0])
+    manager, _, _, _ = _manager()
+
+    # 恢复前无宽限；恢复后设置解冻宽限并重置挂死升级标志。
+    assert manager._escalate_not_before == 0.0  # noqa: SLF001
+    manager._hung_escalated = True  # noqa: SLF001
+    manager.note_session_resumed()
+    assert manager._escalate_not_before == (
+        now[0] + _rc.RENDERER_HUNG_POST_UNLOCK_GRACE_SECONDS
+    )  # noqa: SLF001
+    assert manager._hung_escalated is False  # noqa: SLF001
+
+
+def test_hung_escalation_rearms_after_recovery(monkeypatch) -> None:
+    now = [10_000.0]
+    monkeypatch.setattr(_rc.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(_rc, "windows_session_locked", lambda: False)
+    escalations: list[str] = []
+    health = _hung_health(
+        now[0],
+        now[0] - _rc.RENDERER_HUNG_GRACE_SECONDS - 1.0,
+    )
+    manager, _, _, _ = _manager(health=health, escalate=escalations.append)
+
+    assert manager.maybe_escalate_renderer_hung()
+    assert len(escalations) == 1
+
+    # Renderer recovers: a success refreshes last_ok_at, rearming the check.
+    now[0] += 10.0
+    health.note_success(now=now[0])
+    assert not manager.maybe_escalate_renderer_hung()
+
+    # Healthy for a long stretch, then it wedges again beyond the grace.
+    now[0] += _rc.RENDERER_HUNG_MIN_REESCALATE_SECONDS
+    health.note_success(now=now[0])
+    assert not manager.maybe_escalate_renderer_hung()
+    now[0] += _rc.RENDERER_HUNG_GRACE_SECONDS + 1.0
+    assert manager.maybe_escalate_renderer_hung()
+    assert len(escalations) == 2

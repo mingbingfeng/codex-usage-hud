@@ -19,6 +19,22 @@ _WTS_SESSION_LOCK = 0x7
 _WTS_SESSION_UNLOCK = 0x8
 _NOTIFY_FOR_THIS_SESSION = 0
 _HWND_MESSAGE = -3
+# Power-broadcast messages: Windows delivers WM_POWERBROADCAST on sleep and
+# resume. A machine that sleeps or hibernates does not always emit a WTS
+# session-lock event, so the HUD must treat suspend as "away" too, or it keeps
+# CDP traffic alive through the entire sleep and the Codex renderer can wedge.
+_WM_POWERBROADCAST = 0x0218
+_PBT_APMSUSPEND = 0x0004
+_PBT_APMRESUMEAUTOMATIC = 0x0012
+_PBT_APMRESUMESUSPEND = 0x0007
+_PBT_APMRESUMECRITICAL = 0x0006
+# Query events are part of the suspend handshake and do NOT mean the system
+# is actually going away: PBT_APMQUERYSUSPEND can be vetoed by any app, and
+# PBT_APMQUERYSUSPENDFAILED means the suspend was cancelled (still awake).
+# Only the definitive PBT_APMSUSPEND (which always follows a successful
+# query) maps to "away", so a cancelled suspend can never stop the HUD.
+_PBT_APMQUERYSUSPEND = 0x0000
+_PBT_APMQUERYSUSPENDFAILED = 0x0002
 
 _WINFUNCTYPE = getattr(ctypes, "WINFUNCTYPE", ctypes.CFUNCTYPE)
 _WNDPROC = _WINFUNCTYPE(
@@ -175,16 +191,41 @@ class WindowsSessionLockMonitor:
             self._hwnd = None
             self._locked = None
 
+    def _handle_power_broadcast(self, wparam: int) -> None:
+        """Map Windows power events to away/back transitions.
+
+        A machine that sleeps or hibernates does not always emit a WTS
+        session-lock event, so the HUD must treat suspend as "away" too, or it
+        keeps CDP traffic alive through the entire sleep and the Codex renderer
+        can wedge (blank UI after unlock). Only the definitive suspend event is
+        handled; the query handshake (QUERYSUSPEND / QUERYSUSPENDFAILED) never
+        triggers "away" because the suspend may still be vetoed.
+        """
+        if wparam == _PBT_APMSUSPEND:
+            self._emit_transition(True)
+        elif wparam in {
+            _PBT_APMRESUMEAUTOMATIC,
+            _PBT_APMRESUMESUSPEND,
+            _PBT_APMRESUMECRITICAL,
+        }:
+            self._emit_transition(False)
+
     def _emit_transition(self, locked: bool) -> None:
+        """Record a lock-state observation and fire a transition callback.
+
+        The first observation is not swallowed: a WTS/power event that arrives
+        between ``start()`` and the initial-state probe would otherwise be lost
+        forever (the probe then dedups against the recorded state and no
+        callback ever fires). Emitting on the first event closes that race.
+        """
         with self._state_lock:
             previous = self._locked
             self._locked = bool(locked)
-        if previous is None or bool(locked) == previous:
-            return
-        if locked:
-            self._on_lock()
-        else:
-            self._on_unlock()
+        if previous is None or bool(locked) != previous:
+            if locked:
+                self._on_lock()
+            else:
+                self._on_unlock()
 
     def _run(self) -> None:
         user32 = None
@@ -222,6 +263,8 @@ class WindowsSessionLockMonitor:
                         self._emit_transition(True)
                     elif int(wparam) == _WTS_SESSION_UNLOCK:
                         self._emit_transition(False)
+                elif message == _WM_POWERBROADCAST:
+                    self._handle_power_broadcast(int(wparam))
                 return int(def_window_proc(current_hwnd, message, wparam, lparam))
 
             wnd_proc = _WNDPROC(window_proc)

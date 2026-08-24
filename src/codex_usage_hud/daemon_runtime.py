@@ -583,7 +583,11 @@ def run_daemon(
                     except KeyboardInterrupt:
                         return 130
                     _LOGGER.info("daemon_session_unlock_detected renderer_restart=scheduled")
-                    force_renderer_retry = False
+                    # The renderer may have wedged during the long lock (blank
+                    # Codex UI). Keep the recovery retry path armed so a failed
+                    # re-attach escalates to a Codex restart instead of the
+                    # daemon silently giving up and leaving the blank window.
+                    force_renderer_retry = True
                     launched_codex_for_renderer = False
                     observed_codex_launch = False
                     renderer_recovery_failures = 0

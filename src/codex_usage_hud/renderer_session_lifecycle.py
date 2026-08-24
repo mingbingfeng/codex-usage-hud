@@ -43,8 +43,13 @@ class RendererSessionResources:
         self.overlay = None
         return overlay
 
-    def close(self) -> None:
-        """Release optional resources in strict reverse construction order."""
+    def close(self, *, remove_renderer: bool = True) -> None:
+        """Release optional resources in strict reverse construction order.
+
+        ``remove_renderer=False`` (session-lock path) closes local sockets and
+        stops all HUD activity without CDP round-trips against a renderer that
+        may already be suspending; the fresh session after unlock reinstalls.
+        """
         if self._closed:
             return
         self._closed = True
@@ -68,7 +73,10 @@ class RendererSessionResources:
             try:
                 close = getattr(resource, close_name, None)
                 if callable(close):
-                    close()
+                    if field_name == "client" and not remove_renderer:
+                        close(remove_from_page=False)
+                    else:
+                        close()
             except Exception:
                 _LOGGER.exception(
                     "renderer_session_close_failed resource=%s",
@@ -175,6 +183,9 @@ class RendererSessionLoopControls:
             manager.activity_wake(snapshot, reason=wake_reason)
         manager.maybe_heal(snapshot)
         manager.maybe_probe(snapshot, update_failures=self.state.failures)
+        # Must run after the probe: a healthy renderer refreshes last_ok_at
+        # first, so only a genuinely unresponsive renderer escalates.
+        manager.maybe_escalate_renderer_hung()
 
 
 class RendererStartupFeedback:

@@ -90,6 +90,14 @@ class RendererLoopExecutorPorts:
     wait: Callable[[float], object]
     update_gate: Callable[[], tuple[bool, str, float]] = lambda: (True, "", 0.0)
     record_refresh_merge: Callable[[], None] = lambda: None
+    # Session-lock quiesce: while active, the loop does no snapshot/CDP/probe
+    # work at all so the renderer can freeze/resume cleanly. Default off.
+    quiesce_active: Callable[[], bool] = lambda: False
+    quiesce_wait_delay: Callable[[], float] = lambda: 5.0
+    # Quiesce wait must clear-then-wait the wake event: the shared wake event
+    # is only cleared by the sampler, which the quiesce branch never runs, so a
+    # set event would make wait() return immediately and busy-spin all lock.
+    quiesce_wait: Callable[[float], object] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -672,6 +680,18 @@ class RendererEventLoop:
             daemon_result = self.ports.daemon_tick()
             if daemon_result is not None:
                 return daemon_result
+            if self.ports.quiesce_active():
+                # Quiesced (session locked/sleeping): do not build snapshots,
+                # touch CDP, probe, or heal — any of those pins the renderer and
+                # wedges it across a long lock. Wait for wake/exit/restart only,
+                # keeping the daemon watchdog alive at a conservative cadence.
+                if self.ports.exit_requested():
+                    return 0
+                if self.ports.restart_requested():
+                    return self.ports.restart_result()
+                wait_fn = self.ports.quiesce_wait or self.ports.wait
+                wait_fn(self.ports.quiesce_wait_delay())
+                continue
             inputs = self.ports.sample_inputs()
             self.ports.apply_inputs(inputs)
             if self.ports.exit_requested():

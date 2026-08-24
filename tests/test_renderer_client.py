@@ -77,3 +77,43 @@ def test_client_uses_its_payload_and_support_owners(monkeypatch) -> None:
     assert captured["snapshot"] is snapshot
     assert captured["support_images"] == []
     assert captured["settings_path"] is None
+
+
+def test_client_quiesce_blocks_all_cdp_entrypoints_and_resume_reenables() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    client = renderer_client.RendererHudClient(enabled=True)
+    # 塞一个假 binding，验证 quiesce 断开 socket 但保留对象供恢复重连。
+    fake_binding = MagicMock()
+    client._active_session_binding = fake_binding  # noqa: SLF001
+    client._script_identifier = "sid"  # noqa: SLF001
+
+    client.quiesce()
+
+    assert client.quiesced
+    fake_binding.close.assert_called_once_with()
+    # 对象保留：恢复后 update 流程会 ensure 重连，通道不丢。
+    assert client._active_session_binding is fake_binding  # noqa: SLF001
+    # script id 清空：恢复后强制重装脚本 + 重建绑定。
+    assert client._script_identifier == ""  # noqa: SLF001
+    assert client.update(SimpleNamespace()) is False
+    assert client.update_payload({}) is False
+    assert client.probe_connection() is False
+    assert client.report_active_session() is False
+
+    client.resume()
+
+    assert not client.quiesced
+    # resume 后 target cache 清空，强制下次 update 重新 attach。
+    assert client._cached_target_id == ""  # noqa: SLF001
+
+
+def test_client_update_and_probe_short_circuit_before_cdp_when_quiesced() -> None:
+    client = renderer_client.RendererHudClient(enabled=True)
+    client.quiesce()
+
+    # 短路必须发生在任何网络/CDP 调用之前（不触网）。
+    assert client.update_payload({"k": "v"}) is False
+    assert client.probe_connection() is False
+    client.resume()
