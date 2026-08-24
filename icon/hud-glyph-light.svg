@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="Codex Usage HUD">
+  <defs>
+    <linearGradient id="usageArc" x1="0.5" y1="0" x2="0.5" y2="1">
+      <stop offset="0%" stop-color="#1FB6A6"/>
+      <stop offset="100%" stop-color="#FF9F43"/>
+    </linearGradient>
+  </defs>
+  <!-- 仪表轨道：HUD 叠加层 / 持续监控的闭环 -->
+  <circle cx="128" cy="128" r="86" fill="none" stroke="#D7E0E6" stroke-width="18"/>
+  <!-- 用量进度弧：token/缓存/花费 相对预算的消耗，青→琥珀 映射 预算内→临近上限 -->
+  <path d="M128 42 A86 86 0 1 1 47.19 157.41" fill="none" stroke="url(#usageArc)" stroke-width="18" stroke-linecap="round"/>
+  <!-- 弧端读数点：当前用量刻度（≈69% 填充） -->
+  <circle cx="47.19" cy="157.41" r="8" fill="#FF9F43"/>
+  <!-- 中心活动点：实时活动中的 Codex 会话 -->
+  <circle cx="128" cy="128" r="20" fill="none" stroke="#1FB6A6" stroke-width="3" opacity="0.30"/>
+  <circle cx="128" cy="128" r="9" fill="#1FB6A6"/>
+</svg>

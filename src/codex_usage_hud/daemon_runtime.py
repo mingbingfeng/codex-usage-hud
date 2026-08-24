@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 import logging
 import sys
 import threading
-import time
 from typing import Any
 
 from . import loading_feedback
@@ -22,6 +22,7 @@ from .daemon import (
 from .instance_lock import HudAlreadyRunningError, HudInstanceLock
 from .runtime_diagnostics import append_renderer_diagnostic, attach_cli_logger_to_daemon_log
 from .session_activity import WindowsSessionLockMonitor
+from .windows_tray import ShutdownCoordinator, create_windows_tray
 
 
 DEFAULT_DAEMON_STARTUP_WAIT = "wait"
@@ -66,6 +67,40 @@ class DaemonServices:
     select_launch_port: Callable[[], int] | None = None
     launch: Callable[..., bool] = launch_codex_app
     append_diagnostic: Callable[..., object] = append_renderer_diagnostic
+    create_tray: Callable[..., object] | None = None
+
+
+@contextmanager
+def _tray_lifetime(
+    factory: Callable[..., object],
+    shutdown: ShutdownCoordinator,
+):
+    """Keep one tray instance alive for the whole daemon lifetime."""
+    tray: object | None = None
+    try:
+        tray = factory(on_exit=shutdown.request)
+        start = getattr(tray, "start", None)
+        if callable(start):
+            start()
+    except Exception as exc:
+        _LOGGER.warning("windows_tray_unavailable error=%s", exc)
+    try:
+        yield
+    finally:
+        close = getattr(tray, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                _LOGGER.debug("windows_tray_close_failed", exc_info=True)
+
+
+def _configure_manager_shutdown(
+    manager: object,
+    shutdown: ShutdownCoordinator,
+) -> None:
+    if isinstance(manager, CodexDaemonManager):
+        manager.set_stop_requested(shutdown)
 
 
 def _clone_args(args: argparse.Namespace, **changes: object) -> argparse.Namespace:
@@ -174,12 +209,17 @@ def run_hud_session(
     overlay_handoff: dict[str, object] | None = None,
     run_renderer: Callable[..., int] | None = None,
     restart_codex: Callable[[], bool] | None = None,
+    shutdown_coordinator: object | None = None,
 ) -> int:
     """Run one renderer session and handle the bounded restart transition."""
     del hide_until_attached
     renderer = run_renderer
     if renderer is None:
         raise RuntimeError("daemon runtime requires a renderer session callback")
+    if isinstance(daemon_manager, CodexDaemonManager) and isinstance(
+        shutdown_coordinator, ShutdownCoordinator
+    ):
+        daemon_manager.set_stop_requested(shutdown_coordinator)
     restart = restart_codex or _default_restart_codex
     session_args = clone_args_with_display_mode(args, "renderer")
     renderer_exit = renderer(
@@ -192,6 +232,7 @@ def run_hud_session(
         overlay_handoff=overlay_handoff,
         loading_feedback=loading_feedback_instance,
         restart_codex=restart,
+        shutdown_coordinator=shutdown_coordinator,
     )
     if renderer_exit == HUD_SWITCH_TO_RENDERER_RESTART_CODEX:
         previous_pid = _manager_primary_pid(daemon_manager)
@@ -216,6 +257,7 @@ def run_hud_session(
             overlay_handoff=overlay_handoff,
             loading_feedback=loading_feedback_instance,
             restart_codex=restart,
+            shutdown_coordinator=shutdown_coordinator,
         )
     if renderer_exit == HUD_SWITCH_TO_RENDERER:
         _LOGGER.info("renderer_hud_legacy_switch_ignored code=%s", renderer_exit)
@@ -400,6 +442,8 @@ def run_daemon(
     services.attach_logger()
     services.hide_console()
     manager = services.manager_factory(poll_ms=args.daemon_poll_ms)
+    shutdown = ShutdownCoordinator()
+    _configure_manager_shutdown(manager, shutdown)
     startup_decision = services.startup_decision or daemon_startup_decision
     renderer = services.run_renderer
     hud = services.run_hud
@@ -420,8 +464,9 @@ def run_daemon(
     restart = services.restart_codex or _default_restart_codex
     automatic_restart = services.automatic_restart_codex or restart
     overlay_handoff: dict[str, object] = {}
+    tray_factory = services.create_tray or create_windows_tray
     try:
-        with services.lock_factory():
+        with services.lock_factory(), _tray_lifetime(tray_factory, shutdown):
             try:
                 startup = startup_decision(args, manager)
             except KeyboardInterrupt:
@@ -433,8 +478,11 @@ def run_daemon(
                     lock_already_held=True,
                     hide_until_attached=True,
                     overlay_handoff=overlay_handoff,
+                    shutdown_coordinator=shutdown,
                 )
 
+            if shutdown.is_requested():
+                return 0
             if startup.mode == DEFAULT_DAEMON_STARTUP_CANCEL:
                 return 0
             startup_loading: Any | None = None
@@ -484,11 +532,15 @@ def run_daemon(
             while True:
                 try:
                     if pending_codex_replacement_pid is not None:
+                        if shutdown.is_requested():
+                            return 0
                         replacement_ready = _wait_for_codex_after_explicit_restart(
                             manager,
                             pending_codex_replacement_pid,
                         )
                         pending_codex_replacement_pid = None
+                        if shutdown.is_requested():
+                            return 0
                         if not replacement_ready:
                             _LOGGER.warning(
                                 "daemon_codex_replacement_not_ready"
@@ -497,6 +549,8 @@ def run_daemon(
                             return RENDERER_HUD_UNAVAILABLE
                     else:
                         manager.wait_for_codex()
+                        if shutdown.is_requested():
+                            return 0
                 except KeyboardInterrupt:
                     return 130
                 except ProcessListenerError as exc:
@@ -506,6 +560,7 @@ def run_daemon(
                         lock_already_held=True,
                         hide_until_attached=True,
                         overlay_handoff=overlay_handoff,
+                        shutdown_coordinator=shutdown,
                     )
                 if force_renderer_retry:
                     exit_code = renderer(
@@ -517,6 +572,7 @@ def run_daemon(
                         observed_codex_launch=observed_codex_launch,
                         overlay_handoff=overlay_handoff,
                         seamless_recovery=seamless_recovery,
+                        shutdown_coordinator=shutdown,
                     )
                 else:
                     exit_code = hud(
@@ -528,10 +584,14 @@ def run_daemon(
                         observed_codex_launch=observed_codex_launch,
                         overlay_handoff=overlay_handoff,
                         seamless_recovery=seamless_recovery,
+                        shutdown_coordinator=shutdown,
                     )
                 session_loading = startup_loading
                 startup_loading = None
                 observed_codex_launch = False
+                if shutdown.is_requested():
+                    _close_overlay_handoff(overlay_handoff)
+                    return 0
                 if exit_code == HUD_AUTO_RESTART_CODEX:
                     if session_loading is not None:
                         session_loading.close()
@@ -654,7 +714,8 @@ def run_daemon(
                         launched_codex_for_renderer = True
                         pending_codex_replacement_pid = previous_pid
                         renderer_recovery_failures = 0
-                    time.sleep(manager.poll_seconds)
+                    if shutdown.wait(manager.poll_seconds):
+                        return 0
                     continue
                 _close_overlay_handoff(overlay_handoff)
                 return exit_code

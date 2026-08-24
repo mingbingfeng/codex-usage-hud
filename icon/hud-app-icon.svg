@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="Codex Usage HUD">
+  <defs>
+    <linearGradient id="tileBg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0E4A47"/>
+      <stop offset="100%" stop-color="#06211F"/>
+    </linearGradient>
+    <linearGradient id="arc" x1="0.5" y1="0" x2="0.5" y2="1">
+      <stop offset="0%" stop-color="#34E0CB"/>
+      <stop offset="100%" stop-color="#FFB454"/>
+    </linearGradient>
+  </defs>
+  <!-- 应用磁贴：深青品牌底 -->
+  <rect x="0" y="0" width="256" height="256" rx="56" fill="url(#tileBg)"/>
+  <rect x="0" y="0" width="256" height="256" rx="56" fill="none" stroke="rgba(255,255,255,0.07)" stroke-width="2"/>
+  <!-- 字形 -->
+  <circle cx="128" cy="128" r="86" fill="none" stroke="rgba(255,255,255,0.22)" stroke-width="18"/>
+  <path d="M128 42 A86 86 0 1 1 47.19 157.41" fill="none" stroke="url(#arc)" stroke-width="18" stroke-linecap="round"/>
+  <circle cx="47.19" cy="157.41" r="8" fill="#FFB454"/>
+  <circle cx="128" cy="128" r="20" fill="none" stroke="#34E0CB" stroke-width="3" opacity="0.45"/>
+  <circle cx="128" cy="128" r="9" fill="#EAFBF8"/>
+</svg>

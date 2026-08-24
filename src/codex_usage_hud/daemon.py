@@ -468,6 +468,7 @@ class CodexDaemonManager:
         self._exit_monitor_factory = exit_monitor_factory
         self._exit_monitor: ProcessExitMonitor | None = None
         self._exit_monitor_pid: int | None = None
+        self._stop_requested: Callable[[], bool] | None = None
 
     @property
     def poll_seconds(self) -> float:
@@ -487,12 +488,18 @@ class CodexDaemonManager:
         self._refresh_exit_monitor(snapshot)
         return snapshot
 
+    def set_stop_requested(self, callback: Callable[[], bool] | None) -> None:
+        """Allow an external event to interrupt daemon wait states."""
+        self._stop_requested = callback
+
     def wait_for_codex(self) -> ProcessSnapshot:
         """Block in a low-frequency loop until a Codex process appears."""
         self.state = DaemonState.WAITING_FOR_CODEX
         _logger.info("daemon_waiting poll_ms=%s", self.poll_ms)
         while True:
             snapshot = self.snapshot()
+            if self._stop_requested is not None and self._stop_requested():
+                return snapshot
             if snapshot.found:
                 self.state = DaemonState.HUD_RUNNING
                 _logger.info(
@@ -501,7 +508,11 @@ class CodexDaemonManager:
                     ",".join(snapshot.names),
                 )
                 return snapshot
-            time.sleep(self.poll_seconds)
+            wait = getattr(self._stop_requested, "wait", None)
+            if callable(wait):
+                wait(self.poll_seconds)
+            else:
+                time.sleep(self.poll_seconds)
 
     def wait_for_codex_replacement(
         self,
@@ -533,6 +544,8 @@ class CodexDaemonManager:
         )
         while True:
             snapshot = self.snapshot()
+            if self._stop_requested is not None and self._stop_requested():
+                return False
             if snapshot.found and (
                 old_pid is None or old_pid not in snapshot.pids
             ):
@@ -550,7 +563,11 @@ class CodexDaemonManager:
                     ",".join(str(pid) for pid in snapshot.pids),
                 )
                 return False
-            time.sleep(self.poll_seconds)
+            wait = getattr(self._stop_requested, "wait", None)
+            if callable(wait):
+                wait(self.poll_seconds)
+            else:
+                time.sleep(self.poll_seconds)
 
     def codex_is_running(self) -> bool:
         """Return whether the watched Codex process family is still alive."""

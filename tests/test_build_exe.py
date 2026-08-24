@@ -58,6 +58,11 @@ class PyInstallerCommandTests(unittest.TestCase):
             self.assertIn("--collect-submodules", command)
             self.assertIn("codex_usage_hud", command)
             self.assertIn("--add-data", command)
+            self.assertIn("--icon", command)
+            self.assertTrue(
+                any("hud-app-icon.ico" in item for item in command),
+                msg=command,
+            )
             self.assertTrue(
                 any("sponsor_alipay.jpg" in item for item in command),
                 msg=command,

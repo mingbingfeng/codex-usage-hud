@@ -23,6 +23,7 @@ DEFAULT_BUILD_ROOT = PROJECT_ROOT / "build" / "pyinstaller"
 DEFAULT_DIST_ROOT = PROJECT_ROOT / "dist"
 BOOTSTRAP_FILENAME = "_codex_hud_exe_entry.py"
 DEFAULT_EXE_NAME = "codex-hud"
+DEFAULT_ICON_FILE = PROJECT_ROOT / "icon" / "hud-app-icon.ico"
 DEFAULT_LOG_LEVEL = "WARN"
 
 # The package is tiny, but we still keep the graph tight and explicit:
@@ -46,6 +47,10 @@ DEFAULT_DATA_FILES = (
     ),
     (
         PROJECT_ROOT / "src" / "codex_usage_hud" / "assets" / "sponsor_wechat.png",
+        "codex_usage_hud/assets",
+    ),
+    (
+        DEFAULT_ICON_FILE,
         "codex_usage_hud/assets",
     ),
 )
@@ -94,6 +99,7 @@ def build_pyinstaller_command(
     dist_root: Path,
     build_root: Path,
     name: str = DEFAULT_EXE_NAME,
+    icon_path: Path | None = DEFAULT_ICON_FILE,
     log_level: str = DEFAULT_LOG_LEVEL,
     collect_packages: Sequence[str] = DEFAULT_COLLECT_PACKAGES,
     data_files: Sequence[tuple[Path, str]] = DEFAULT_DATA_FILES,
@@ -123,6 +129,8 @@ def build_pyinstaller_command(
     ]
     for package in collect_packages:
         command.extend(["--collect-submodules", package])
+    if icon_path is not None:
+        command.extend(["--icon", str(icon_path)])
     for source, destination in data_files:
         command.extend(["--add-data", pyinstaller_data_spec(source, destination)])
     for module in excluded_modules:

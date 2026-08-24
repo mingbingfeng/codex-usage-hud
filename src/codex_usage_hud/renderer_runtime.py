@@ -7,6 +7,7 @@ from .renderer_session_lifecycle import (
     RendererSessionResources,
 )
 import argparse
+from collections.abc import Callable
 from contextlib import nullcontext
 import logging
 import sys
@@ -248,14 +249,18 @@ def production_runtime_services() -> RuntimeServices:
     )
 
 
-def run_renderer_hud_session(args: argparse.Namespace, *, lock_already_held: bool = False, daemon_manager: CodexDaemonManager | None = None, launched_codex: bool = False, observed_codex_launch: bool = False, loading_feedback: object | None = None, overlay_handoff: dict[str, object] | None = None, seamless_recovery: bool = False, restart_codex: object | None = None, services: RuntimeServices | None = None, ports: RendererSessionPorts) -> int:
+def run_renderer_hud_session(args: argparse.Namespace, *, lock_already_held: bool = False, daemon_manager: CodexDaemonManager | None = None, launched_codex: bool = False, observed_codex_launch: bool = False, loading_feedback: object | None = None, overlay_handoff: dict[str, object] | None = None, seamless_recovery: bool = False, restart_codex: object | None = None, shutdown_coordinator: object | None = None, services: RuntimeServices | None = None, ports: RendererSessionPorts) -> int:
     """Run the in-renderer HUD over CDP, or report that it is unavailable."""
     if services is None:
         services = ports._production_runtime_services()
+    shutdown_probe = getattr(shutdown_coordinator, "is_requested", None)
+    if callable(shutdown_probe) and shutdown_probe():
+        return 0
     lock_context = nullcontext() if lock_already_held else ports.HudInstanceLock()
     resources: RendererSessionResources | None = None
     session_exit_code: int | None = None
     session_lock_requested = Event()
+    shutdown_unbind: Callable[[], object] | None = None
     try:
         with lock_context:
             local_loading = loading_feedback
@@ -354,6 +359,27 @@ def run_renderer_hud_session(args: argparse.Namespace, *, lock_already_held: boo
             startup_feedback = assembly.startup_feedback
             snapshot_or_error = assembly.snapshot_or_error
             bridge_callbacks = assembly.resources.bridge_callbacks
+
+            def request_external_shutdown() -> None:
+                if exit_requested.is_set():
+                    return
+                exit_requested.set()
+                command_refresh_requested.set()
+                if local_loading is not None:
+                    local_loading.close()
+                ports._LOGGER.info("renderer_hud_tray_exit_requested")
+
+            bind_shutdown = getattr(shutdown_coordinator, "bind", None)
+            unbind_shutdown = getattr(shutdown_coordinator, "unbind", None)
+            if callable(bind_shutdown):
+                bind_shutdown(request_external_shutdown)
+                if callable(unbind_shutdown):
+                    def unbind_external_shutdown() -> None:
+                        unbind_shutdown(request_external_shutdown)
+
+                    shutdown_unbind = unbind_external_shutdown
+            if exit_requested.is_set():
+                return 0
 
             def request_session_lock_exit() -> None:
                 if exit_requested.is_set():
@@ -593,6 +619,12 @@ def run_renderer_hud_session(args: argparse.Namespace, *, lock_already_held: boo
         ports._eprint(f'codex-usage-hud: {exc}')
         return 2
     finally:
+        if shutdown_unbind is not None:
+            try:
+                shutdown_unbind()
+            except Exception:
+                ports._LOGGER.debug('renderer_hud_shutdown_unbind_failed', exc_info=True)
+            shutdown_unbind = None
         if resources is not None:
             if overlay_handoff is not None and not session_lock_requested.is_set():
                 retained_overlay = resources.release_overlay_for_handoff()
