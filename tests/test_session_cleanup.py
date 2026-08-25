@@ -2277,6 +2277,194 @@ class SessionCleanupManagerTests(unittest.TestCase):
         self.assertEqual(result["operation"]["state"], "failed")
         self.assertIn("session index", result["operation"]["results"][0]["error"])
 
+    def test_provider_in_non_session_meta_record_is_detected(self) -> None:
+        """Risk 1: a rollout without session_meta must not be classified unknown.
+
+        Older or truncated rollouts may carry the provider only in a
+        ``turn_context`` ``model`` field (``provider/model``) or in another
+        record's ``provider`` field.  The inventory scan must pick that up so
+        provider-scoped deletion does not silently skip the session.
+        """
+        fixture = self._fixture()
+        temporary, _root, _state, _index, rollouts, manager = fixture
+        self.addCleanup(temporary.cleanup)
+        # Replace the root rollout with one that has no session_meta but
+        # carries the provider in a turn_context model field.
+        rollouts[ROOT_ID].write_text(
+            json.dumps(
+                {
+                    "type": "turn_context",
+                    "payload": {"model": "openai-custom/gpt-4o"},
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        payload = manager.scan()
+        root_row = next(row for row in payload["sessions"] if row["title"] == "Root")
+
+        self.assertEqual(root_row["modelProvider"], "openai-custom")
+
+    def test_provider_history_delete_matches_unknown_via_base_url_deep_scan(
+        self,
+    ) -> None:
+        """Risk 1: unknown sessions are deep-scanned and matched by base_url.
+
+        When the inventory metadata reports ``unknown`` (no provider field in
+        any record), ``delete_provider_history`` runs a targeted deep scan
+        that checks ``session_meta.base_url`` against known provider hints.
+        """
+        fixture = self._fixture()
+        temporary, _root, _state, _index, rollouts, manager = fixture
+        self.addCleanup(temporary.cleanup)
+        # Root has session_meta with base_url but no model_provider.
+        rollouts[ROOT_ID].write_text(
+            json.dumps(
+                {
+                    "type": "session_meta",
+                    "payload": {
+                        "base_url": "https://api.openai.com/v1",
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        # Child has no model_provider in session_meta, uses info nesting.
+        rollouts[CHILD_ID].write_text(
+            json.dumps(
+                {
+                    "type": "token_count",
+                    "payload": {
+                        "info": {"model_provider": "openai"},
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        result = manager.delete_provider_history(
+            "openai", request_id="provider-deep-1"
+        )
+
+        self.assertEqual(result["operation"]["state"], "completed")
+        self.assertEqual(result["operation"]["deletedCount"], 1)
+        self.assertFalse(rollouts[ROOT_ID].exists())
+        self.assertFalse(rollouts[CHILD_ID].exists())
+
+    def test_provider_history_delete_reports_unresolved_unknown_sessions(
+        self,
+    ) -> None:
+        """Risk 1: truly unknown sessions are counted, not silently skipped.
+
+        A rollout with no provider signal anywhere cannot be safely attributed
+        to the target provider.  It must not be deleted, but the result must
+        report ``unresolvedUnknownCount`` so the caller knows sessions may
+        have been left behind.
+        """
+        fixture = self._fixture()
+        temporary, _root, _state, _index, rollouts, manager = fixture
+        self.addCleanup(temporary.cleanup)
+        # Root has no provider signal at all — just a user message.
+        rollouts[ROOT_ID].write_text(
+            json.dumps(
+                {
+                    "type": "event_msg",
+                    "payload": {
+                        "item": {
+                            "type": "UserMessage",
+                            "content": [{"type": "text", "text": "hello"}],
+                        }
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        # Child still has openai-custom session_meta, so it gets deleted.
+        # But root is the parent, so the child is in root's tree.
+        # To test unresolved count independently, make SECOND_ID unknown too.
+        rollouts[SECOND_ID].write_text(
+            json.dumps({"type": "event_msg", "payload": {"item": {}}}) + "\n",
+            encoding="utf-8",
+        )
+
+        result = manager.delete_provider_history(
+            "openai-custom", request_id="provider-unknown-1"
+        )
+
+        # Root+child tree: root is unknown but child is openai-custom.
+        # The root item's model_provider is "unknown" (no signal), but its
+        # deep scan also returns "unknown".  The child is a descendant, not
+        # a separate inventory item, so it follows the root.  The root is
+        # NOT matched → not deleted.  SECOND_ID is also unknown.
+        self.assertEqual(result["operation"]["state"], "completed")
+        self.assertEqual(result["operation"]["deletedCount"], 0)
+        self.assertGreaterEqual(result["operation"]["unresolvedUnknownCount"], 1)
+        # Truly unknown sessions are preserved on disk.
+        self.assertTrue(rollouts[ROOT_ID].exists())
+
+    def test_scan_cleans_up_orphaned_staging_from_previous_crash(self) -> None:
+        """Risk 2: staging left by a crashed deletion is removed on next scan."""
+        fixture = self._fixture()
+        temporary, root, _state, _index, _rollouts, manager = fixture
+        self.addCleanup(temporary.cleanup)
+        staging_parent = root / ".hud-session-delete-staging"
+        orphaned = staging_parent / "deadbeefdeadbeef"
+        orphaned.mkdir(parents=True)
+        (orphaned / "rollout-leftover.jsonl").write_text(
+            '{"type":"session_meta"}\n', encoding="utf-8"
+        )
+
+        self.assertTrue(orphaned.exists())
+        manager.scan(request_id="scan-recovery")
+
+        self.assertFalse(orphaned.exists())
+        self.assertFalse(staging_parent.exists())
+
+    def test_delete_succeeds_when_rmtree_fails_after_db_commit(self) -> None:
+        """Risk 2: a persistent rmtree failure after DB commit must not fail deletion.
+
+        Windows file locks (AV, indexer) can cause ``shutil.rmtree`` to fail
+        even though the database transaction already committed.  The deletion
+        must succeed (original paths gone, DB rows removed) and the fallback
+        file-by-file removal plus ``rmdir`` must reclaim the staging.
+        """
+        fixture = self._fixture()
+        temporary, root, state, _index, rollouts, manager = fixture
+        self.addCleanup(temporary.cleanup)
+        scan = manager.scan()
+        root_row = next(row for row in scan["sessions"] if row["title"] == "Root")
+        preview = manager.preview([root_row["id"]], scan["revision"])
+        token = preview["operation"]["confirmationToken"]
+
+        def always_fail_rmtree(_path, *args, **kwargs):
+            raise OSError("simulated persistent file lock")
+
+        with patch(
+            "codex_usage_hud.core.session_cleanup.shutil.rmtree",
+            side_effect=always_fail_rmtree,
+        ):
+            result = manager.execute(
+                [root_row["id"]],
+                scan["revision"],
+                token,
+                request_id="delete-rmtree-fail",
+            )
+
+        self.assertEqual(result["operation"]["state"], "completed")
+        self.assertEqual(result["operation"]["deletedCount"], 1)
+        self.assertFalse(rollouts[ROOT_ID].exists())
+        self.assertFalse(rollouts[CHILD_ID].exists())
+        with closing(sqlite3.connect(state)) as connection:
+            self.assertEqual(
+                connection.execute("SELECT count(*) FROM threads").fetchone()[0], 1
+            )
+        # Fallback unlink + rmdir must have reclaimed the staging.
+        self.assertFalse((root / ".hud-session-delete-staging").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

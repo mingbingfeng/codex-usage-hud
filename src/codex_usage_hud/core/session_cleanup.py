@@ -301,10 +301,53 @@ def _updated_at_iso(value: int) -> str:
         return ""
 
 
+_BASE_URL_PROVIDER_HINTS: tuple[tuple[str, str], ...] = (
+    ("api.openai.com", "openai"),
+    ("openai.azure.com", "azure-openai"),
+    ("api.anthropic.com", "anthropic"),
+    ("generativelanguage.googleapis.com", "google"),
+    ("api.deepseek.com", "deepseek"),
+    ("dashscope.aliyuncs.com", "qwen"),
+    ("ark.cn-beijing.volces.com", "doubao"),
+    ("api.x.ai", "xai"),
+    ("api.mistral.ai", "mistral"),
+    ("api.cohere.com", "cohere"),
+)
+
+
+def _provider_from_payload(payload: Mapping[str, object]) -> str:
+    """Extract a normalized provider string from any record payload.
+
+    Checks ``model_provider`` first, then ``provider``, then a
+    ``provider/model``-style ``model`` field.  Returns ``""`` when no
+    provider signal is present.
+    """
+    for key in ("model_provider", "provider"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip().lower()
+    model = payload.get("model")
+    if isinstance(model, str) and "/" in model:
+        prefix = model.split("/", 1)[0].strip().lower()
+        if prefix:
+            return prefix
+    return ""
+
+
 def _session_metadata(path: Path | None) -> _SessionMetadata:
-    """Read only the session metadata record needed for inventory filters."""
+    """Read only the session metadata record needed for inventory filters.
+
+    When the canonical ``session_meta`` record is absent (older rollouts,
+    truncated files, or writes that never flushed the header), provider and
+    client signals are collected from any record in the file so the session
+    is not silently classified as ``unknown`` and missed by provider-scoped
+    deletion.
+    """
     if path is None:
         return _SessionMetadata()
+    fallback_provider = ""
+    fallback_originator: object = None
+    fallback_source: object = None
     try:
         with path.open("r", encoding="utf-8") as handle:
             for line in handle:
@@ -312,27 +355,45 @@ def _session_metadata(path: Path | None) -> _SessionMetadata:
                     record = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if (
-                    not isinstance(record, Mapping)
-                    or record.get("type") != "session_meta"
-                ):
+                if not isinstance(record, Mapping):
                     continue
                 payload = record.get("payload")
+                if isinstance(payload, Mapping):
+                    if not fallback_provider:
+                        fallback_provider = _provider_from_payload(payload)
+                    if fallback_originator is None and "originator" in payload:
+                        fallback_originator = payload.get("originator")
+                    if fallback_source is None and "source" in payload:
+                        fallback_source = payload.get("source")
+                if record.get("type") != "session_meta":
+                    continue
                 if not isinstance(payload, Mapping):
-                    return _SessionMetadata()
+                    return _SessionMetadata(
+                        model_provider=fallback_provider or "unknown",
+                        client_kind=classify_session_client(
+                            fallback_originator, fallback_source
+                        ),
+                    )
+                explicit_provider = (
+                    str(payload.get("model_provider") or "").strip().lower()
+                )
                 return _SessionMetadata(
-                    model_provider=(
-                        str(payload.get("model_provider") or "").strip().lower()
-                        or "unknown"
-                    ),
+                    model_provider=explicit_provider
+                    or fallback_provider
+                    or "unknown",
                     client_kind=classify_session_client(
-                        payload.get("originator"),
-                        payload.get("source"),
+                        payload.get("originator") or fallback_originator,
+                        payload.get("source")
+                        if "source" in payload
+                        else fallback_source,
                     ),
                 )
     except (OSError, UnicodeError):
         pass
-    return _SessionMetadata()
+    return _SessionMetadata(
+        model_provider=fallback_provider or "unknown",
+        client_kind=classify_session_client(fallback_originator, fallback_source),
+    )
 
 
 def _missing_paginated_history_source(
@@ -697,6 +758,12 @@ class SessionCleanupManager:
     def scan(self, *, request_id: str = "") -> dict[str, object]:
         request = str(request_id or "")
         publisher = getattr(self, "progress_publisher", None)
+        # Recover disk space from deletions interrupted by crash or power loss.
+        # Staging directories older than the current process are always safe to
+        # remove: an in-progress deletion uses a fresh random subdirectory and
+        # commits the database before rmtree, so any leftover staging belongs
+        # to a previous attempt.
+        self._cleanup_orphaned_staging()
 
         def report(
             phase: str, phase_label: str, phase_index: int, progress: int
@@ -849,6 +916,50 @@ class SessionCleanupManager:
         }
         return self.snapshot()
 
+    def _deep_provider_for_item(self, item: SessionCleanupItem) -> str:
+        """Thoroughly scan a session root rollout for provider signals.
+
+        Used only when the inventory metadata reports ``unknown``.  This reads
+        the full root rollout and checks nested structures (``info`` objects,
+        ``base_url``) that the lightweight inventory scan intentionally skips.
+        Returns the normalized provider or ``"unknown"`` when no signal is
+        found — never raises, because a corrupt rollout must not block
+        provider-scoped deletion of other sessions.
+        """
+        root_path = item._rollout_paths[0] if item._rollout_paths else None
+        if root_path is None:
+            return "unknown"
+        try:
+            with root_path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(record, Mapping):
+                        continue
+                    payload = record.get("payload")
+                    if isinstance(payload, Mapping):
+                        provider = _provider_from_payload(payload)
+                        if provider:
+                            return provider
+                        # token_count events nest provider under info.
+                        info = payload.get("info")
+                        if isinstance(info, Mapping):
+                            provider = _provider_from_payload(info)
+                            if provider:
+                                return provider
+                        # session_meta base_url can identify the provider.
+                        if record.get("type") == "session_meta":
+                            base_url = str(payload.get("base_url") or "").strip().lower()
+                            if base_url:
+                                for known, name in _BASE_URL_PROVIDER_HINTS:
+                                    if known in base_url:
+                                        return name
+        except (OSError, UnicodeError):
+            pass
+        return "unknown"
+
     def delete_provider_history(
         self,
         provider: str,
@@ -876,11 +987,21 @@ class SessionCleanupManager:
             raise SessionCleanupError(
                 f"无法删除 Provider {normalized_provider} 的会话历史：{reason}"
             )
-        matching = [
-            item
-            for item in self._items.values()
-            if item.model_provider.casefold() == normalized_provider
-        ]
+        matching: list[SessionCleanupItem] = []
+        unresolved_unknown = 0
+        for item in self._items.values():
+            if item.model_provider.casefold() == normalized_provider:
+                matching.append(item)
+            elif item.model_provider.casefold() == "unknown":
+                # Sessions whose rollout has no session_meta (or no provider
+                # field anywhere) cannot be matched by the inventory filter.
+                # Run a targeted deep scan against the target provider so a
+                # legacy/truncated rollout is not silently left behind.
+                deep_provider = self._deep_provider_for_item(item)
+                if deep_provider == normalized_provider:
+                    matching.append(item)
+                elif deep_provider == "unknown":
+                    unresolved_unknown += 1
         blocked = [item for item in matching if not item.selectable]
         if blocked:
             reasons = sorted(
@@ -905,6 +1026,7 @@ class SessionCleanupManager:
                 sessionCount=0,
                 deletedCount=0,
                 failedCount=0,
+                unresolvedUnknownCount=unresolved_unknown,
             )
         item_ids = [item.id for item in matching]
         preview = self.preview(
@@ -951,6 +1073,7 @@ class SessionCleanupManager:
             deletedCount=deleted_count,
             failedCount=0,
             actualBytes=actual_bytes,
+            unresolvedUnknownCount=unresolved_unknown,
         )
 
     def materialize_target_rollouts(
@@ -2571,6 +2694,75 @@ class SessionCleanupManager:
     def _session_index_ids(self, *, strict: bool = False) -> set[str]:
         return self._session_index_metadata(strict=strict)[1]
 
+    def _staging_parent(self) -> Path:
+        return self.sessions_root.parent / ".hud-session-delete-staging"
+
+    def _cleanup_orphaned_staging(self) -> None:
+        """Remove staging directories left by interrupted deletions.
+
+        Each deletion uses a fresh random subdirectory, so any existing
+        staging belongs to a previous attempt that was interrupted by crash
+        or power loss.  This is safe to call at any time and never raises.
+        """
+        parent = self._staging_parent()
+        if not parent.is_dir():
+            return
+        for child in parent.iterdir():
+            if child.is_dir():
+                self._remove_staging_best_effort(child, parent)
+        try:
+            parent.rmdir()
+        except OSError:
+            pass
+
+    def _remove_staging_best_effort(
+        self,
+        staging: Path,
+        staging_parent: Path,
+    ) -> None:
+        """Remove a staging directory with retries, then best-effort cleanup.
+
+        After the database transaction is committed the rollout files in
+        staging are already logically deleted.  A transient Windows file
+        lock (antivirus, search indexer) must not turn that into a
+        user-visible failure, so we retry rmtree with short backoff and
+        then fall back to file-by-file removal.  Any residue is reclaimed
+        by ``_cleanup_orphaned_staging`` on the next scan.
+        """
+        last_error: Exception | None = None
+        for attempt in range(3):
+            try:
+                shutil.rmtree(staging)
+                last_error = None
+                break
+            except OSError as exc:
+                last_error = exc
+                if attempt < 2:
+                    self._sleep(0.2 * (attempt + 1))
+        if last_error is not None:
+            # Fall back to removing individual files to minimize residue.
+            try:
+                for child in staging.iterdir():
+                    try:
+                        if child.is_file():
+                            child.unlink()
+                        elif child.is_dir():
+                            shutil.rmtree(child)
+                    except OSError:
+                        pass
+            except OSError:
+                pass
+            # An emptied directory can often be removed via rmdir even when
+            # rmtree failed due to a transient Windows file handle.
+            try:
+                staging.rmdir()
+            except OSError:
+                pass
+        try:
+            staging_parent.rmdir()
+        except OSError:
+            pass
+
     def _delete_local_batch(self, items: Sequence[SessionCleanupItem]) -> None:
         session_ids = tuple(
             dict.fromkeys(
@@ -2605,6 +2797,9 @@ class SessionCleanupManager:
                     "Codex session index could not be verified."
                 ) from exc
         staging_parent = self.sessions_root.parent / ".hud-session-delete-staging"
+        # Remove staging left by a previous interrupted deletion before creating
+        # a fresh one.  This bounds disk residue from crashes or power loss.
+        self._cleanup_orphaned_staging()
         staging = staging_parent / secrets.token_hex(12)
         moved: list[tuple[Path, Path]] = []
         staged_index: Path | None = None
@@ -2675,11 +2870,11 @@ class SessionCleanupManager:
                         session_ids,
                     )
             database_committed = True
-            shutil.rmtree(staging)
-            try:
-                staging_parent.rmdir()
-            except OSError:
-                pass
+            # The database transaction is committed.  Staging cleanup is
+            # best-effort: a transient file lock (Windows AV, indexer) must
+            # not turn a successful deletion into a user-visible failure.
+            # Retry with backoff, then fall back to file-by-file removal.
+            self._remove_staging_best_effort(staging, staging_parent)
         except (OSError, sqlite3.Error) as exc:
             if not database_committed:
                 if staged_index is not None:
@@ -2700,12 +2895,12 @@ class SessionCleanupManager:
                     staging_parent.rmdir()
                 except OSError:
                     pass
-            detail = (
-                "Local session database was deleted but staged rollout cleanup failed."
-                if database_committed
-                else "Local session deletion transaction failed."
-            )
-            raise SessionCleanupError(detail) from exc
+                raise SessionCleanupError(
+                    "Local session deletion transaction failed."
+                ) from exc
+            # database_committed is True: the deletion already succeeded.
+            # Any remaining staging will be reclaimed by the next scan.
+            pass
 
     def _revalidate_batch(
         self,
