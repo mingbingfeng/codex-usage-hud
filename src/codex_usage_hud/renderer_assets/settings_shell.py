@@ -1675,7 +1675,7 @@ _TEXT_PREFIX = r"""
           quick_launch_providers: [],
           provider_registry: {},
           app_provider: "",
-          support_url: "https://github.com/mingbingfeng/codex-usage-hud",
+          support_url: "https://github.com/fengbuming/codex-usage-hud",
           stop_hud_on_lock_screen: false,
           rest_reminder_enabled: false,
           rest_reminder_interval_minutes: 45,
@@ -4943,7 +4943,7 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
             .map((item) => Number(item.trim()))
             .filter((item) => Number.isFinite(item) && item > 0),
           weekly_adjustment_usd: settings.weekly_adjustment_usd,
-          support_url: String(settings.support_url || "https://github.com/mingbingfeng/codex-usage-hud").trim(),
+          support_url: String(settings.support_url || "https://github.com/fengbuming/codex-usage-hud").trim(),
           model_prices: settings.model_prices,
         };
         if (settingNode("stop_hud_on_lock_screen")) {

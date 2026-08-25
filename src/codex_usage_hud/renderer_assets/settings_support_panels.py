@@ -1,7 +1,7 @@
 """Renderer settings support/about panel asset fragment."""
 
 TEXT = r"""      function supportPanelHtml(settings, path) {
-        const url = String(settings.support_url || "https://github.com/mingbingfeng/codex-usage-hud");
+        const url = String(settings.support_url || "https://github.com/fengbuming/codex-usage-hud");
         const images = Array.isArray(currentPayload()?.supportImages) ? currentPayload().supportImages : [];
         const enabled = !!settings.rest_reminder_enabled;
         const interval = Math.min(180, Math.max(1, Math.round(Number(settings.rest_reminder_interval_minutes) || 45)));
@@ -105,7 +105,7 @@ TEXT = r"""      function supportPanelHtml(settings, path) {
         return `
           <div class="codex-usage-hud-support">
             <div class="codex-usage-hud-support-note">当前版本：<strong>v${escapeHtml(appVersion())}</strong></div>
-            <div class="codex-usage-hud-support-note">更新源：GitHub Releases / mingbingfeng/codex-usage-hud</div>
+            <div class="codex-usage-hud-support-note">更新源：GitHub Releases / fengbuming/codex-usage-hud</div>
             <div class="codex-usage-hud-support-note">Windows 安装包：codex-usage-hud-v*-windows-x64-setup.exe</div>
             <div class="codex-usage-hud-support-note">自动更新会下载最新版安装包并启动安装器；安装器会先关闭正在运行的 HUD，再替换本地文件。</div>
             <div class="codex-usage-hud-support-note">当前配置文件：${escapeHtml(path || "未提供")}</div>

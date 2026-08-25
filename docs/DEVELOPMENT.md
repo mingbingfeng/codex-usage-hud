@@ -11,7 +11,7 @@ how to validate changes before opening a pull request.
 ## 1. Clone the repository / 克隆仓库
 
 ```powershell
-git clone https://github.com/mingbingfeng/codex-usage-hud.git
+git clone https://github.com/fengbuming/codex-usage-hud.git
 cd codex-usage-hud
 ```
 

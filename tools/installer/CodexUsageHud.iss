@@ -1,6 +1,6 @@
 #define AppName "codex-usage-hud"
 #define AppPublisher "codex-usage-hud contributors"
-#define AppURL "https://github.com/mingbingfeng/codex-usage-hud"
+#define AppURL "https://github.com/fengbuming/codex-usage-hud"
 #define AppExeName "codex-hud.exe"
 
 #ifndef AppVersion

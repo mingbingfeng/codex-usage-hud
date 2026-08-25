@@ -338,11 +338,20 @@ TEXT = r"""
         const row = activeSessionFirstOutsideHud(activeSessionIdentitySelector)
           || titleNode?.closest?.(activeSessionRowSelector)
           || activeSessionFirstOutsideHud(activeSessionRowSelector);
-        return row?.closest?.("[role='list']")
-          || row?.closest?.("aside, nav, [role='navigation'], [data-testid*='sidebar' i], [class*='sidebar' i]")
+        // Prefer the full sidebar nav/aside over the nearest role=list.
+        // Codex Desktop splits the sidebar into multiple role=list groups
+        // (pinned, recent, etc.); the first thread row's closest list may
+        // contain only pinned items, so the selected conversation in another
+        // group would never be found.  The nav/aside ancestor spans all groups.
+        // Note: [class*='sidebar'] is intentionally last because row items
+        // themselves may carry "sidebar" in their class (data-app-action-sidebar-*).
+        return row?.closest?.("nav, aside, [role='navigation']")
+          || row?.closest?.("[role='list']")
+          || row?.closest?.("[data-testid*='sidebar' i], [class*='sidebar' i]")
           || row?.parentElement
+          || document.querySelector("nav, aside, [role='navigation']")
           || document.querySelector("[role='list']")
-          || document.querySelector("aside, nav, [role='navigation'], [data-testid*='sidebar' i], [class*='sidebar' i]")
+          || document.querySelector("[data-testid*='sidebar' i], [class*='sidebar' i]")
           || null;
       }
 

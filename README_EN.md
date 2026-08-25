@@ -5,11 +5,11 @@
 > **Live token usage, cache hit rate, and real cost inside Codex App — fully local, no data uploaded.**
 > Stop API relay "background spending" and blind-waiting on long tasks.
 
-[![Release](https://img.shields.io/github/v/release/mingbingfeng/codex-usage-hud?label=release)](https://github.com/mingbingfeng/codex-usage-hud/releases)
-[![License](https://img.shields.io/github/license/mingbingfeng/codex-usage-hud)](LICENSE)
-[![Windows](https://img.shields.io/badge/Windows-supported-0078D4)](https://github.com/mingbingfeng/codex-usage-hud/releases)
+[![Release](https://img.shields.io/github/v/release/fengbuming/codex-usage-hud?label=release)](https://github.com/fengbuming/codex-usage-hud/releases)
+[![License](https://img.shields.io/github/license/fengbuming/codex-usage-hud)](LICENSE)
+[![Windows](https://img.shields.io/badge/Windows-supported-0078D4)](https://github.com/fengbuming/codex-usage-hud/releases)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB)](pyproject.toml)
-[![GitHub Stars](https://img.shields.io/github/stars/mingbingfeng/codex-usage-hud?style=social)](https://github.com/mingbingfeng/codex-usage-hud/stargazers)
+[![GitHub Stars](https://img.shields.io/github/stars/fengbuming/codex-usage-hud?style=social)](https://github.com/fengbuming/codex-usage-hud/stargazers)
 
 `codex-usage-hud` injects a usage panel directly into the Codex UI (renderer injection, not a separate floating window): session tokens, cache hit rate, live USD estimate, daily/weekly budgets, and waiting status all on one screen. All data is read from your local Codex JSONL / SQLite logs only. **No telemetry, no prompt/response upload, no cloud account required.**
 
@@ -20,7 +20,7 @@
 
 ## Quick Start
 
-Download the latest Windows installer from [GitHub Releases](https://github.com/mingbingfeng/codex-usage-hud/releases):
+Download the latest Windows installer from [GitHub Releases](https://github.com/fengbuming/codex-usage-hud/releases):
 
 - Windows: `codex-usage-hud-v*-windows-x64-setup.exe`
 
@@ -42,14 +42,14 @@ codex-hud --update
 
 ## Sponsors
 
-[Want to be listed below?](https://github.com/mingbingfeng/codex-usage-hud/issues)
+[Want to be listed below?](https://github.com/fengbuming/codex-usage-hud/issues)
 
 | Sponsor | Description |
 | --- | --- |
 
 ## Community and Support
 
-For questions, suggestions, or discussions, head to [GitHub Issues](https://github.com/mingbingfeng/codex-usage-hud/issues). I actively monitor and respond there.
+For questions, suggestions, or discussions, head to [GitHub Issues](https://github.com/fengbuming/codex-usage-hud/issues). I actively monitor and respond there.
 
 ## Main Features
 

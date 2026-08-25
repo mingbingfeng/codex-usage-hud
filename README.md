@@ -5,11 +5,11 @@
 > **在 Codex App 里实时看到 token 消耗、缓存命中率和真实花费 —— 纯本地运行，不上传任何会话内容。**
 > 专治中转站用量「偷跑」和长任务盲等。
 
-[![Release](https://img.shields.io/github/v/release/mingbingfeng/codex-usage-hud?label=release)](https://github.com/mingbingfeng/codex-usage-hud/releases)
-[![License](https://img.shields.io/github/license/mingbingfeng/codex-usage-hud)](LICENSE)
-[![Windows](https://img.shields.io/badge/Windows-supported-0078D4)](https://github.com/mingbingfeng/codex-usage-hud/releases)
+[![Release](https://img.shields.io/github/v/release/fengbuming/codex-usage-hud?label=release)](https://github.com/fengbuming/codex-usage-hud/releases)
+[![License](https://img.shields.io/github/license/fengbuming/codex-usage-hud)](LICENSE)
+[![Windows](https://img.shields.io/badge/Windows-supported-0078D4)](https://github.com/fengbuming/codex-usage-hud/releases)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB)](pyproject.toml)
-[![GitHub Stars](https://img.shields.io/github/stars/mingbingfeng/codex-usage-hud?style=social)](https://github.com/mingbingfeng/codex-usage-hud/stargazers)
+[![GitHub Stars](https://img.shields.io/github/stars/fengbuming/codex-usage-hud?style=social)](https://github.com/fengbuming/codex-usage-hud/stargazers)
 
 `codex-usage-hud` 直接把用量面板注入 Codex 界面（renderer 注入，不是另开窗口）：当前会话 token、缓存命中率、实时 USD 估算、日/周预算、等待状态一屏可见。所有数据只读取本机 Codex JSONL / SQLite 日志，**无遥测、不上传 prompt/response、不需要云端账号**。
 
@@ -20,7 +20,7 @@
 
 ## 快速使用
 
-从 [GitHub Releases](https://github.com/mingbingfeng/codex-usage-hud/releases) 下载最新版 Windows 安装包：
+从 [GitHub Releases](https://github.com/fengbuming/codex-usage-hud/releases) 下载最新版 Windows 安装包：
 
 - Windows：`codex-usage-hud-v*-windows-x64-setup.exe`
 
@@ -45,14 +45,14 @@ codex-hud --update
 
 ## 赞助商
 
-[想显示在下方？](https://github.com/mingbingfeng/codex-usage-hud/issues)
+[想显示在下方？](https://github.com/fengbuming/codex-usage-hud/issues)
 
 | 赞助商 | 介绍 |
 | --- | --- |
 
 ## 交流与支持
 
-有问题、建议或想交流，欢迎去 [GitHub Issues](https://github.com/mingbingfeng/codex-usage-hud/issues) 发帖，我会持续跟进。
+有问题、建议或想交流，欢迎去 [GitHub Issues](https://github.com/fengbuming/codex-usage-hud/issues) 发帖，我会持续跟进。
 
 ## 主要功能
 

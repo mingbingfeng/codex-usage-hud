@@ -35,14 +35,14 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/mingbingfeng/codex-usage-hud"
-Repository = "https://github.com/mingbingfeng/codex-usage-hud"
-Documentation = "https://github.com/mingbingfeng/codex-usage-hud/tree/main/docs"
-Changelog = "https://github.com/mingbingfeng/codex-usage-hud/blob/main/CHANGELOG.md"
-Contributing = "https://github.com/mingbingfeng/codex-usage-hud/blob/main/CONTRIBUTING.md"
-Privacy = "https://github.com/mingbingfeng/codex-usage-hud/blob/main/docs/PRIVACY.md"
-Issues = "https://github.com/mingbingfeng/codex-usage-hud/issues"
-Description = "https://github.com/mingbingfeng/codex-usage-hud#readme"
+Homepage = "https://github.com/fengbuming/codex-usage-hud"
+Repository = "https://github.com/fengbuming/codex-usage-hud"
+Documentation = "https://github.com/fengbuming/codex-usage-hud/tree/main/docs"
+Changelog = "https://github.com/fengbuming/codex-usage-hud/blob/main/CHANGELOG.md"
+Contributing = "https://github.com/fengbuming/codex-usage-hud/blob/main/CONTRIBUTING.md"
+Privacy = "https://github.com/fengbuming/codex-usage-hud/blob/main/docs/PRIVACY.md"
+Issues = "https://github.com/fengbuming/codex-usage-hud/issues"
+Description = "https://github.com/fengbuming/codex-usage-hud#readme"
 
 [project.optional-dependencies]
 desktop-overlay = [

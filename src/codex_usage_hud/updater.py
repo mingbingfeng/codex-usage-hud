@@ -16,7 +16,7 @@ from typing import Any, Callable, Mapping
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-DEFAULT_REPOSITORY = "mingbingfeng/codex-usage-hud"
+DEFAULT_REPOSITORY = "fengbuming/codex-usage-hud"
 RELEASES_URL = f"https://github.com/{DEFAULT_REPOSITORY}/releases"
 LATEST_RELEASE_API_URL = (
     f"https://api.github.com/repos/{DEFAULT_REPOSITORY}/releases/latest"
