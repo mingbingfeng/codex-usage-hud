@@ -629,6 +629,10 @@ def _build_session_cleanup_manager(context: object) -> SessionCleanupManager:
         state_db_path=Path(getattr(context, "state_db_path")),
         sessions_root=Path(getattr(context, "sessions_root")),
         session_index_path=Path(getattr(context, "session_index_path")),
+        thread_history_db_path=(
+            Path(getattr(context, "sessions_root")).parent
+            / "thread_history_1.sqlite"
+        ),
         current_session_ids=lambda: _session_cleanup_current_ids(context),
         active_session_ids=lambda: _session_cleanup_active_ids(context),
         usage_snapshot_prepare=lambda item: _prepare_session_cleanup_usage(

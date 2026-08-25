@@ -475,6 +475,141 @@ class SessionCleanupManagerTests(unittest.TestCase):
             set(target_ids),
         )
 
+    def test_materialize_target_rollouts_resets_replaced_history_projection(
+        self,
+    ) -> None:
+        fixture = self._fixture()
+        temporary, root, _state, _index, _rollouts, manager = fixture
+        self.addCleanup(temporary.cleanup)
+
+        history_db = root / "thread_history_1.sqlite"
+        target_id = "10000000-0000-4000-8000-000000000011"
+        unrelated_id = "10000000-0000-4000-8000-000000000099"
+        with closing(sqlite3.connect(history_db)) as connection, connection:
+            connection.execute(
+                "CREATE TABLE thread_history_projection_state ("
+                "thread_id TEXT PRIMARY KEY, "
+                "next_rollout_byte_offset INTEGER NOT NULL, "
+                "next_rollout_ordinal INTEGER NOT NULL"
+                ")"
+            )
+            connection.executemany(
+                "INSERT INTO thread_history_projection_state "
+                "(thread_id, next_rollout_byte_offset, next_rollout_ordinal) "
+                "VALUES (?, ?, ?)",
+                [(target_id, 20, 3), (unrelated_id, 30, 4)],
+            )
+        manager.thread_history_db_path = history_db
+
+        source_path = root / "sessions" / "source.jsonl"
+        target_path = root / "sessions" / f"{target_id}.jsonl"
+        source_path.write_text("{}\n", encoding="utf-8")
+        target_path.write_text("{}\n", encoding="utf-8")
+        manager._load_state = MagicMock(
+            return_value=(
+                {
+                    ROOT_ID: SimpleNamespace(rollout_path=source_path),
+                    target_id: SimpleNamespace(rollout_path=target_path),
+                },
+                {},
+                {},
+                set(),
+                0,
+            )
+        )
+
+        with patch(
+            "codex_usage_hud.core.session_cleanup.materialize_forked_rollout",
+        ):
+            outcomes = manager.materialize_target_rollouts(
+                [(target_id, ROOT_ID)],
+            )
+
+        self.assertEqual(outcomes, {target_id: True})
+        with closing(sqlite3.connect(history_db)) as connection:
+            self.assertIsNone(
+                connection.execute(
+                    "SELECT 1 FROM thread_history_projection_state WHERE thread_id=?",
+                    (target_id,),
+                ).fetchone()
+            )
+            self.assertIsNotNone(
+                connection.execute(
+                    "SELECT 1 FROM thread_history_projection_state WHERE thread_id=?",
+                    (unrelated_id,),
+                ).fetchone()
+            )
+
+    def test_sync_thread_state_metadata_makes_target_cli_visible(self) -> None:
+        fixture = self._fixture()
+        temporary, root, _state, _index, _rollouts, manager = fixture
+        self.addCleanup(temporary.cleanup)
+
+        target_id = "10000000-0000-4000-8000-000000000011"
+        state_db = root / "target-state.sqlite"
+        with closing(sqlite3.connect(state_db)) as connection, connection:
+            connection.execute(
+                "CREATE TABLE threads ("
+                "id TEXT PRIMARY KEY, source TEXT, thread_source TEXT, "
+                "has_user_event INTEGER, title TEXT, name TEXT, "
+                "first_user_message TEXT, preview TEXT"
+                ")"
+            )
+            connection.execute(
+                "INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (target_id, "vscode", "user", 0, "", "", "", ""),
+            )
+        target_path = root / "sessions" / f"{target_id}.jsonl"
+        target_path.write_text(
+            "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "type": "session_meta",
+                            "payload": {"id": target_id},
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "event_msg",
+                            "payload": {
+                                "item": {
+                                    "type": "UserMessage",
+                                    "content": [
+                                        {"type": "text", "text": "continue migrated work"}
+                                    ],
+                                }
+                            },
+                        }
+                    ),
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        manager.state_db_path = state_db
+
+        manager._sync_thread_state_metadata({target_id: target_path})
+
+        with closing(sqlite3.connect(state_db)) as connection:
+            row = connection.execute(
+                "SELECT source, thread_source, has_user_event, title, "
+                "name, first_user_message, preview FROM threads WHERE id=?",
+                (target_id,),
+            ).fetchone()
+        self.assertEqual(
+            row,
+            (
+                "cli",
+                "user",
+                1,
+                "continue migrated work",
+                "continue migrated work",
+                "continue migrated work",
+                "continue migrated work",
+            ),
+        )
+
     def test_session_transfer_copy_keeps_source_when_target_is_not_persistent(
         self,
     ) -> None:

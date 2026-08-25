@@ -22,6 +22,22 @@ class SessionMaterializationError(RuntimeError):
     """Raised when a paginated rollout cannot be flattened safely."""
 
 
+_THREAD_ID_KEYS = frozenset(
+    {
+        "thread_id",
+        "threadId",
+        "session_id",
+        "sessionId",
+        "parent_thread_id",
+        "parentThreadId",
+        "source_thread_id",
+        "sourceThreadId",
+        "forked_from_id",
+        "forkedFromId",
+    }
+)
+
+
 def _canonical_uuid(value: object) -> str:
     candidate = str(value or "").strip()
     try:
@@ -74,6 +90,52 @@ def _record_lines(path: Path, limit: int | None = None) -> list[dict[str, Any]]:
             f"Rollout has no leading session metadata: {path.name}."
         )
     return records
+
+
+def _content_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, Mapping):
+        text = value.get("text")
+        if isinstance(text, str):
+            return text
+        for key in ("content", "parts", "items"):
+            if key in value:
+                nested = _content_text(value.get(key))
+                if nested:
+                    return nested
+        return ""
+    if isinstance(value, list):
+        return "".join(_content_text(item) for item in value)
+    return ""
+
+
+def _first_user_message_text(path: Path) -> str:
+    """Read the first user message needed to seed Codex thread metadata."""
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(record, Mapping):
+                    continue
+                payload = record.get("payload")
+                if not isinstance(payload, Mapping):
+                    continue
+                item = payload.get("item")
+                if not isinstance(item, Mapping):
+                    continue
+                item_type = str(item.get("type") or "").strip().casefold()
+                if item_type not in {"usermessage", "user_message"}:
+                    continue
+                text = " ".join(_content_text(item.get("content")).split())
+                if text:
+                    return text
+    except (OSError, UnicodeError):
+        return ""
+    return ""
 
 
 def _history_base(meta: Mapping[str, Any]) -> tuple[str, int] | None:
@@ -156,6 +218,40 @@ def _standalone_metadata(record: Mapping[str, Any], target_id: str) -> dict[str,
     return result
 
 
+def _rewrite_thread_identities(
+    value: Any,
+    source_id: str,
+    target_id: str,
+) -> Any:
+    """Rebind persisted event identities from the fork source to its target."""
+    if isinstance(value, Mapping):
+        rewritten: dict[Any, Any] = {}
+        for key, nested in value.items():
+            if (
+                str(key) in _THREAD_ID_KEYS
+                and _canonical_uuid(nested) == source_id
+            ):
+                rewritten[key] = target_id
+            else:
+                rewritten[key] = _rewrite_thread_identities(
+                    nested,
+                    source_id,
+                    target_id,
+                )
+        return rewritten
+    if isinstance(value, list):
+        return [
+            _rewrite_thread_identities(item, source_id, target_id)
+            for item in value
+        ]
+    if isinstance(value, tuple):
+        return tuple(
+            _rewrite_thread_identities(item, source_id, target_id)
+            for item in value
+        )
+    return value
+
+
 def materialize_forked_rollout(
     *,
     target_id: str,
@@ -211,7 +307,10 @@ def materialize_forked_rollout(
             if record.get("type") != "session_meta"
         )
     output_records = [_standalone_metadata(target_meta, canonical_target)]
-    output_records.extend(logical_records)
+    output_records.extend(
+        _rewrite_thread_identities(record, canonical_source, canonical_target)
+        for record in logical_records
+    )
     for ordinal, record in enumerate(output_records):
         record["ordinal"] = ordinal
     encoded = "".join(

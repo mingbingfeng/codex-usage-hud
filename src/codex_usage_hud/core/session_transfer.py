@@ -592,6 +592,14 @@ class CodexAppServerClient:
             )
         if resumed_thread.get("ephemeral") is True:
             raise SessionTransferError("Codex 目标会话续聊仍是临时会话。")
+        turns = resumed_thread.get("turns")
+        if isinstance(turns, Sequence) and not isinstance(
+            turns,
+            (str, bytes, bytearray),
+        ) and not turns:
+            raise SessionTransferError(
+                "Codex 目标会话续聊后仍没有 turns，线程状态投影尚未完成。"
+            )
 
     def _target_is_visible_in_provider_list(
         self,

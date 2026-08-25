@@ -156,6 +156,49 @@ def test_app_server_verifies_persistent_thread_before_source_deletion(
     ]
 
 
+def test_app_server_rejects_target_without_rehydrated_turns(
+    tmp_path: Path,
+) -> None:
+    rollout = tmp_path / "target.jsonl"
+    rollout.write_text("{}\n", encoding="utf-8")
+    client = CodexAppServerClient(
+        executable="codex",
+        target_visibility_retry_delays=(0.0,),
+    )
+    client.request = MagicMock(
+        side_effect=[
+            {
+                "thread": {
+                    "id": TARGET_ID,
+                    "modelProvider": "routin",
+                    "ephemeral": False,
+                    "path": str(rollout),
+                }
+            },
+            {
+                "data": [
+                    {
+                        "id": TARGET_ID,
+                        "modelProvider": "routin",
+                    }
+                ],
+                "nextCursor": None,
+            },
+            {
+                "thread": {
+                    "id": TARGET_ID,
+                    "modelProvider": "routin",
+                    "ephemeral": False,
+                    "turns": [],
+                }
+            }
+        ]
+    )
+
+    with pytest.raises(SessionTransferError, match="续聊后仍没有 turns"):
+        client.verify_persistent_thread(TARGET_ID, "routin")
+
+
 def test_app_server_verifies_batch_targets_with_one_provider_list_traversal(
     tmp_path: Path,
 ) -> None:

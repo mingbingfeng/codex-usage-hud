@@ -20,6 +20,7 @@ import uuid
 from .parser import classify_session_client
 from .session_materializer import (
     SessionMaterializationError,
+    _first_user_message_text,
     materialize_forked_rollout,
 )
 
@@ -385,6 +386,7 @@ class SessionCleanupManager:
         state_db_path: Path,
         sessions_root: Path,
         session_index_path: Path,
+        thread_history_db_path: Path | None = None,
         current_session_ids: Callable[[], Iterable[str]] | None = None,
         active_session_ids: Callable[[], Iterable[str]] | None = None,
         usage_snapshot_prepare: UsageSnapshotPrepare | None = None,
@@ -403,6 +405,11 @@ class SessionCleanupManager:
         self.state_db_path = Path(state_db_path)
         self.sessions_root = Path(sessions_root)
         self.session_index_path = Path(session_index_path)
+        self.thread_history_db_path = (
+            Path(thread_history_db_path)
+            if thread_history_db_path is not None
+            else None
+        )
         self.current_session_ids = current_session_ids or (lambda: ())
         self.active_session_ids = active_session_ids or (lambda: ())
         self.usage_snapshot_prepare = usage_snapshot_prepare
@@ -967,9 +974,12 @@ class SessionCleanupManager:
             raise SessionCleanupError("目标会话列表为空。")
 
         pending = dict(normalized)
+        source_by_target = dict(normalized)
         outcomes: dict[str, object] = {}
         last_errors: dict[str, str] = {}
         reported_ids: set[str] = set()
+        materialized_ids: set[str] = set()
+        materialized_paths: dict[str, Path] = {}
 
         def report_result(target_id: str, success: bool, error: str = "") -> None:
             if not callable(progress_callback) or target_id in reported_ids:
@@ -1048,6 +1058,10 @@ class SessionCleanupManager:
                 if success:
                     outcomes[target_id] = True
                     pending.pop(target_id, None)
+                    materialized_ids.add(target_id)
+                    target_record = records.get(target_id)
+                    if target_record is not None and target_record.rollout_path is not None:
+                        materialized_paths[target_id] = target_record.rollout_path
                     report_result(target_id, True)
                 else:
                     last_errors[target_id] = error
@@ -1070,6 +1084,20 @@ class SessionCleanupManager:
                     }
                     for future in as_completed(futures):
                         apply_materialize_result(future.result())
+
+        if materialized_ids:
+            try:
+                self._reset_thread_history_projection(materialized_ids)
+                self._sync_thread_state_metadata(materialized_paths)
+            except SessionCleanupError as exc:
+                detail = str(exc) or type(exc).__name__
+                for target_id in tuple(materialized_ids):
+                    outcomes.pop(target_id, None)
+                    pending[target_id] = source_by_target[target_id]
+                    last_errors[target_id] = detail
+                    if target_id in reported_ids:
+                        reported_ids.remove(target_id)
+                    report_result(target_id, False, detail)
 
         for target_id in pending:
             outcomes[target_id] = last_errors.get(
@@ -1172,6 +1200,92 @@ class SessionCleanupManager:
     def _register_session_index(self, session_id: str, title: str) -> None:
         """Make a newly forked thread discoverable by ``codex resume``."""
         self._register_session_index_batch(((session_id, title),))
+
+    def _reset_thread_history_projection(self, session_ids: Iterable[str]) -> None:
+        """Reset cursors invalidated by replacing forked rollout files."""
+        path = self.thread_history_db_path
+        if path is None or not path.is_file():
+            return
+        canonical_ids = tuple(
+            dict.fromkeys(
+                canonical
+                for value in session_ids
+                if (canonical := _canonical_uuid(value))
+            )
+        )
+        if not canonical_ids:
+            return
+        placeholders = ", ".join("?" for _ in canonical_ids)
+        try:
+            with closing(sqlite3.connect(str(path), timeout=5.0)) as connection:
+                connection.execute("PRAGMA busy_timeout = 5000")
+                tables = {
+                    str(row[0])
+                    for row in connection.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table'"
+                    )
+                }
+                if "thread_history_projection_state" not in tables:
+                    return
+                connection.execute(
+                    "DELETE FROM thread_history_projection_state "
+                    f"WHERE thread_id IN ({placeholders})",
+                    canonical_ids,
+                )
+                connection.commit()
+        except sqlite3.Error as exc:
+            raise SessionCleanupError(
+                "Codex 目标会话历史投影无法重建。"
+            ) from exc
+
+    def _sync_thread_state_metadata(self, targets: Mapping[str, Path]) -> None:
+        """Seed CLI-facing metadata for targets rebuilt from source records."""
+        if not self.state_db_path.is_file() or not targets:
+            return
+        normalized = {
+            canonical: Path(path)
+            for session_id, path in targets.items()
+            if (canonical := _canonical_uuid(session_id))
+        }
+        if not normalized:
+            return
+        try:
+            with closing(sqlite3.connect(str(self.state_db_path), timeout=5.0)) as connection:
+                connection.execute("PRAGMA busy_timeout = 5000")
+                columns = {
+                    str(row[1])
+                    for row in connection.execute("PRAGMA table_info(threads)")
+                }
+                if "id" not in columns:
+                    return
+                for session_id, path in normalized.items():
+                    text = _first_user_message_text(path)
+                    if not text:
+                        continue
+                    updates: dict[str, object] = {}
+                    if "source" in columns:
+                        # A user fork is intended to be resumable from the CLI
+                        # picker even when Codex inherited the source client kind.
+                        updates["source"] = "cli"
+                    if "thread_source" in columns:
+                        updates["thread_source"] = "user"
+                    if "has_user_event" in columns:
+                        updates["has_user_event"] = 1
+                    for name in ("title", "name", "first_user_message", "preview"):
+                        if name in columns:
+                            updates[name] = text
+                    if not updates:
+                        continue
+                    assignments = ", ".join(f"{name} = ?" for name in updates)
+                    connection.execute(
+                        f"UPDATE threads SET {assignments} WHERE id = ?",
+                        [*updates.values(), session_id],
+                    )
+                connection.commit()
+        except sqlite3.Error as exc:
+            raise SessionCleanupError(
+                "Codex 目标会话状态元数据无法同步。"
+            ) from exc
 
     def transfer(
         self,

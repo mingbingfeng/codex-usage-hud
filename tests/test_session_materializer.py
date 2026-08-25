@@ -38,6 +38,20 @@ def _event(kind: str) -> dict[str, object]:
     return {"type": "event_msg", "payload": {"kind": kind}, "ordinal": 99}
 
 
+def _identity_event(thread_id: str) -> dict[str, object]:
+    return {
+        "type": "event_msg",
+        "payload": {
+            "thread_id": thread_id,
+            "item": {
+                "parent_thread_id": thread_id,
+                "id": thread_id,
+            },
+        },
+        "ordinal": 99,
+    }
+
+
 def test_materialize_flattens_source_and_target_and_rewrites_ordinals(tmp_path: Path) -> None:
     source = tmp_path / "source.jsonl"
     target = tmp_path / "target.jsonl"
@@ -77,6 +91,40 @@ def test_materialize_flattens_source_and_target_and_rewrites_ordinals(tmp_path: 
     assert records[0]["payload"]["id"] == TARGET_ID
     assert "history_base" not in records[0]["payload"]
     assert "forked_from_id" not in records[0]["payload"]
+
+
+def test_materialize_rebinds_event_thread_id_to_target_without_rewriting_item_ids(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.jsonl"
+    target = tmp_path / "target.jsonl"
+    source_size = _write_rollout(
+        source,
+        [_meta(SOURCE_ID), _identity_event(SOURCE_ID)],
+    )
+    _write_rollout(
+        target,
+        [
+            _meta(
+                TARGET_ID,
+                history_mode="paginated",
+                history_base={"thread_id": SOURCE_ID, "end_byte_offset": source_size},
+            ),
+        ],
+    )
+
+    materialize_forked_rollout(
+        target_id=TARGET_ID,
+        source_id=SOURCE_ID,
+        target_path=target,
+        rollout_paths={SOURCE_ID: source, TARGET_ID: target},
+    )
+
+    records = [json.loads(line) for line in target.read_text(encoding="utf-8").splitlines()]
+    payload = records[1]["payload"]
+    assert payload["thread_id"] == TARGET_ID
+    assert payload["item"]["parent_thread_id"] == TARGET_ID
+    assert payload["item"]["id"] == SOURCE_ID
 
 
 def test_materialize_resolves_nested_paginated_lineage(tmp_path: Path) -> None:
