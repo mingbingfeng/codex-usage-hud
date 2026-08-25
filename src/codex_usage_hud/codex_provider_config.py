@@ -17,6 +17,10 @@ from urllib.request import Request, urlopen
 
 PROVIDER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 ENVIRONMENT_KEY_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+CODEX_AUTH_API_KEY = "OPENAI_API_KEY"
+OFFICIAL_ACCOUNT_TOKEN_KEYS = frozenset(
+    {"access_token", "refresh_token", "id_token", "account_id"}
+)
 PROVIDER_SECTION_PATTERN = re.compile(
     r"(?m)^[\t ]*\[model_providers\.(?P<id>[A-Za-z0-9_-]+)\][\t ]*(?:#.*)?(?:\r?\n|$)"
 )
@@ -41,6 +45,9 @@ class CodexProviderDefinition:
     name: str = ""
     base_url: str = ""
     env_key: str = ""
+    auth_key: str = ""
+    official_account: bool = False
+    requires_openai_auth: bool = False
     wire_api: str = "responses"
     has_api_key: bool = False
     section_text: str = ""
@@ -51,6 +58,106 @@ def default_codex_config_path() -> Path:
     if codex_home:
         return Path(codex_home).expanduser() / "config.toml"
     return Path.home() / ".codex" / "config.toml"
+
+
+def default_codex_auth_path(config_path: str | Path | None = None) -> Path:
+    """Return the Codex auth store paired with a config.toml path."""
+    path = (
+        Path(config_path).expanduser()
+        if config_path is not None
+        else default_codex_config_path()
+    )
+    return path.with_name("auth.json")
+
+
+def _read_json_object(path: Path) -> tuple[dict[str, Any], str, bool]:
+    try:
+        text = _read_text_exact(path)
+    except OSError:
+        return {}, "", False
+    try:
+        payload = json.loads(text)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Codex auth.json 不是有效 JSON：{exc}") from exc
+    if not isinstance(payload, Mapping):
+        raise ValueError("Codex auth.json 必须是 JSON 对象。")
+    return dict(payload), text, True
+
+
+def read_codex_auth_api_key(
+    config_path: str | Path | None = None,
+    *,
+    auth_key: str = CODEX_AUTH_API_KEY,
+) -> str:
+    """Read the default Codex App API key without exposing the auth file."""
+    payload, _text, _exists = _read_json_object(default_codex_auth_path(config_path))
+    return str(payload.get(auth_key) or "")
+
+
+def codex_auth_uses_official_account(
+    config_path: str | Path | None = None,
+) -> bool:
+    """Return whether Codex auth.json contains an official account session."""
+    payload, _text, _exists = _read_json_object(default_codex_auth_path(config_path))
+    tokens = payload.get("tokens")
+    if not isinstance(tokens, Mapping):
+        return False
+    return bool(OFFICIAL_ACCOUNT_TOKEN_KEYS.intersection(tokens.keys()))
+
+
+def _json_with_preserved_newline(payload: Mapping[str, Any], original: str) -> str:
+    newline = _preferred_newline(original)
+    suffix = newline if original.endswith(("\r", "\n")) else ""
+    rendered = json.dumps(payload, ensure_ascii=False, indent=2)
+    return rendered.replace("\n", newline) + suffix
+
+
+def _write_codex_auth_api_key(
+    config_path: str | Path | None,
+    value: str,
+) -> tuple[bool, Path, str, bool, str]:
+    """Atomically update OPENAI_API_KEY and return rollback metadata."""
+    path = default_codex_auth_path(config_path)
+    payload, original_text, existed = _read_json_object(path)
+    if str(payload.get(CODEX_AUTH_API_KEY) or "") == value:
+        return False, path, original_text, existed, original_text
+    payload[CODEX_AUTH_API_KEY] = value
+    candidate = _json_with_preserved_newline(payload, original_text)
+    try:
+        if existed:
+            _write_text_atomically(path, candidate, original_text)
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if not _write_new_text_atomically(path, candidate):
+                raise RuntimeError("Codex auth.json 在保存前发生了变化，请重新打开设置后再试。")
+        if _read_text_exact(path) != candidate:
+            raise RuntimeError("Codex auth.json 写入后校验失败。")
+    except Exception:
+        try:
+            _restore_codex_auth_text(path, original_text, existed, candidate)
+        except Exception as rollback_error:
+            raise RuntimeError(
+                "Codex auth.json 写入校验失败，且之前的值无法恢复。"
+            ) from rollback_error
+        raise
+    return True, path, original_text, existed, candidate
+
+
+def _restore_codex_auth_text(
+    path: Path,
+    original_text: str,
+    existed: bool,
+    expected_text: str,
+) -> None:
+    if not existed:
+        try:
+            if _read_text_exact(path) != expected_text:
+                return
+            path.unlink()
+        except FileNotFoundError:
+            return
+        return
+    _write_text_atomically(path, original_text, expected_text)
 
 
 def _user_environment_value(name: str) -> str:
@@ -433,19 +540,39 @@ def read_provider_definitions(
     raw_providers = parsed.get("model_providers")
     if not isinstance(raw_providers, Mapping):
         return {}
+    default_provider = str(parsed.get("model_provider") or "").strip().casefold()
     result: dict[str, CodexProviderDefinition] = {}
     for raw_id, raw_value in raw_providers.items():
         provider_id = str(raw_id or "").strip()
         if not provider_id or not isinstance(raw_value, Mapping):
             continue
         env_key = str(raw_value.get("env_key") or "").strip()
+        normalized_provider = provider_id.casefold()
+        requires_openai_auth = normalized_provider == "custom" or bool(
+            raw_value.get("requires_openai_auth")
+        )
+        auth_key = (
+            CODEX_AUTH_API_KEY
+            if normalized_provider == default_provider and requires_openai_auth
+            else ""
+        )
+        official_account = bool(
+            auth_key and codex_auth_uses_official_account(path)
+        )
         result[provider_id.casefold()] = CodexProviderDefinition(
             provider_id=provider_id,
             name=str(raw_value.get("name") or "").strip(),
             base_url=str(raw_value.get("base_url") or "").strip(),
             env_key=env_key,
+            auth_key=auth_key,
+            official_account=official_account,
+            requires_openai_auth=requires_openai_auth,
             wire_api=str(raw_value.get("wire_api") or "responses").strip(),
-            has_api_key=bool(_user_environment_value(env_key)) if env_key else False,
+            has_api_key=(
+                bool(read_codex_auth_api_key(path, auth_key=auth_key))
+                if auth_key
+                else bool(_user_environment_value(env_key)) if env_key else False
+            ),
             section_text=_provider_section_text(text, provider_id),
         )
     return result
@@ -453,6 +580,8 @@ def read_provider_definitions(
 
 def _validate_request(
     update: Mapping[str, Any],
+    *,
+    allow_api_key_without_env: bool = False,
 ) -> tuple[str, str, str, str, bool]:
     provider_id = str(update.get("provider_id") or update.get("providerId") or "").strip()
     base_url = str(update.get("base_url") or update.get("baseUrl") or "").strip()
@@ -469,7 +598,7 @@ def _validate_request(
         raise ValueError("请输入有效的用户环境变量名称。")
     if is_new and not env_key:
         raise ValueError("新增供应商时请输入用户环境变量名称。")
-    if api_key and not env_key:
+    if api_key and not env_key and not allow_api_key_without_env:
         raise ValueError("填写 API key 时必须同时填写用户环境变量名称。")
     if "\r" in api_key or "\n" in api_key:
         raise ValueError("API key 不能包含换行。")
@@ -513,11 +642,21 @@ def save_provider_configs(
     definitions = read_provider_definitions(path)
     parsed_config = _parse_toml_mapping(original_text)
     default_provider = str(parsed_config.get("model_provider") or "").strip().casefold()
+    raw_model_providers = parsed_config.get("model_providers")
     seen_ids: set[str] = set()
     env_before: dict[str, str] = {}
     env_after: dict[str, str] = {}
     profiles_to_create: list[tuple[Path, str]] = []
     provider_ids: list[str] = []
+    default_provider_before_section = ""
+    default_provider_candidate_section = ""
+    default_auth_before = ""
+    default_auth_after: str | None = None
+    auth_path: Path | None = None
+    auth_original_text = ""
+    auth_original_exists = False
+    auth_candidate_text = ""
+    auth_changed = False
 
     for update in normalized_updates:
         raw_section_text = str(
@@ -528,42 +667,98 @@ def save_provider_configs(
         requested_provider_id = str(
             update.get("provider_id") or update.get("providerId") or ""
         ).strip()
+        normalized_requested_id = requested_provider_id.casefold()
+        raw_default_entry: Mapping[str, Any] = {}
+        if isinstance(raw_model_providers, Mapping):
+            for raw_id, raw_entry in raw_model_providers.items():
+                if str(raw_id or "").strip().casefold() == normalized_requested_id:
+                    if isinstance(raw_entry, Mapping):
+                        raw_default_entry = raw_entry
+                    break
+        is_default_provider = (
+            bool(default_provider) and normalized_requested_id == default_provider
+        )
+        is_default_app_provider = (
+            is_default_provider
+            and (
+                normalized_requested_id == "custom"
+                or bool(raw_default_entry.get("requires_openai_auth"))
+            )
+        )
+        if is_default_provider and codex_auth_uses_official_account(path):
+            raise ValueError(
+                "官方账号登录时，默认 Codex App Provider 由 Codex Desktop 管理，不支持编辑。"
+            )
         if raw_section_text:
             section_body = _provider_section_body_from_editor(
                 raw_section_text,
                 requested_provider_id,
             )
             validation_update = dict(update)
-            validation_update["base_url"] = _get_quoted_value(section_body, "base_url")
-            validation_update["env_key"] = _get_quoted_value(section_body, "env_key")
+            validation_update["base_url"] = (
+                _get_quoted_value(section_body, "base_url")
+                or str(update.get("base_url") or update.get("baseUrl") or "")
+            )
+            validation_update["env_key"] = (
+                ""
+                if is_default_app_provider
+                else _get_quoted_value(section_body, "env_key")
+            )
         provider_id, base_url, env_key, api_key, is_new = _validate_request(
-            validation_update
+            validation_update,
+            allow_api_key_without_env=is_default_app_provider,
         )
         normalized_id = provider_id.casefold()
         if normalized_id in seen_ids:
             raise ValueError(f"Provider {provider_id} 在同一次保存中重复。")
-        if default_provider and normalized_id == default_provider:
-            raise ValueError("默认 Codex App Provider 不支持在这里编辑供应商配置。")
         seen_ids.add(normalized_id)
         provider_ids.append(provider_id)
         existing = definitions.get(normalized_id)
+        if is_default_app_provider:
+            auth_path = default_codex_auth_path(path)
+            default_auth_before = read_codex_auth_api_key(path)
+            if api_key:
+                default_auth_after = api_key
+            elif default_auth_before:
+                default_auth_after = default_auth_before
+            else:
+                raise ValueError("默认 Codex App Provider 尚未配置 API key，请填写后再保存。")
         section = _section_range(candidate_text, provider_id)
         if section is None:
-            if section_body is not None:
+            if section_body is not None and not is_default_app_provider:
                 candidate_text = _add_provider_section_text(
                     candidate_text, provider_id, section_body
+                )
+            elif is_default_app_provider:
+                newline = _preferred_newline(candidate_text)
+                default_body = newline.join(
+                    (
+                        f'name = "{_toml_string(provider_id)}"',
+                        f'base_url = "{_toml_string(base_url)}"',
+                        'wire_api = "responses"',
+                        "requires_openai_auth = true",
+                    )
+                )
+                candidate_text = _add_provider_section_text(
+                    candidate_text, provider_id, default_body
                 )
             else:
                 candidate_text = _add_provider_section(
                     candidate_text, provider_id, base_url, env_key
                 )
-            profile_path = path.parent / f"{provider_id}.config.toml"
-            newline = _preferred_newline(candidate_text)
-            profile_text = f'model_provider = "{_toml_string(provider_id)}"{newline}'
-            profiles_to_create.append((profile_path, profile_text))
+            if not is_default_app_provider:
+                profile_path = path.parent / f"{provider_id}.config.toml"
+                newline = _preferred_newline(candidate_text)
+                profile_text = f'model_provider = "{_toml_string(provider_id)}"{newline}'
+                profiles_to_create.append((profile_path, profile_text))
         else:
             _start, _end, body = section
-            if section_body is not None:
+            if is_default_app_provider:
+                newline = _preferred_newline(candidate_text)
+                # Codex App owns the auth-related fields in this section. Only
+                # change base_url so its special flags survive a HUD round trip.
+                next_body = _set_quoted_value(body, "base_url", base_url, newline)
+            elif section_body is not None:
                 next_body = section_body
             else:
                 newline = _preferred_newline(candidate_text)
@@ -572,18 +767,26 @@ def save_provider_configs(
                     next_body = _set_quoted_value(next_body, "env_key", env_key, newline)
             candidate_text = _replace_section_body(candidate_text, provider_id, next_body)
 
-        previous_env_key = existing.env_key if existing else ""
-        previous_env_value = _user_environment_value(previous_env_key)
-        target_env_value = _user_environment_value(env_key)
-        if env_key not in env_before:
-            env_before[env_key] = target_env_value
-        if api_key:
-            env_after[env_key] = api_key
-        elif not target_env_value:
-            if previous_env_key and previous_env_value and previous_env_key == env_key:
-                env_after[env_key] = previous_env_value
-            elif is_new or not existing or previous_env_key != env_key:
-                raise ValueError(f"请为 Provider {provider_id} 填写 API key。")
+        if is_default_app_provider:
+            default_provider_before_section = _provider_section_text(
+                original_text, provider_id
+            )
+            default_provider_candidate_section = _provider_section_text(
+                candidate_text, provider_id
+            )
+        else:
+            previous_env_key = existing.env_key if existing else ""
+            previous_env_value = _user_environment_value(previous_env_key)
+            target_env_value = _user_environment_value(env_key)
+            if env_key not in env_before:
+                env_before[env_key] = target_env_value
+            if api_key:
+                env_after[env_key] = api_key
+            elif not target_env_value:
+                if previous_env_key and previous_env_value and previous_env_key == env_key:
+                    env_after[env_key] = previous_env_value
+                elif is_new or not existing or previous_env_key != env_key:
+                    raise ValueError(f"请为 Provider {provider_id} 填写 API key。")
 
     _validate_toml(candidate_text)
     config_changed = candidate_text != original_text
@@ -597,6 +800,14 @@ def save_provider_configs(
         for profile_path, profile_text in profiles_to_create:
             if _write_new_text_atomically(profile_path, profile_text):
                 created_profiles.append(profile_path)
+        if default_auth_after is not None:
+            (
+                auth_changed,
+                auth_path,
+                auth_original_text,
+                auth_original_exists,
+                auth_candidate_text,
+            ) = _write_codex_auth_api_key(path, default_auth_after)
         for env_key, value in env_after.items():
             if _user_environment_value(env_key) == value:
                 continue
@@ -616,6 +827,16 @@ def save_provider_configs(
                 raise RuntimeError("用户环境变量写入后校验失败。")
     except Exception:
         rollback_failed = False
+        if auth_changed and auth_path is not None:
+            try:
+                _restore_codex_auth_text(
+                    auth_path,
+                    auth_original_text,
+                    auth_original_exists,
+                    auth_candidate_text,
+                )
+            except Exception:
+                rollback_failed = True
         for env_key in reversed(env_written):
             try:
                 _set_user_environment_value(env_key, env_before.get(env_key, ""))
@@ -638,11 +859,17 @@ def save_provider_configs(
         raise
 
     return {
-        "changed": bool(config_changed or created_profiles or env_written),
+        "changed": bool(config_changed or created_profiles or env_written or auth_changed),
         "providerIds": provider_ids,
         "configPath": str(path),
         "profilePaths": [str(item) for item in created_profiles],
         "environmentKeys": list(env_written),
+        "authPath": str(auth_path) if auth_path is not None else "",
+        "authKeys": [CODEX_AUTH_API_KEY] if auth_changed else [],
+        "defaultProviderEdited": bool(
+            default_provider_before_section != default_provider_candidate_section
+            or auth_changed
+        ),
     }
 
 
@@ -887,10 +1114,10 @@ def fetch_provider_models_for_cli(
     """Resolve a provider's model list from its stored Codex configuration.
 
     Reads the ``[model_providers.<id>]`` section from ``config.toml`` to obtain
-    ``base_url`` and ``env_key``, reads the API key from the matching user
-    environment variable (never from HUD config), and queries ``/models``.
-    Returns ``{"provider", "baseUrl", "envKey", "models": [...]}`` on success
-    and raises ``ValueError`` with a user-facing message otherwise.
+    ``base_url``. Ordinary profiles use their user environment variable; the
+    default Codex App provider uses ``auth.json``. Returns
+    ``{"provider", "baseUrl", "envKey", "models": [...]}`` on success and
+    raises ``ValueError`` with a user-facing message otherwise.
     """
     provider = str(provider_id or "").strip()
     if not provider or not PROVIDER_ID_PATTERN.fullmatch(provider):
@@ -903,18 +1130,24 @@ def fetch_provider_models_for_cli(
     env_key = definition.env_key
     if not base_url:
         raise ValueError(f"Provider {provider} 未配置 base_url。")
-    if not env_key:
-        raise ValueError(f"Provider {provider} 未配置用户环境变量名称。")
-    api_key = _user_environment_value(env_key)
-    if not api_key:
-        raise ValueError(
+    if definition.auth_key:
+        api_key = read_codex_auth_api_key(config_path, auth_key=definition.auth_key)
+        missing_message = "Codex auth.json 中没有可用的 API key，请先在编辑供应商中保存。"
+    else:
+        if not env_key:
+            raise ValueError(f"Provider {provider} 未配置用户环境变量名称。")
+        api_key = _user_environment_value(env_key)
+        missing_message = (
             f"用户环境变量 {env_key} 中没有可用的 API key，请先在新增/编辑供应商中保存。"
         )
+    if not api_key:
+        raise ValueError(missing_message)
     models = fetch_provider_models(base_url, api_key, timeout_seconds)
     return {
         "provider": provider,
         "baseUrl": base_url,
         "envKey": env_key,
+        "authKey": definition.auth_key,
         "models": models,
     }
 
@@ -1105,12 +1338,17 @@ def send_cli_chat_probe(
 
 
 __all__ = [
+    "CODEX_AUTH_API_KEY",
+    "OFFICIAL_ACCOUNT_TOKEN_KEYS",
     "CodexProviderDefinition",
+    "default_codex_auth_path",
     "default_codex_config_path",
+    "codex_auth_uses_official_account",
     "delete_provider_config",
     "fetch_provider_models",
     "fetch_provider_models_for_cli",
     "read_provider_definitions",
+    "read_codex_auth_api_key",
     "save_provider_configs",
     "send_cli_chat_probe",
     "send_provider_chat_probe",

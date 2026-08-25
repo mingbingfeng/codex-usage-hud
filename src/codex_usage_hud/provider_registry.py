@@ -13,7 +13,7 @@ import json
 from pathlib import Path
 from typing import Any, Mapping
 
-from .codex_provider_config import read_provider_definitions
+from .codex_provider_config import default_codex_config_path, read_provider_definitions
 from .config import UserConfig, normalize_provider
 from .platforms.codex_theme import read_codex_config
 
@@ -26,6 +26,8 @@ class ProviderRegistryEntry:
     profile_names: tuple[str, ...] = ()
     base_url: str = ""
     env_key: str = ""
+    official_account: bool = False
+    requires_openai_auth: bool = False
     wire_api: str = "responses"
     has_api_key: bool = False
     config_text: str = ""
@@ -51,6 +53,7 @@ class ProviderRegistryEntry:
 class ProviderRegistry:
     entries: dict[str, ProviderRegistryEntry]
     app_provider: str = ""
+    config_path: str = ""
 
     def providers(self) -> tuple[str, ...]:
         # ``entries`` is built in discovery order.  Preserve it so callers
@@ -68,8 +71,13 @@ def discover_provider_registry(
     include_history: bool = True,
 ) -> ProviderRegistry:
     """Collect provider keys from config/settings and optionally recent JSONL."""
-    raw_config = read_codex_config(config_path)
-    provider_definitions = read_provider_definitions(config_path)
+    resolved_config_path = (
+        Path(config_path).expanduser()
+        if config_path is not None
+        else default_codex_config_path()
+    )
+    raw_config = read_codex_config(resolved_config_path)
+    provider_definitions = read_provider_definitions(resolved_config_path)
     entries: dict[str, dict[str, object]] = {}
 
     def include(provider_value: object, **source: bool) -> None:
@@ -95,6 +103,8 @@ def discover_provider_registry(
                     {
                         "base_url": definition.base_url,
                         "env_key": definition.env_key,
+                        "official_account": definition.official_account,
+                        "requires_openai_auth": definition.requires_openai_auth,
                         "wire_api": definition.wire_api,
                         "has_api_key": definition.has_api_key,
                         "config_text": definition.section_text,
@@ -129,6 +139,8 @@ def discover_provider_registry(
             profile_names=tuple(sorted(state.get("profiles", set()))),
             base_url=str(state.get("base_url") or ""),
             env_key=str(state.get("env_key") or ""),
+            official_account=bool(state.get("official_account")),
+            requires_openai_auth=bool(state.get("requires_openai_auth")),
             wire_api=str(state.get("wire_api") or "responses"),
             has_api_key=bool(state.get("has_api_key")),
             config_text=str(state.get("config_text") or ""),
@@ -140,7 +152,11 @@ def discover_provider_registry(
         )
         for provider, state in entries.items()
     }
-    return ProviderRegistry(entries=normalized_entries, app_provider=app_provider)
+    return ProviderRegistry(
+        entries=normalized_entries,
+        app_provider=app_provider,
+        config_path=str(resolved_config_path),
+    )
 
 
 def discover_recent_session_providers(

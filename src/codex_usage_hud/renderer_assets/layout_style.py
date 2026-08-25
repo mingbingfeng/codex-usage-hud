@@ -4368,6 +4368,20 @@ TEXT = r"""
           #${rootId} .codex-usage-hud-provider-config-grid-placeholder {
             min-width: 0;
           }
+          #${rootId} .codex-usage-hud-provider-config-auth-note {
+            min-width: 0;
+            box-sizing: border-box;
+            display: flex;
+            align-items: center;
+            padding: 6px 10px;
+            border: 1px solid #3a3d44;
+            border-radius: 5px;
+            background: rgba(243, 210, 122, 0.07);
+            color: var(--codex-usage-hud-muted, #8492a6);
+            font-size: 10px;
+            font-weight: 400;
+            line-height: 1.45;
+          }
           #${rootId} .codex-usage-hud-provider-config-section {
             min-width: 0;
             display: grid;

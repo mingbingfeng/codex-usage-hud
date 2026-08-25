@@ -1042,6 +1042,24 @@ TEXT = r"""
         applyProviderConfigDialog();
         return;
       }
+      if (action.dataset.action === "settings-provider-restart-cancel") {
+        event.preventDefault();
+        event.stopPropagation();
+        closeProviderRestartConfirmDialog();
+        return;
+      }
+      if (action.dataset.action === "settings-provider-restart-later") {
+        event.preventDefault();
+        event.stopPropagation();
+        applyProviderConfigWithRestartDecision("later");
+        return;
+      }
+      if (action.dataset.action === "settings-provider-restart-now") {
+        event.preventDefault();
+        event.stopPropagation();
+        applyProviderConfigWithRestartDecision("now");
+        return;
+      }
       if (action.dataset.action === "settings-provider-toggle-api-key") {
         event.preventDefault();
         event.stopPropagation();
@@ -1244,7 +1262,11 @@ TEXT = r"""
       if (action.dataset.action === "settings-restart") {
         event.preventDefault();
         event.stopPropagation();
-        void restartHudFromModal();
+        if (String(action.dataset.restartTarget || "") === "codex") {
+          void restartCodexFromModal();
+        } else {
+          void restartHudFromModal();
+        }
         return;
       }
       if (action.dataset.action === "settings-install-desktop-overlay") {

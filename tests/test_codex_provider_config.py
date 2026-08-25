@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -11,13 +12,16 @@ SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
+import codex_usage_hud.codex_provider_config as provider_config_module
 from codex_usage_hud.codex_provider_config import (
+    CODEX_AUTH_API_KEY,
     _delete_user_environment_value,
     _chat_completions_url,
     delete_provider_config,
     fetch_provider_models,
     fetch_provider_models_for_cli,
     read_provider_definitions,
+    read_codex_auth_api_key,
     save_provider_configs,
     send_cli_chat_probe,
     send_provider_chat_probe,
@@ -88,7 +92,7 @@ class CodexProviderConfigTests(unittest.TestCase):
         self.assertIn("[features]\nmemories = true", updated)
         self.assertFalse(profile.exists())
 
-    def test_default_custom_provider_cannot_be_edited(self) -> None:
+    def test_default_custom_provider_updates_config_and_auth_without_profile(self) -> None:
         config_text = (
             'model_provider = "custom"\n\n'
             '[model_providers]\n'
@@ -100,23 +104,287 @@ class CodexProviderConfigTests(unittest.TestCase):
             'experimental_bearer_token = "keep-out-of-hud"\n'
         )
         with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
             path = Path(temp_dir) / "config.toml"
             path.write_text(config_text, encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "默认 Codex App Provider"):
-                save_provider_configs(
-                    [
+            (root / "auth.json").write_text(
+                '{"OPENAI_API_KEY": "old-secret", "other": "keep"}\n',
+                encoding="utf-8",
+            )
+            result = save_provider_configs(
+                [
+                    {
+                        "provider_id": "custom",
+                        "base_url": "https://new.example/v1",
+                        "api_key": "new-secret",
+                        "section_text": (
+                            "[model_providers.custom]\n"
+                            'name = "Custom App"\n'
+                            'base_url = "https://new.example/v1"\n'
+                            'wire_api = "responses"'
+                        ),
+                    }
+                ],
+                config_path=path,
+            )
+            updated = path.read_text(encoding="utf-8")
+            auth = json.loads((root / "auth.json").read_text(encoding="utf-8"))
+            definition = read_provider_definitions(path)["custom"]
+            auth_value = read_codex_auth_api_key(path)
+
+        self.assertTrue(result["changed"])
+        self.assertTrue(result["defaultProviderEdited"])
+        self.assertEqual(result["profilePaths"], [])
+        self.assertEqual(result["environmentKeys"], [])
+        self.assertEqual(result["authKeys"], [CODEX_AUTH_API_KEY])
+        self.assertIn('base_url = "https://new.example/v1"', updated)
+        self.assertIn("requires_openai_auth = true", updated)
+        self.assertIn('experimental_bearer_token = "keep-out-of-hud"', updated)
+        self.assertNotIn('env_key = "', updated)
+        self.assertEqual(auth, {"OPENAI_API_KEY": "new-secret", "other": "keep"})
+        self.assertEqual(auth_value, "new-secret")
+        self.assertEqual(definition.auth_key, CODEX_AUTH_API_KEY)
+        self.assertTrue(definition.has_api_key)
+
+    def test_default_custom_provider_noop_does_not_request_restart(self) -> None:
+        config_text = (
+            'model_provider = "custom"\n\n'
+            "[model_providers]\n"
+            "[model_providers.custom]\n"
+            'name = "OpenAI"\n'
+            'base_url = "https://same.example/v1"\n'
+            'wire_api = "responses"\n'
+            "requires_openai_auth = true\n"
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            path = root / "config.toml"
+            path.write_text(config_text, encoding="utf-8")
+            (root / "auth.json").write_text(
+                '{"OPENAI_API_KEY": "same-secret"}\n', encoding="utf-8"
+            )
+            result = save_provider_configs(
+                {
+                    "provider_id": "custom",
+                    "base_url": "https://same.example/v1",
+                    "api_key": "same-secret",
+                    "section_text": (
+                        "[model_providers.custom]\n"
+                        'name = "ignored preview"\n'
+                        'base_url = "https://same.example/v1"\n'
+                        'wire_api = "responses"'
+                    ),
+                },
+                config_path=path,
+            )
+
+        self.assertFalse(result["changed"])
+        self.assertFalse(result["defaultProviderEdited"])
+        self.assertEqual(result["authKeys"], [])
+
+    def test_default_auth_write_rolls_back_when_profile_write_fails(self) -> None:
+        config_text = (
+            'model_provider = "custom"\n\n'
+            "[model_providers]\n"
+            "[model_providers.custom]\n"
+            'name = "OpenAI"\n'
+            'base_url = "https://old.example/v1"\n'
+            'wire_api = "responses"\n'
+            "requires_openai_auth = true\n\n"
+            "[model_providers.muyuan]\n"
+            'base_url = "https://muyuan.example/v1"\n'
+            'env_key = "MUYUAN_API_KEY"\n'
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "config.toml"
+            config_path.write_text(config_text, encoding="utf-8")
+            auth_path = root / "auth.json"
+            auth_path.write_text(
+                '{"OPENAI_API_KEY": "old-secret"}\n', encoding="utf-8"
+            )
+            with patch(
+                "codex_usage_hud.codex_provider_config._user_environment_value",
+                return_value="",
+            ), patch(
+                "codex_usage_hud.codex_provider_config._set_user_environment_value",
+                side_effect=RuntimeError("registry unavailable"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "registry unavailable"):
+                    save_provider_configs(
+                        [
+                            {
+                                "provider_id": "custom",
+                                "base_url": "https://new.example/v1",
+                                "api_key": "new-secret",
+                            },
+                            {
+                                "provider_id": "muyuan",
+                                "base_url": "https://new-muyuan.example/v1",
+                                "env_key": "MUYUAN_API_KEY",
+                                "api_key": "muyuan-secret",
+                            },
+                        ],
+                        config_path=config_path,
+                    )
+
+            self.assertEqual(config_path.read_text(encoding="utf-8"), config_text)
+            self.assertEqual(
+                auth_path.read_text(encoding="utf-8"),
+                '{"OPENAI_API_KEY": "old-secret"}\n',
+            )
+
+    def test_default_auth_write_validation_failure_rolls_back(self) -> None:
+        config_text = (
+            'model_provider = "custom"\n\n'
+            "[model_providers]\n"
+            "[model_providers.custom]\n"
+            'name = "OpenAI"\n'
+            'base_url = "https://old.example/v1"\n'
+            'wire_api = "responses"\n'
+            "requires_openai_auth = true\n"
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "config.toml"
+            config_path.write_text(config_text, encoding="utf-8")
+            auth_path = root / "auth.json"
+            auth_path.write_text(
+                '{"OPENAI_API_KEY": "old-secret"}\n', encoding="utf-8"
+            )
+
+            real_read_text = provider_config_module._read_text_exact
+            new_secret_reads = [0]
+
+            def flaky_read_text(path):
+                # 正常读取磁盘；只有第一次读到新 key 的「写后校验」读取返回
+                # 不一致内容，模拟校验失败。恢复阶段的 CAS 读取（第二次读到
+                # 新 key）仍走真实读取，确保 _write_codex_auth_api_key 内部
+                # 回滚能把 auth.json 恢复成旧值。
+                text = real_read_text(path)
+                if path == auth_path and "new-secret" in text:
+                    new_secret_reads[0] += 1
+                    if new_secret_reads[0] == 1:
+                        return text + "\n"
+                return text
+
+            with patch(
+                "codex_usage_hud.codex_provider_config._read_text_exact",
+                side_effect=flaky_read_text,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "写入后校验失败"):
+                    save_provider_configs(
                         {
                             "provider_id": "custom",
                             "base_url": "https://new.example/v1",
-                            "env_key": "",
-                            "api_key": "",
-                        }
-                    ],
-                    config_path=path,
-                )
-            updated = path.read_text(encoding="utf-8")
+                            "api_key": "new-secret",
+                        },
+                        config_path=config_path,
+                    )
 
-        self.assertEqual(updated, config_text)
+            # auth.json 已被 _write_codex_auth_api_key 内部回滚恢复原值，
+            # 不会因为外层 auth_changed 未置位而残留新 key。
+            self.assertEqual(
+                auth_path.read_text(encoding="utf-8"),
+                '{"OPENAI_API_KEY": "old-secret"}\n',
+            )
+            # config.toml 也由外层事务回滚。
+            self.assertEqual(config_path.read_text(encoding="utf-8"), config_text)
+
+    def test_official_account_rejects_default_provider_edit(self) -> None:
+        config_text = (
+            'model_provider = "custom"\n\n'
+            "[model_providers]\n"
+            "[model_providers.custom]\n"
+            'name = "OpenAI"\n'
+            'base_url = "https://old.example/v1"\n'
+            'wire_api = "responses"\n'
+            "requires_openai_auth = true\n"
+        )
+        auth_text = (
+            '{"tokens": {"access_token": "redacted", "account_id": "account"}}\n'
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "config.toml"
+            auth_path = root / "auth.json"
+            config_path.write_text(config_text, encoding="utf-8")
+            auth_path.write_text(auth_text, encoding="utf-8")
+
+            definition = read_provider_definitions(config_path)["custom"]
+            with self.assertRaisesRegex(ValueError, "官方账号登录"):
+                save_provider_configs(
+                    {
+                        "provider_id": "custom",
+                        "base_url": "https://new.example/v1",
+                        "api_key": "attempted-key",
+                    },
+                    config_path=config_path,
+                )
+
+            self.assertTrue(definition.official_account)
+            self.assertEqual(config_path.read_text(encoding="utf-8"), config_text)
+            self.assertEqual(auth_path.read_text(encoding="utf-8"), auth_text)
+
+    def test_official_account_rejects_non_custom_default_provider_edit(self) -> None:
+        # 官方账号 guard 必须覆盖任意默认供应商，而不只是 custom /
+        # requires_openai_auth：非 custom 默认供应商（如内置 openai）同样禁止编辑。
+        config_text = (
+            'model_provider = "openai"\n\n'
+            "[model_providers]\n"
+            "[model_providers.openai]\n"
+            'name = "OpenAI"\n'
+            'base_url = "https://old.example/v1"\n'
+            'env_key = "OPENAI_API_KEY"\n'
+            'wire_api = "responses"\n'
+        )
+        auth_text = (
+            '{"tokens": {"access_token": "redacted", "account_id": "account"}}\n'
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "config.toml"
+            auth_path = root / "auth.json"
+            config_path.write_text(config_text, encoding="utf-8")
+            auth_path.write_text(auth_text, encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "官方账号登录"):
+                save_provider_configs(
+                    {
+                        "provider_id": "openai",
+                        "base_url": "https://new.example/v1",
+                        "api_key": "attempted-key",
+                    },
+                    config_path=config_path,
+                )
+
+            self.assertEqual(config_path.read_text(encoding="utf-8"), config_text)
+            self.assertEqual(auth_path.read_text(encoding="utf-8"), auth_text)
+
+    def test_read_provider_definitions_exposes_requires_openai_auth(self) -> None:
+        config_text = (
+            'model_provider = "custom"\n\n'
+            "[model_providers]\n"
+            "[model_providers.custom]\n"
+            'name = "OpenAI"\n'
+            'base_url = "https://api.example/v1"\n'
+            "requires_openai_auth = true\n"
+            "\n"
+            "[model_providers.muyuan]\n"
+            'name = "Muyuan"\n'
+            'base_url = "https://old.example/v1"\n'
+            'env_key = "MUYUAN_API_KEY"\n'
+            'wire_api = "responses"\n'
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "config.toml"
+            config_path.write_text(config_text, encoding="utf-8")
+
+            definitions = read_provider_definitions(config_path)
+
+        self.assertTrue(definitions["custom"].requires_openai_auth)
+        self.assertFalse(definitions["muyuan"].requires_openai_auth)
 
     def test_windows_newlines_are_preserved(self) -> None:
         config_text = (
@@ -650,6 +918,39 @@ class FetchProviderModelsTests(unittest.TestCase):
 
 
 class FetchProviderModelsForCliTests(unittest.TestCase):
+    @patch(
+        "codex_usage_hud.codex_provider_config.fetch_provider_models",
+        return_value=["gpt-5"],
+    )
+    def test_default_provider_uses_auth_json_instead_of_environment(
+        self, fetch_models
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "config.toml"
+            config_path.write_text(
+                'model_provider = "custom"\n'
+                "[model_providers.custom]\n"
+                'name = "OpenAI"\n'
+                'base_url = "https://api.example.com/v1"\n'
+                'wire_api = "responses"\n'
+                "requires_openai_auth = true\n",
+                encoding="utf-8",
+            )
+            (root / "auth.json").write_text(
+                '{"OPENAI_API_KEY": "sk-from-auth"}\n', encoding="utf-8"
+            )
+            result = fetch_provider_models_for_cli(
+                "custom", config_path=config_path
+            )
+
+        fetch_models.assert_called_once_with(
+            "https://api.example.com/v1", "sk-from-auth", 8.0
+        )
+        self.assertEqual(result["authKey"], CODEX_AUTH_API_KEY)
+        self.assertEqual(result["envKey"], "")
+        self.assertEqual(result["models"], ["gpt-5"])
+
     def test_missing_provider_definition_raises(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "config.toml"

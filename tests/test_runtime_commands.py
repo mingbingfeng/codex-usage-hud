@@ -474,6 +474,97 @@ def test_general_command_can_request_codex_restart() -> None:
     assert "Codex Desktop" in status["message"]
 
 
+def test_general_provider_save_prompts_for_default_codex_restart() -> None:
+    config = UserConfig.defaults()
+    save_provider = MagicMock(
+        return_value={
+            "changed": True,
+            "providerIds": ["custom"],
+            "defaultProviderEdited": True,
+        }
+    )
+    ports = GeneralCommandPorts(
+        load_config=lambda: config,
+        save_config=lambda value: None,
+        fetch_prices=lambda url: {},
+        rest_reminder=None,
+        update_manager=None,
+        work_overlay=None,
+        request_restart=lambda: None,
+        request_exit=lambda: None,
+        check_update=lambda: SimpleNamespace(error="", available=False, current_version="1"),
+        install_update=lambda info: None,
+        overlay_status=lambda: {},
+        start_overlay_install=lambda: False,
+        clear_forced_missing=lambda: None,
+        forced_missing_with_real_install=lambda: False,
+        pyside_version=lambda: "",
+        default_overlay_limit=lambda: 1,
+        dismiss_warnings_today=lambda: True,
+        save_codex_providers=save_provider,
+    )
+
+    status = dispatch_command(
+        {
+            "action": "save",
+            "requestId": "provider-save-1",
+            "settings": config.to_dict(),
+            "codexProviders": [{"provider_id": "custom"}],
+        },
+        RuntimeCommandPorts(),
+        ports,
+    )
+
+    save_provider.assert_called_once()
+    assert status["requestId"] == "provider-save-1"
+    assert status["restartVisible"] is True
+    assert status["restartCodex"] is True
+    assert "重启 Codex Desktop" in status["message"]
+
+
+def test_general_provider_save_without_default_change_does_not_prompt_restart() -> None:
+    config = UserConfig.defaults()
+    ports = GeneralCommandPorts(
+        load_config=lambda: config,
+        save_config=lambda value: None,
+        fetch_prices=lambda url: {},
+        rest_reminder=None,
+        update_manager=None,
+        work_overlay=None,
+        request_restart=lambda: None,
+        request_exit=lambda: None,
+        check_update=lambda: SimpleNamespace(error="", available=False, current_version="1"),
+        install_update=lambda info: None,
+        overlay_status=lambda: {},
+        start_overlay_install=lambda: False,
+        clear_forced_missing=lambda: None,
+        forced_missing_with_real_install=lambda: False,
+        pyside_version=lambda: "",
+        default_overlay_limit=lambda: 1,
+        dismiss_warnings_today=lambda: True,
+        save_codex_providers=lambda updates: {
+            "changed": True,
+            "providerIds": ["muyuan"],
+            "defaultProviderEdited": False,
+        },
+    )
+
+    status = dispatch_command(
+        {
+            "action": "save",
+            "requestId": "provider-save-2",
+            "settings": config.to_dict(),
+            "codexProviders": [{"provider_id": "muyuan"}],
+        },
+        RuntimeCommandPorts(),
+        ports,
+    )
+
+    assert status["restartVisible"] is False
+    assert "muyuan" in status["message"]
+    assert "重启 Codex Desktop" not in status["message"]
+
+
 def test_general_command_dispatches_provider_delete() -> None:
     deleted: list[dict[str, object]] = []
     config = UserConfig.defaults()

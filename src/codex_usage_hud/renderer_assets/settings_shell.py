@@ -1970,15 +1970,16 @@ _TEXT_PREFIX = r"""
         return String(value || "").replace(/\\/g, "\\\\").replace(/"/g, '\\"');
       }
 
-      function defaultProviderSectionText(provider, baseUrl, envKey) {
+      function defaultProviderSectionText(provider, baseUrl, envKey, { isDefault = false } = {}) {
         const normalizedProvider = String(provider || "").trim().toLowerCase() || "provider-id";
-        return [
+        const lines = [
           "[model_providers." + normalizedProvider + "]",
           "name = \"" + tomlBasicStringEscape(normalizedProvider) + "\"",
           "base_url = \"" + tomlBasicStringEscape(baseUrl) + "\"",
-          "env_key = \"" + tomlBasicStringEscape(envKey) + "\"",
           "wire_api = \"responses\"",
-        ].join("\n");
+        ];
+        if (!isDefault) lines.splice(3, 0, "env_key = \"" + tomlBasicStringEscape(envKey) + "\"");
+        return lines.join("\n");
       }
 
       function providerSectionBasicString(text, key) {
@@ -2270,6 +2271,13 @@ _TEXT_PREFIX = r"""
         }
         const providerSettings = entry.settings;
         const required = activeProvider === draft.appProvider;
+        const providerRegistryEntry = settings.provider_registry?.[activeProvider] || {};
+        const officialAccount = required && providerRegistryEntry.officialAccount === true;
+        // 仅 custom / requires_openai_auth 的默认供应商走 auth.json 编辑链路；
+        // 其它默认供应商（如内置 openai）不开放编辑，与后端 is_default_app_provider 判定一致。
+        const defaultProviderEditable = required && (
+          activeProvider === "custom" || providerRegistryEntry.requiresOpenaiAuth === true
+        );
         const quickLaunchEnabled = draft.quickLaunchProviders?.has(activeProvider) === true;
         const pricingDraftPending = settingsDirtyProviders.has(activeProvider);
         const meta = settingsProviderMeta(settings, activeProvider);
@@ -2302,7 +2310,12 @@ _TEXT_PREFIX = r"""
               </label>
               <button type="button" class="codex-usage-hud-settings-icon-action codex-usage-hud-codex-cli-launch-action" data-action="settings-codex-cli-open" data-provider="${escapeHtml(activeProvider)}" aria-label="以当前 Provider 启动 Codex CLI" title="以当前 Provider 启动 Codex CLI"><span aria-hidden="true">&gt;_</span></button>
               <button type="button" class="codex-usage-hud-settings-icon-action" data-action="settings-transfer-provider" data-provider="${escapeHtml(activeProvider)}" aria-label="复制或迁移 ${escapeHtml(activeProvider)} 的会话" title="复制或迁移会话"><span aria-hidden="true">⇆</span></button>
-              ${required ? "" : '<button type="button" class="codex-usage-hud-settings-icon-action" data-action="settings-edit-provider" data-provider="' + escapeHtml(activeProvider) + '" aria-label="编辑 ' + escapeHtml(activeProvider) + ' 供应商配置" title="编辑供应商配置">✎</button>' + '<button type="button" class="codex-usage-hud-settings-icon-action codex-usage-hud-provider-delete-action" data-action="settings-delete-provider" data-provider="' + escapeHtml(activeProvider) + '" aria-label="删除 ' + escapeHtml(activeProvider) + ' 供应商" title="删除供应商"><span aria-hidden="true">⌫</span></button>'}
+              ${officialAccount
+                ? '<span class="codex-usage-hud-provider-config-locked" role="img" aria-label="官方账号登录，默认 Provider 不可编辑" title="官方账号登录时由 Codex Desktop 管理，默认 Provider 不可编辑">🔒</span>'
+                : defaultProviderEditable || !required
+                  ? '<button type="button" class="codex-usage-hud-settings-icon-action" data-action="settings-edit-provider" data-provider="' + escapeHtml(activeProvider) + '" aria-label="编辑 ' + escapeHtml(activeProvider) + ' 供应商配置" title="编辑供应商配置">✎</button>'
+                  : ''}
+              ${required ? "" : '<button type="button" class="codex-usage-hud-settings-icon-action codex-usage-hud-provider-delete-action" data-action="settings-delete-provider" data-provider="' + escapeHtml(activeProvider) + '" aria-label="删除 ' + escapeHtml(activeProvider) + ' 供应商" title="删除供应商"><span aria-hidden="true">⌫</span></button>'}
               <button type="button" class="codex-usage-hud-settings-action codex-usage-hud-pricing-apply-action" data-action="settings-pricing-apply" data-primary="true" data-price-draft-pending="${pricingDraftPending}" aria-label="${pricingDraftPending ? "应用模型单价修改，有待应用修改" : "应用模型单价修改"}" title="${pricingDraftPending ? "应用待提交的模型单价修改" : "应用模型单价修改"}">应用<span class="codex-usage-hud-provider-dirty-dot codex-usage-hud-pricing-apply-dirty-dot" data-pricing-apply-dirty-dot="true" aria-hidden="true" ${pricingDraftPending ? "" : "hidden"}></span></button>
             </div>
           </div>
@@ -2747,11 +2760,21 @@ _TEXT_PREFIX = r"""
         const settings = hudSettingsFromPayload();
         ensureSettingsProviderDraft(settings);
         const normalizedProvider = String(provider || "").trim().toLowerCase();
+        const isAppProvider = !isNew && normalizedProvider === String(settingsProviderDraft.appProvider || "").trim().toLowerCase();
+        const registryEntry = settings.provider_registry?.[normalizedProvider] || {};
+        // 仅 custom / requires_openai_auth 的默认供应商走 auth.json 编辑链路，与后端 is_default_app_provider 判定一致。
+        const isDefaultProvider = isAppProvider && (
+          normalizedProvider === "custom" || registryEntry.requiresOpenaiAuth === true
+        );
+        // 官方账号登录时，任意默认供应商都不可编辑（不限于 custom）。
+        if (isAppProvider && registryEntry.officialAccount === true) {
+          setSettingsStatus("官方账号登录时，默认 Codex App Provider 由 Codex Desktop 管理，不支持编辑。", "error");
+          return;
+        }
         const target = isNew ? null : ensureCodexProviderDraft(settings, normalizedProvider);
         // 每次打开编辑对话框都从 provider registry 刷新 API key 回显值，
         // 避免使用会话内缓存的旧 draft 值。
         if (target) {
-          const registryEntry = settings.provider_registry?.[normalizedProvider] || {};
           target.currentApiKey = String(registryEntry.apiKey || "");
           if (typeof registryEntry.hasApiKey === "boolean") {
             target.hasApiKey = registryEntry.hasApiKey;
@@ -2763,7 +2786,9 @@ _TEXT_PREFIX = r"""
         const targetEnvKey = target?.envKey || (isNew ? suggestedProviderEnvironmentKey(normalizedProvider) : "");
         const initialConfigText = String(
           target?.configText
-            || defaultProviderSectionText(normalizedProvider, target?.baseUrl || "", targetEnvKey),
+            || defaultProviderSectionText(normalizedProvider, target?.baseUrl || "", targetEnvKey, {
+              isDefault: isDefaultProvider,
+            }),
         );
         const sourceProvider = isNew
           ? String(settingsProviderDraft.appProvider || "").trim().toLowerCase()
@@ -2795,9 +2820,11 @@ _TEXT_PREFIX = r"""
               <label>Base URL
                 <input data-provider-config-field="base_url" value="${escapeHtml(target?.baseUrl || "")}" placeholder="https://api.example.com/v1" autocomplete="url">
               </label>
-              <label>用户环境变量名称
-                <input data-provider-config-field="env_key" value="${escapeHtml(target?.envKey || (isNew ? suggestedProviderEnvironmentKey(normalizedProvider) : ""))}" autocomplete="off">
-              </label>
+              ${isDefaultProvider
+                ? `<div class="codex-usage-hud-provider-config-auth-note">Codex App 使用 auth.json 中的 OPENAI_API_KEY，不使用用户环境变量。</div>`
+                : `<label>用户环境变量名称
+                  <input data-provider-config-field="env_key" value="${escapeHtml(target?.envKey || (isNew ? suggestedProviderEnvironmentKey(normalizedProvider) : ""))}" autocomplete="off">
+                </label>`}
               <div class="codex-usage-hud-provider-config-apikey">
                 <label>API key
                   <span class="codex-usage-hud-provider-config-apikey-field">
@@ -2832,7 +2859,9 @@ _TEXT_PREFIX = r"""
                 <span>此处内容会写回用户 config.toml；Base URL 和环境变量名会与上面的字段同步。</span>
               </label>
             </details>
-            <div class="codex-usage-hud-settings-confirm-body">保存设置后会更新用户的 config.toml；API key 只写入用户环境变量，不会保存到 HUD 配置。编辑时已填充当前密钥，点击 👁 可查看明文。</div>
+            <div class="codex-usage-hud-settings-confirm-body">${isDefaultProvider
+              ? "保存设置后会更新主 config.toml 的默认 Provider 段；API key 写入 Codex auth.json，不会创建 custom.config.toml。编辑时已填充当前密钥，点击 👁 可查看明文。修改 Base URL / API key 后，需要重启 Codex Desktop 才能生效，保存后会提示你选择立即重启或稍后重启。"
+              : "保存设置后会更新用户的 config.toml；API key 只写入用户环境变量，不会保存到 HUD 配置。编辑时已填充当前密钥，点击 👁 可查看明文。"}</div>
             <div class="codex-usage-hud-provider-config-status" data-provider-config-status="true" role="alert" aria-live="polite"></div>
             <div class="codex-usage-hud-settings-confirm-actions">
               <button type="button" class="codex-usage-hud-settings-action" data-action="settings-provider-cancel" data-variant="ghost">取消</button>
@@ -2903,11 +2932,25 @@ _TEXT_PREFIX = r"""
         const apiKeyNode = layer.querySelector('[data-provider-config-field="api_key"]');
         const sectionNode = layer.querySelector('[data-provider-config-field="section_text"]');
         const provider = String(idNode?.value || "").trim().toLowerCase();
+        const isAppProvider = !isNew
+          && provider === String(settingsProviderDraft.appProvider || "").trim().toLowerCase();
+        const settings = hudSettingsFromPayload();
+        const providerRegistryEntry = settings.provider_registry?.[provider] || {};
+        // 与后端 is_default_app_provider 判定一致：仅 custom / requires_openai_auth 默认供应商走 auth.json 链路。
+        const isDefaultProvider = isAppProvider && (
+          provider === "custom" || providerRegistryEntry.requiresOpenaiAuth === true
+        );
+        if (isAppProvider && providerRegistryEntry.officialAccount === true) {
+          setProviderConfigDialogError("官方账号登录时，默认 Codex App Provider 由 Codex Desktop 管理，不支持编辑。");
+          return false;
+        }
         const sectionText = String(sectionNode?.value || "");
         const baseUrl = sectionNode
           ? providerSectionBasicString(sectionText, "base_url").trim().replace(/\/+$/, "")
           : String(baseUrlNode?.value || "").trim().replace(/\/+$/, "");
-        const envKey = sectionNode
+        const envKey = isDefaultProvider
+          ? ""
+          : sectionNode
           ? providerSectionBasicString(sectionText, "env_key").trim()
           : String(envNode?.value || "").trim();
         const apiKey = String(apiKeyNode?.value || "");
@@ -2924,7 +2967,7 @@ _TEXT_PREFIX = r"""
           setProviderConfigDialogError("请输入有效的用户环境变量名称。");
           return false;
         }
-        if (!envKey && (isNew || existingCodex?.originalEnvKey)) {
+        if (!envKey && (isNew || (!isDefaultProvider && existingCodex?.originalEnvKey))) {
           setProviderConfigDialogError("请输入有效的用户环境变量名称。");
           return false;
         }
@@ -2933,11 +2976,26 @@ _TEXT_PREFIX = r"""
           setProviderConfigDialogError(`Provider ${provider} 已存在。`);
           return false;
         }
-        if (!apiKey && isNew && !existingCodex?.hasApiKey) {
-          setProviderConfigDialogError("新增供应商时请输入 API key。");
+        if (
+          !apiKey
+          && (isNew || (isDefaultProvider && !existingCodex?.hasApiKey))
+          && !existingCodex?.hasApiKey
+        ) {
+          setProviderConfigDialogError(
+            isNew
+              ? "新增供应商时请输入 API key。"
+              : "默认 Codex App Provider 尚未配置 API key，请填写后再保存。",
+          );
           return false;
         }
-        const settings = hudSettingsFromPayload();
+        // 默认供应商编辑时，先弹出重启确认框，由用户选择取消 / 稍后重启 / 立即重启。
+        // 弹窗按钮会设置 providerRestartDecision 并再次调用本函数完成提交。
+        if (isDefaultProvider && providerRestartDecision === null) {
+          openProviderRestartConfirmDialog(provider);
+          return;
+        }
+        const restartDecision = providerRestartDecision;
+        providerRestartDecision = null;
         if (isNew) {
           const sourceProvider = String(sourceNode?.value || "").trim().toLowerCase();
           const sourceEntry = settingsProviderDraft.providers[sourceProvider];
@@ -2993,6 +3051,9 @@ _TEXT_PREFIX = r"""
         }
         // 编辑供应商只保存 provider 配置（Base URL / 环境变量 / API key / config.toml 段），
         // 不提交 model 单价，避免触发价格变更校验或「保存新价格」确认流程。
+        if (isDefaultProvider && restartDecision) {
+          pendingProviderRestartAfterSave = restartDecision;
+        }
         const submitted = submitSettingsCommand(
           { action: "save", codexProviders: collectCodexProviderUpdates() },
           `正在保存供应商 ${provider} 配置...`,
@@ -3327,6 +3388,15 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
       // 不得覆盖当前错误文本，只有真实的新结果或用户操作才会清除，从而
       // 让错误信息显示久一点，不被后来的信息刷掉。
       let settingsStatusErrorSticky = false;
+      let settingsRestartPending = false;
+      let settingsRestartCodex = false;
+      // 默认供应商编辑时，用户在重启确认弹窗中做出的决策：
+      // null = 尚未决策（点击「应用」时弹出确认框）；
+      // "later" = 稍后重启（保存但不重启）；
+      // "now" = 立即重启（保存后自动重启 Codex Desktop）。
+      let providerRestartDecision = null;
+      // 保存提交后待执行的重启动作，由 applySettingsCommandStatus 在保存成功后消费。
+      let pendingProviderRestartAfterSave = null;
 
       function setSettingsStatus(text, kind = "") {
         const node = document.querySelector(`#${settingsModalId} [data-settings-status="true"]`);
@@ -3342,9 +3412,18 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
         node.dataset.kind = kind;
       }
 
-      function setSettingsRestartVisible(visible) {
+      function setSettingsRestartVisible(visible, { codex = false } = {}) {
         const node = document.querySelector(`#${settingsModalId} [data-action="settings-restart"]`);
-        if (node) node.hidden = !visible;
+        if (!node) return;
+        node.hidden = !visible;
+        node.dataset.restartTarget = codex ? "codex" : "hud";
+        node.textContent = codex ? "立即重启 Codex Desktop" : "立即重启 HUD";
+      }
+
+      function clearSettingsRestartPrompt() {
+        settingsRestartPending = false;
+        settingsRestartCodex = false;
+        setSettingsRestartVisible(false);
       }
 
       function setSettingsActionState(actionName, { label = "", disabled = false } = {}) {
@@ -3499,9 +3578,51 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
         });
       }
 
-      function showSettingsRestartPrompt(message, kind = "error") {
-        setSettingsStatus(`${message} 是否立即重启 HUD？`, kind);
-        setSettingsRestartVisible(true);
+      function showSettingsRestartPrompt(message, kind = "error", { codex = false } = {}) {
+        settingsRestartPending = true;
+        settingsRestartCodex = codex;
+        setSettingsStatus(
+          `${message} 是否立即重启${codex ? " Codex Desktop" : " HUD"}？关闭窗口可稍后重启。`,
+          kind,
+        );
+        setSettingsRestartVisible(true, { codex });
+      }
+
+      // 默认供应商编辑时，点击「应用」后弹出的重启确认框。
+      // 三个选项：取消（不保存）、稍后重启（保存不重启）、立即重启（保存并重启）。
+      function openProviderRestartConfirmDialog(provider = "") {
+        const dialog = settingsDialogRoot();
+        if (!dialog) return;
+        const layer = document.createElement("div");
+        layer.className = "codex-usage-hud-settings-confirm-layer";
+        layer.dataset.settingsConfirm = "true";
+        layer.dataset.providerRestartDialog = "true";
+        layer.innerHTML = `
+          <div class="codex-usage-hud-settings-confirm-card" role="alertdialog" aria-modal="true" aria-label="重启 Codex Desktop 确认">
+            <div class="codex-usage-hud-settings-confirm-kicker">Codex Desktop</div>
+            <div class="codex-usage-hud-settings-confirm-title">重启 Codex Desktop 以生效？</div>
+            <div class="codex-usage-hud-settings-confirm-body">修改默认 Codex App Provider${provider ? `（${escapeHtml(provider)}）` : ""}的 Base URL / API key 后，需要重启 Codex Desktop 才能加载新配置。\n\n选择操作方式：</div>
+            <div class="codex-usage-hud-settings-confirm-actions">
+              <button type="button" class="codex-usage-hud-settings-action" data-action="settings-provider-restart-cancel" data-variant="ghost">取消</button>
+              <button type="button" class="codex-usage-hud-settings-action" data-action="settings-provider-restart-later">稍后重启</button>
+              <button type="button" class="codex-usage-hud-settings-action" data-action="settings-provider-restart-now" data-primary="true">立即重启</button>
+            </div>
+          </div>
+        `;
+        dialog.appendChild(layer);
+        layer.querySelector('[data-action="settings-provider-restart-now"]')?.focus?.();
+      }
+
+      function closeProviderRestartConfirmDialog() {
+        const layer = document.querySelector(`#${settingsModalId} [data-provider-restart-dialog="true"]`);
+        if (layer) layer.remove();
+      }
+
+      // 弹窗按钮回调：设置重启决策后重新执行 applyProviderConfigDialog 完成保存。
+      function applyProviderConfigWithRestartDecision(decision) {
+        providerRestartDecision = decision;
+        closeProviderRestartConfirmDialog();
+        applyProviderConfigDialog();
       }
 
       function setSettingsLoadingText({ kicker = "", title = "", body = "" } = {}) {
@@ -4558,9 +4679,35 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
             }
           }
           if (!providerDeleteTerminalHandled) {
-            setSettingsStatus(status.message || "", status.kind || "");
+            if (status.restartVisible) {
+              // 默认供应商保存后，若用户已在弹窗中做出重启决策，则按决策执行，
+              // 不再走旧的「状态栏 + 底部立即重启按钮」流程。
+              if (pendingProviderRestartAfterSave === "now") {
+                pendingProviderRestartAfterSave = null;
+                setSettingsStatus(status.message || "", status.kind || "");
+                restartCodexFromModal();
+              } else if (pendingProviderRestartAfterSave === "later") {
+                pendingProviderRestartAfterSave = null;
+                setSettingsStatus("默认 Codex App Provider 配置已保存，稍后重启 Codex Desktop 即可生效。", "");
+              } else {
+                showSettingsRestartPrompt(status.message || "配置已保存。", status.kind || "", {
+                  codex: status.restartCodex === true,
+                });
+              }
+            } else {
+              // 保存未返回 restartVisible（或出错）时清除待执行的重启决策，
+              // 避免残留状态影响后续操作。
+              pendingProviderRestartAfterSave = null;
+              setSettingsStatus(status.message || "", status.kind || "");
+            }
           }
-          setSettingsRestartVisible(!!status.restartVisible);
+          // 重启提示是粘性的：一旦因默认供应商等配置显示，就只能由用户
+          // 「立即重启」/关闭窗口「稍后重启」来关闭，不能被后续轮次的普通
+          // 状态消息（如其它后台命令的 message）或空状态自动清掉。这里仅在
+          // 尚未有待处理的重启提示时才按本轮状态同步可见性（幂等无操作）。
+          if (!status.restartVisible && !settingsRestartPending) {
+            clearSettingsRestartPrompt();
+          }
           applyPricingCommandStatus(status);
           applyProviderConnectivityStatus(status);
           applyProviderChatTestStatus(status);
@@ -4581,10 +4728,14 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
         // 后台的 settings_command_status 每轮渲染后会清空，若这里无条件写空串，
         // 会把当轮刚展示的错误信息在下一轮刷新时立刻刷掉（一闪而过）。
         const fallbackText = String(state?.message || state?.title || "").trim();
-        if (fallbackText && !settingsStatusErrorSticky) {
+        if (!settingsRestartPending && fallbackText && !settingsStatusErrorSticky) {
           setSettingsStatus(state.message || state.title || "", state.error ? "error" : "");
         }
-        setSettingsRestartVisible(false);
+        if (settingsRestartPending) {
+          setSettingsRestartVisible(true, { codex: settingsRestartCodex });
+        } else {
+          clearSettingsRestartPrompt();
+        }
       }
 
       function submitSettingsCommand(command, pendingMessage, { preserveOverlay = false } = {}) {
@@ -4629,7 +4780,7 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
         if (!providerDeleteHandledSynchronously) {
           setSettingsStatus(pendingMessage || "设置命令已提交，等待 HUD daemon 写入本地配置...");
         }
-        setSettingsRestartVisible(false);
+        clearSettingsRestartPrompt();
         if (!preserveOverlay) closeSettingsConfirm();
         return true;
       }
@@ -5500,6 +5651,13 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
         );
       }
 
+      function restartCodexFromModal() {
+        submitSettingsCommand(
+          { action: "restartCodex", reason: "provider-config" },
+          "重启请求已提交，等待 HUD daemon 重启 Codex Desktop..."
+        );
+      }
+
       function installDesktopOverlayFromModal() {
         submitSettingsCommand(
           { action: "installDesktopOverlay" },
@@ -5707,6 +5865,7 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
         closeCodexCliDialog();
         closeSessionTransferDialog();
         closeSettingsConfirm();
+        clearSettingsRestartPrompt();
         if (settingsActiveTab === "backgroundUsage") {
           captureBackgroundUsageScrollPositions();
           clearBackgroundUsageRequestTimeout("query");
@@ -6480,6 +6639,9 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
       applyProviderChatTestStatus,
       openProviderConfigDialog,
       applyProviderConfigDialog,
+      openProviderRestartConfirmDialog,
+      closeProviderRestartConfirmDialog,
+      applyProviderConfigWithRestartDecision,
       openProviderDeleteDialog,
       confirmProviderDeleteDialog,
       typedSettingsRequestId,
@@ -6533,6 +6695,7 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
       commitPricingImport,
       copyPricingExample,
       restartHudFromModal,
+      restartCodexFromModal,
       installDesktopOverlayFromModal,
       enableDesktopOverlayFromModal,
       exitHudFromModal,
@@ -6622,6 +6785,9 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
     applyProviderChatTestStatus,
     openProviderConfigDialog,
     applyProviderConfigDialog,
+    openProviderRestartConfirmDialog,
+    closeProviderRestartConfirmDialog,
+    applyProviderConfigWithRestartDecision,
     openProviderDeleteDialog,
     confirmProviderDeleteDialog,
     typedSettingsRequestId,
@@ -6674,6 +6840,7 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
     commitPricingImport,
     copyPricingExample,
     restartHudFromModal,
+    restartCodexFromModal,
     installDesktopOverlayFromModal,
     enableDesktopOverlayFromModal,
     exitHudFromModal,

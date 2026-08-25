@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -14,9 +15,101 @@ if str(SRC_ROOT) not in sys.path:
 
 from codex_usage_hud.config import UserConfig
 from codex_usage_hud.provider_registry import discover_provider_registry
+from codex_usage_hud.usage_insights import _provider_registry_payload
 
 
 class ProviderRegistryTests(unittest.TestCase):
+    def test_default_app_provider_reads_api_key_from_paired_auth_store(self) -> None:
+        config_text = (
+            'model_provider = "custom"\n\n'
+            "[model_providers]\n"
+            "[model_providers.custom]\n"
+            'name = "OpenAI"\n'
+            'base_url = "https://api.example/v1"\n'
+            'wire_api = "responses"\n'
+            "requires_openai_auth = true\n"
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "config.toml"
+            config_path.write_text(config_text, encoding="utf-8")
+            (root / "auth.json").write_text(
+                '{"OPENAI_API_KEY": "app-secret"}\n', encoding="utf-8"
+            )
+            registry = discover_provider_registry(
+                user_config=UserConfig.defaults(),
+                config_path=config_path,
+                include_history=False,
+            )
+            payload = _provider_registry_payload(
+                SimpleNamespace(provider_registry=registry)
+            )
+
+        self.assertEqual(registry.config_path, str(config_path))
+        self.assertEqual(registry.entries["custom"].env_key, "")
+        self.assertTrue(registry.entries["custom"].has_api_key)
+        self.assertFalse(registry.entries["custom"].official_account)
+        self.assertTrue(registry.entries["custom"].requires_openai_auth)
+        self.assertEqual(payload["custom"]["apiKey"], "app-secret")
+        self.assertTrue(payload["custom"]["requiresOpenaiAuth"])
+
+    def test_registry_marks_official_account_provider_as_locked(self) -> None:
+        config_text = (
+            'model_provider = "custom"\n'
+            "[model_providers.custom]\n"
+            'base_url = "https://api.example/v1"\n'
+            "requires_openai_auth = true\n"
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "config.toml"
+            config_path.write_text(config_text, encoding="utf-8")
+            (root / "auth.json").write_text(
+                '{"tokens": {"refresh_token": "redacted"}}\n',
+                encoding="utf-8",
+            )
+            registry = discover_provider_registry(
+                user_config=UserConfig.defaults(),
+                config_path=config_path,
+                include_history=False,
+            )
+            payload = _provider_registry_payload(
+                SimpleNamespace(provider_registry=registry)
+            )
+
+        self.assertTrue(registry.entries["custom"].official_account)
+        self.assertTrue(payload["custom"]["officialAccount"])
+        self.assertTrue(payload["custom"]["requiresOpenaiAuth"])
+
+    def test_registry_exposes_requires_openai_auth_per_definition(self) -> None:
+        config_text = (
+            'model_provider = "custom"\n'
+            "[model_providers.custom]\n"
+            'base_url = "https://api.example/v1"\n'
+            "requires_openai_auth = true\n"
+            "\n"
+            "[model_providers.muyuan]\n"
+            'base_url = "https://old.example/v1"\n'
+            'env_key = "MUYUAN_API_KEY"\n'
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "config.toml"
+            config_path.write_text(config_text, encoding="utf-8")
+            registry = discover_provider_registry(
+                user_config=UserConfig.defaults(),
+                config_path=config_path,
+                include_history=False,
+            )
+            payload = _provider_registry_payload(
+                SimpleNamespace(provider_registry=registry)
+            )
+
+        self.assertTrue(registry.entries["custom"].requires_openai_auth)
+        self.assertFalse(registry.entries["muyuan"].requires_openai_auth)
+        self.assertTrue(payload["custom"]["requiresOpenaiAuth"])
+        self.assertFalse(payload["muyuan"]["requiresOpenaiAuth"])
+
     def test_registry_uses_base_provider_profiles_saved_settings_and_recent_history(self) -> None:
         now = datetime(2026, 7, 16, tzinfo=timezone.utc)
         config_text = """

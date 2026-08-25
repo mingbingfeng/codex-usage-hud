@@ -795,7 +795,21 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("defaultProviderSectionText", script)
         self.assertIn('String(settingsProviderDraft.appProvider || "").trim().toLowerCase()', script)
         self.assertIn("section_text: String(draft.configText || \"\")", script)
-        self.assertIn('required ? "" : \'<button type="button"', script)
+        self.assertIn("const isAppProvider = !isNew", script)
+        self.assertIn("const isDefaultProvider = isAppProvider &&", script)
+        self.assertIn("registryEntry.requiresOpenaiAuth === true", script)
+        self.assertIn("providerRegistryEntry.requiresOpenaiAuth === true", script)
+        self.assertIn("defaultProviderEditable", script)
+        self.assertIn("auth.json", script)
+        self.assertIn("OPENAI_API_KEY", script)
+        self.assertIn("Codex App 使用 auth.json 中的 OPENAI_API_KEY", script)
+        self.assertIn("officialAccount", script)
+        self.assertIn("官方账号登录，默认 Provider 不可编辑", script)
+        self.assertIn("官方账号登录时，默认 Codex App Provider 由 Codex Desktop 管理，不支持编辑。", script)
+        self.assertIn("providerRegistryEntry.officialAccount === true", script)
+        self.assertIn("function showSettingsRestartPrompt", script)
+        self.assertIn("关闭窗口可稍后重启。", script)
+        self.assertIn("showSettingsRestartPrompt(status.message", script)
         self.assertIn("suggestedProviderEnvironmentKey", script)
         self.assertIn("function suggestedProviderIdFromBaseUrl", script)
         self.assertIn("new URL(candidate).hostname", script)
@@ -4301,6 +4315,81 @@ class RendererHudClientTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertIn("ws://page-1", calls[0])
         self.assertIn("__codexUsageHudRemove", calls[0])
+
+    def test_renderer_restart_prompt_survives_subsequent_status_payloads(self) -> None:
+        """重启提示必须粘性保留，不能被后续轮次的普通/空命令状态清掉。
+
+        对应 Review 结论：settings_command_status 每轮渲染后被清空（单次消费），
+        若 JS 端无条件按当前 status.restartVisible 清除弹窗，「稍后重启」提示会
+        被后续 payload 隐藏。断言脚本里存在粘性保护：
+        1. showSettingsRestartPrompt 会置位 settingsRestartPending；
+        2. 无 restartVisible 的状态只有在没有 pending 弹窗时才调用
+           clearSettingsRestartPrompt；
+        3. 空状态兜底分支会依据 settingsRestartPending 恢复重启按钮。
+        """
+        script = renderer_hud.RENDERER_HUD_SCRIPT
+
+        self.assertIn("let settingsRestartPending = false;", script)
+        self.assertIn(
+            "settingsRestartPending = true;",
+            script,
+        )
+        self.assertIn(
+            "if (!status.restartVisible && !settingsRestartPending) {",
+            script,
+        )
+        self.assertIn(
+            "clearSettingsRestartPrompt();",
+            script,
+        )
+        self.assertIn(
+            "if (settingsRestartPending) {",
+            script,
+        )
+        self.assertIn(
+            "setSettingsRestartVisible(true, { codex: settingsRestartCodex });",
+            script,
+        )
+
+    def test_renderer_command_status_is_consumed_once_in_payload(self) -> None:
+        """后端命令状态是单次消费：第一轮 payload 携带 restartVisible，
+        清空后第二轮 payload 不再携带（JS 端依赖粘性状态保留弹窗）。"""
+        snapshot = ParsedSession(
+            session_id="session-restart-lifecycle",
+            session_title="Restart Lifecycle",
+            status="parsed",
+            selection_source="renderer",
+            refreshed_at=datetime(2026, 7, 6, 10, 0, 0).astimezone(),
+            last_event_time=datetime(2026, 7, 6, 9, 59, 58).astimezone(),
+            confirmed=ConfirmedTokens(cumulative_total=42, cumulative_cost_usd=0.01),
+            request=RequestTokens(status="idle", model="gpt-5", total_tokens=0),
+        )
+        snapshot.today_tokens = 100
+        snapshot.week_tokens = 200
+        snapshot.today_cost_usd = 0.02
+        snapshot.week_cost_usd = 0.04
+
+        def build_payload(command_status):
+            payload = payload_from_snapshot(
+                snapshot,
+                settings_bridge_url="http://127.0.0.1:8765",
+                settings_command_status=command_status,
+            ).to_json()
+            return payload["settingsCommandStatus"]
+
+        first = build_payload(
+            {
+                "restartVisible": True,
+                "restartCodex": True,
+                "message": "默认 Codex App Provider 配置已保存，需要重启 Codex Desktop 才能生效。",
+            }
+        )
+        self.assertEqual(first["restartVisible"], True)
+        self.assertEqual(first["restartCodex"], True)
+
+        # _record_success 清空 settings_command_status 后的下一轮 payload。
+        second = build_payload({})
+        self.assertEqual(second, {})
 
 
 if __name__ == "__main__":

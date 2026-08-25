@@ -10,7 +10,10 @@ from pathlib import Path
 from threading import Event, Lock, Thread
 
 from .active_work import _effective_provider_scope
-from .codex_provider_config import _user_environment_value
+from .codex_provider_config import (
+    _user_environment_value,
+    read_codex_auth_api_key,
+)
 from .config import UserConfig
 from .core import ParsedSession, UsageSummary
 from .runtime_policies import budget_windows as current_budget_windows
@@ -930,6 +933,7 @@ def _provider_registry_payload(context: object) -> dict[str, object]:
     if not isinstance(entries, Mapping):
         return {}
     app_provider = str(getattr(registry, "app_provider", "") or "").strip().lower()
+    config_path = str(getattr(registry, "config_path", "") or "").strip() or None
     return {
         provider: {
             "profiles": list(getattr(entry, "profile_names", ())),
@@ -937,9 +941,15 @@ def _provider_registry_payload(context: object) -> dict[str, object]:
             "defined": bool(getattr(entry, "from_provider_definition", False)),
             "baseUrl": str(getattr(entry, "base_url", "") or ""),
             "envKey": str(getattr(entry, "env_key", "") or ""),
+            "officialAccount": bool(getattr(entry, "official_account", False)),
+            "requiresOpenaiAuth": bool(getattr(entry, "requires_openai_auth", False)),
             "wireApi": str(getattr(entry, "wire_api", "responses") or "responses"),
             "hasApiKey": bool(getattr(entry, "has_api_key", False)),
-            "apiKey": _user_environment_value(str(getattr(entry, "env_key", "") or "")),
+            "apiKey": (
+                read_codex_auth_api_key(config_path)
+                if str(provider or "").strip().lower() == app_provider
+                else _user_environment_value(str(getattr(entry, "env_key", "") or ""))
+            ),
             "configText": (
                 ""
                 if str(provider or "").strip().lower() == app_provider

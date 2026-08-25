@@ -1221,6 +1221,16 @@ def handle_general_command(
                     for item in codex_provider_result.get("providerIds", [])
                     if str(item or "")
                 ]
+                # 修改了默认 Codex App Provider 时，Codex Desktop 在启动时才加载
+                # config.toml 与用户环境变量，必须重启 Codex Desktop 才能生效，
+                # 因此返回带 restartVisible + restartCodex 的状态，前端据此弹出
+                # 「立即重启 Codex Desktop / 稍后重启」提示。
+                if codex_provider_result.get("defaultProviderEdited"):
+                    return runtime_settings.settings_status(
+                        "默认 Codex App Provider 配置已保存，需要重启 Codex Desktop 才能生效。",
+                        restart_visible=True,
+                        restart_codex=True,
+                    )
                 suffix = f"；Codex provider 已更新：{', '.join(provider_ids)}" if provider_ids else ""
                 return _status(f"设置已保存，相关显示会自动刷新{suffix}。")
             return _status("设置已保存，相关显示会自动刷新。")
