@@ -206,6 +206,7 @@ def test_discover_codex_cli_options_does_not_choose_a_default_workdir(
     )
 
     assert result["defaultWorkdir"] == ""
+    assert result["noProjectWorkdir"] == str(Path.home())
     assert [item["path"] for item in result["workdirs"]] == [str(current)]
 
 

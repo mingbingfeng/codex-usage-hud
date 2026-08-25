@@ -1544,7 +1544,8 @@ def _handle_renderer_settings_command(
             or command.get("session_transfer_resume_id")
             or ""
         ).strip()
-        workdir = str(command.get("workdir") or "").strip()
+        no_project = bool(command.get("noProject")) and not transfer_session_id
+        workdir = str(Path.home()) if no_project else str(command.get("workdir") or "").strip()
         launch_command = str(command.get("command") or "")
         terminal_id = str(command.get("terminalId") or "").strip()
         codex_home: Path | None = None

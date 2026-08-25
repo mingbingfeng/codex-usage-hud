@@ -87,6 +87,31 @@ def test_renderer_resume_transfer_target_builds_verified_resume_launch(
     assert status["codexCliLaunch"]["sessionTransferResumeId"] == TARGET_ID
 
 
+def test_renderer_no_project_launch_uses_neutral_home_workdir() -> None:
+    context = SimpleNamespace(app_provider="custom")
+
+    with patch(
+        "codex_usage_hud.runtime_commands.launch_codex_cli",
+        return_value={"pid": 43, "terminal": "PowerShell"},
+    ) as launch:
+        status = _handle_renderer_settings_command(
+            {
+                "action": "codexCliLaunch",
+                "requestId": "no-project-1",
+                "provider": "custom",
+                "terminalId": "powershell7",
+                "command": "codex --help",
+                "noProject": True,
+            },
+            context,
+            MagicMock(),
+            MagicMock(),
+        )
+
+    assert status["kind"] == ""
+    assert launch.call_args.kwargs["workdir"] == str(Path.home())
+
+
 @pytest.mark.parametrize(
     ("handler", "command", "ports", "field"),
     [

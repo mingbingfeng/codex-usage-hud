@@ -323,6 +323,11 @@ def test_codex_cli_dialog_is_compact_and_persists_profile_scoped_launches() -> N
     assert form.index('data-codex-cli-field="resume"') < form.index("启动终端")
     assert "codex-usage-hud-codex-cli-check codex-usage-hud-codex-cli-wide" not in form
     assert "codexCliPersistLaunchState(pendingLaunchState);" in SETTINGS_SHELL
+    assert "noProject: codexCliState.noProject === true" in SETTINGS_SHELL
+    assert "noProjectWorkdir" in SETTINGS_SHELL
+    assert "noProjectWorkdirOption" in SETTINGS_SHELL
+    assert 'value="__no_project__"' in SETTINGS_SHELL
+    assert "if (workdir && codexCliState.noProject !== true)" in SETTINGS_SHELL
     assert "codexCliState.pendingLaunchState = codexCliLaunchState(command);" in launch
     assert SETTINGS_SHELL.index("codexCliPersistLaunchState(pendingLaunchState);") > SETTINGS_SHELL.index(
         'if (action === "codexCliLaunch"'
@@ -396,6 +401,24 @@ def test_codex_cli_quick_launch_menu_is_idempotent_and_provider_scoped() -> None
     assert 'action: "codexCliLaunchCancel"' in SETTINGS_SHELL
     assert "codex-usage-hud-codex-cli-menu-style" in SETTINGS_SHELL
     assert "MutationObserver" in SETTINGS_SHELL
+    assert "function codexCliRecentWorkdirs(provider" in SETTINGS_SHELL
+    assert "function codexCliDefaultWorkdir(provider)" in SETTINGS_SHELL
+    assert "function codexCliWorkdirScopeKey(provider, profile)" in SETTINGS_SHELL
+    assert "function codexCliActiveProfile(provider)" in SETTINGS_SHELL
+    assert "codexCliPersistActiveProfile(savedState.provider, savedState.profile);" in SETTINGS_SHELL
+    assert "stored[scopeKey] = { workdirs, savedAt: now };" in SETTINGS_SHELL
+    assert ".slice(0, expanded ? 10 : 3)" in SETTINGS_SHELL
+    assert 'data-codex-usage-hud-cli-workdir-more="true"' in SETTINGS_SHELL
+    assert 'data-codex-usage-hud-cli-workdir="true"' in SETTINGS_SHELL
+    assert 'data-no-project="true"' in SETTINGS_SHELL
+    assert 'data-codex-usage-hud-cli-provider-workdirs="true"' in SETTINGS_SHELL
+    assert 'data-codex-usage-hud-cli-workdir-default="true"' in SETTINGS_SHELL
+    assert 'data-default="true"' in SETTINGS_SHELL
+    assert "codexCliPersistRecentWorkdir(pendingLaunchState);" in SETTINGS_SHELL
+    assert "function toggleCodexCliQuickLaunchWorkdirMenu(provider, toggle)" in SETTINGS_SHELL
+    assert "closeCodexCliQuickLaunchWorkdirMenu();" in SETTINGS_SHELL
+    assert "codexCliQuickLaunchMenuState.workdirExpanded" in SETTINGS_SHELL
+    assert "清除 Codex 项目上下文" in SETTINGS_SHELL
 
 
 def test_codex_cli_menu_shows_active_session_provider_label() -> None:

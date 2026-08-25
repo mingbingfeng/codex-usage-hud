@@ -685,6 +685,7 @@ def discover_codex_cli_options(
         "defaultPermission": "full",
         "workdirs": workdirs,
         "defaultWorkdir": "",
+        "noProjectWorkdir": str(Path.home()),
     }
 
 

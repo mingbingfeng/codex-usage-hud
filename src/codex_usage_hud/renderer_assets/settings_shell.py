@@ -39,6 +39,7 @@ _TEXT_PREFIX = r"""
         resume: false,
         workdir: "",
         workdirCustom: false,
+        noProject: false,
         migratedWorkdirs: false,
         model: "",
         commandEdited: false,
@@ -55,6 +56,7 @@ _TEXT_PREFIX = r"""
         launchMinVisibleTimerId: 0,
         launchStartedAt: 0,
         pendingLaunchState: null,
+        requestedWorkdir: null,
       };
       const codexCliLaunchMinVisibleMs = 240;
       const codexCliLaunchTimeoutMs = 15000;
@@ -63,6 +65,10 @@ _TEXT_PREFIX = r"""
         toggle: null,
         surface: null,
         providers: [],
+        workdirProvider: "",
+        workdirToggle: null,
+        workdirSurface: null,
+        workdirExpanded: false,
       };
 
       function codexCliLaunchStateKey(optionsValue = codexCliState.options || {}, providerValue = codexCliState.provider) {
@@ -100,6 +106,7 @@ _TEXT_PREFIX = r"""
           resume: codexCliState.resume === true,
           workdir: codexCliState.workdir,
           workdirCustom: codexCliState.workdirCustom === true,
+          noProject: codexCliState.noProject === true,
           migratedWorkdirs: codexCliState.migratedWorkdirs === true,
           model: String(codexCliState.model || "").trim(),
           command: String(command || ""),
@@ -114,6 +121,148 @@ _TEXT_PREFIX = r"""
           const states = codexCliStoredLaunchStates();
           states[codexCliLaunchStateKey(savedState, savedState.provider)] = { ...savedState, savedAt: Date.now() };
           ctx.storage.write(localStorage, codexCliLaunchStorageKey, JSON.stringify(states));
+          codexCliPersistActiveProfile(savedState.provider, savedState.profile);
+          return true;
+        } catch (_) {
+          return false;
+        }
+      }
+
+      function codexCliWorkdirRecentsStorageKey() {
+        return `${codexCliLaunchStorageKey}:workdirs`;
+      }
+
+      function codexCliStoredWorkdirRecents() {
+        try {
+          const values = JSON.parse(ctx.storage.read(localStorage, codexCliWorkdirRecentsStorageKey(), "{}"));
+          return values && typeof values === "object" && !Array.isArray(values) ? values : {};
+        } catch (_) {
+          return {};
+        }
+      }
+
+      function codexCliWorkdirScopeKey(provider, profile) {
+        const normalizedProvider = String(provider || "").trim().toLowerCase();
+        const normalizedProfile = String(profile || "").trim();
+        return `profile:${normalizedProfile || "default"}|provider:${normalizedProvider || "default"}`;
+      }
+
+      function codexCliActiveProfileStorageKey() {
+        return `${codexCliLaunchStorageKey}:profiles`;
+      }
+
+      function codexCliActiveProfile(provider) {
+        const normalizedProvider = String(provider || "").trim().toLowerCase();
+        if (!normalizedProvider) return "";
+        try {
+          const values = JSON.parse(ctx.storage.read(localStorage, codexCliActiveProfileStorageKey(), "{}"));
+          const stored = values && typeof values === "object" && !Array.isArray(values)
+            ? String(values[normalizedProvider] || "").trim()
+            : "";
+          if (stored) return stored;
+        } catch (_) {
+          // Fall through to the latest structured launch state.
+        }
+        const saved = Object.values(codexCliStoredLaunchStates())
+          .filter((item) => String(item?.provider || "").trim().toLowerCase() === normalizedProvider)
+          .sort((left, right) => Number(right?.savedAt || 0) - Number(left?.savedAt || 0))[0];
+        return String(saved?.profile || "").trim();
+      }
+
+      function codexCliPersistActiveProfile(provider, profile) {
+        const normalizedProvider = String(provider || "").trim().toLowerCase();
+        if (!normalizedProvider) return false;
+        try {
+          const values = JSON.parse(ctx.storage.read(localStorage, codexCliActiveProfileStorageKey(), "{}"));
+          const stored = values && typeof values === "object" && !Array.isArray(values) ? values : {};
+          stored[normalizedProvider] = String(profile || "").trim();
+          ctx.storage.write(localStorage, codexCliActiveProfileStorageKey(), JSON.stringify(stored));
+          return true;
+        } catch (_) {
+          return false;
+        }
+      }
+
+      function codexCliWorkdirRecentLabel(path) {
+        const normalized = codexCliNormaliseWorkdirPath(path).replace(/[\\/]+$/, "");
+        const parts = normalized.split(/[\\/]/).filter(Boolean);
+        return parts[parts.length - 1] || normalized;
+      }
+
+      function codexCliRecentWorkdirs(provider, profile = codexCliActiveProfile(provider)) {
+        const normalizedProvider = String(provider || "").trim().toLowerCase();
+        if (!normalizedProvider) return [];
+        const stored = codexCliStoredWorkdirRecents();
+        const scopeKey = codexCliWorkdirScopeKey(normalizedProvider, profile);
+        const current = Array.isArray(stored[scopeKey]?.workdirs)
+          ? stored[scopeKey].workdirs
+          : [];
+        const legacy = Object.values(codexCliStoredLaunchStates())
+          .filter((item) => String(item?.provider || "").trim().toLowerCase() === normalizedProvider)
+          .filter((item) => String(item?.profile || "").trim() === String(profile || "").trim())
+          .filter((item) => item?.noProject !== true)
+          .map((item) => ({ path: item?.workdir, label: "", usedAt: item?.savedAt }));
+        const seen = new Set();
+        return [...current, ...legacy]
+          .map((item) => ({
+            path: codexCliNormaliseWorkdirPath(item?.path),
+            label: String(item?.label || "").trim(),
+            usedAt: Number(item?.usedAt || 0),
+          }))
+          .sort((left, right) => right.usedAt - left.usedAt)
+          .filter((item) => {
+            const identity = codexCliTransferWorkdirIdentity(item.path);
+            if (!item.path || !identity || seen.has(identity)) return false;
+            seen.add(identity);
+            return true;
+          })
+          .slice(0, 10)
+          .map((item) => ({ ...item, label: item.label || codexCliWorkdirRecentLabel(item.path) }));
+      }
+
+      function codexCliDefaultWorkdir(provider) {
+        const normalizedProvider = String(provider || "").trim().toLowerCase();
+        if (!normalizedProvider) return { path: "", noProject: false };
+        const profile = codexCliActiveProfile(normalizedProvider);
+        const saved = Object.values(codexCliStoredLaunchStates())
+          .filter((item) => String(item?.provider || "").trim().toLowerCase() === normalizedProvider)
+          .filter((item) => String(item?.profile || "").trim() === String(profile || "").trim())
+          .filter((item) => item?.commandEdited !== true)
+          .sort((left, right) => Number(right?.savedAt || 0) - Number(left?.savedAt || 0))[0];
+        return {
+          path: saved?.noProject === true ? "" : codexCliNormaliseWorkdirPath(saved?.workdir),
+          noProject: saved?.noProject === true,
+        };
+      }
+
+      function codexCliPersistRecentWorkdir(savedState = codexCliState.pendingLaunchState) {
+        if (!savedState || typeof savedState !== "object" || savedState.noProject === true) return false;
+        const provider = String(savedState.provider || "").trim().toLowerCase();
+        const profile = String(savedState.profile || "").trim();
+        const path = codexCliNormaliseWorkdirPath(savedState.workdir);
+        const identity = codexCliTransferWorkdirIdentity(path);
+        if (!provider || !path || !identity) return false;
+        try {
+          const stored = codexCliStoredWorkdirRecents();
+          const scopeKey = codexCliWorkdirScopeKey(provider, profile);
+          const current = Array.isArray(stored[scopeKey]?.workdirs) ? stored[scopeKey].workdirs : [];
+          const now = Date.now();
+          const workdirs = [{ path, label: codexCliWorkdirRecentLabel(path), usedAt: now }, ...current]
+            .map((item) => ({
+              path: codexCliNormaliseWorkdirPath(item?.path),
+              label: String(item?.label || "").trim(),
+              usedAt: Number(item?.usedAt || 0),
+            }))
+            .filter((item, index, values) => {
+              const itemIdentity = codexCliTransferWorkdirIdentity(item.path);
+              return !!itemIdentity && values.findIndex((candidate) => (
+                codexCliTransferWorkdirIdentity(candidate.path) === itemIdentity
+              )) === index;
+            })
+            .slice(0, 10);
+          stored[scopeKey] = { workdirs, savedAt: now };
+          ctx.storage.write(localStorage, codexCliWorkdirRecentsStorageKey(), JSON.stringify(stored));
+          codexCliPersistActiveProfile(provider, profile);
           return true;
         } catch (_) {
           return false;
@@ -216,6 +365,26 @@ _TEXT_PREFIX = r"""
         }, []);
       }
 
+      function codexCliNoProjectWorkdir() {
+        return codexCliNormaliseWorkdirPath(codexCliState.options?.noProjectWorkdir);
+      }
+
+      function codexCliApplyRequestedWorkdir() {
+        const requested = codexCliState.requestedWorkdir;
+        if (!requested || typeof requested !== "object") return false;
+        const noProject = requested.noProject === true;
+        const workdir = noProject
+          ? codexCliNoProjectWorkdir()
+          : codexCliNormaliseWorkdirPath(requested.workdir);
+        if (!workdir) return false;
+        codexCliState.noProject = noProject;
+        codexCliState.workdir = workdir;
+        codexCliState.migratedWorkdirs = false;
+        codexCliState.workdirCustom = !noProject && !codexCliVisibleWorkdirs()
+          .some((item) => String(item?.path || "") === workdir);
+        return true;
+      }
+
       function codexCliWorkdirOptionsHtml() {
         return codexCliVisibleWorkdirs().map((item) => `
           <option value="${escapeHtml(item.path)}" ${!codexCliState.workdirCustom && item.path === codexCliState.workdir ? "selected" : ""}>
@@ -228,13 +397,20 @@ _TEXT_PREFIX = r"""
         const select = layer?.querySelector('[data-codex-cli-field="workdirSelect"]');
         if (!select) return;
         const paths = codexCliVisibleWorkdirs().map((item) => String(item?.path || ""));
-        if (!paths.includes(codexCliState.workdir)) {
+        const noProjectWorkdir = codexCliNoProjectWorkdir();
+        if (codexCliState.noProject && codexCliState.workdir !== noProjectWorkdir) {
+          codexCliState.noProject = false;
+        }
+        if (!codexCliState.noProject && !paths.includes(codexCliState.workdir)) {
           codexCliState.workdir = "";
           codexCliState.workdirCustom = false;
         }
         const custom = codexCliState.migratedWorkdirs ? "" : '<option value="__custom__">自定义路径…</option>';
-        select.innerHTML = `<option value="" disabled ${!codexCliState.workdir ? "selected" : ""}>请选择工作目录</option>${custom}${codexCliWorkdirOptionsHtml()}`;
-        select.value = codexCliState.workdir || "";
+        const noProject = noProjectWorkdir
+          ? `<option value="__no_project__">不在项目中工作</option>`
+          : "";
+        select.innerHTML = `<option value="" disabled ${!codexCliState.workdir ? "selected" : ""}>请选择工作目录</option>${noProject}${custom}${codexCliWorkdirOptionsHtml()}`;
+        select.value = codexCliState.noProject ? "__no_project__" : (codexCliState.workdir || "");
       }
 
       function codexCliValidatedQuickLaunchState(saved, options = codexCliState.options || {}) {
@@ -253,11 +429,17 @@ _TEXT_PREFIX = r"""
         const terminalId = String(saved.terminalId || "").trim();
         const permission = String(saved.permission || "").trim();
         const workdir = codexCliNormaliseWorkdirPath(saved.workdir);
+        const noProject = saved.noProject === true;
         const terminals = Array.isArray(options.terminals) ? options.terminals : [];
         const permissions = Array.isArray(options.permissions) ? options.permissions : [];
         if (!terminalId || !terminals.some((item) => String(item?.id || "") === terminalId)) return null;
         if (!permission || !permissions.some((item) => String(item?.id || "") === permission)) return null;
         if (!workdir) return null;
+        if (
+          noProject
+          && codexCliTransferWorkdirIdentity(workdir)
+            !== codexCliTransferWorkdirIdentity(options.noProjectWorkdir)
+        ) return null;
         const proxyPort = Number.parseInt(String(saved.proxyPort || ""), 10);
         if (saved.useProxy === true && (!Number.isInteger(proxyPort) || proxyPort < 1 || proxyPort > 65535)) return null;
         return {
@@ -268,6 +450,7 @@ _TEXT_PREFIX = r"""
           terminalId,
           permission,
           workdir,
+          noProject,
           proxyPort: String(Number.isInteger(proxyPort) ? proxyPort : 7897),
           commandEdited: false,
         };
@@ -307,12 +490,15 @@ _TEXT_PREFIX = r"""
         codexCliState.useProxy = saved.useProxy === true;
         codexCliState.resume = saved.resume === true;
         const workdir = String(saved.workdir || "").trim();
+        codexCliState.noProject = saved.noProject === true;
         codexCliState.migratedWorkdirs = saved.migratedWorkdirs === true;
         if (workdir) {
           codexCliState.workdir = workdir;
           const knownWorkdir = codexCliVisibleWorkdirs()
             .some((item) => String(item?.path || "") === workdir);
-          codexCliState.workdirCustom = saved.workdirCustom === true || !knownWorkdir;
+          codexCliState.workdirCustom = !codexCliState.noProject && (
+            saved.workdirCustom === true || !knownWorkdir
+          );
         }
         codexCliState.model = String(saved.model || "").trim();
         const command = String(saved.command || "");
@@ -492,7 +678,7 @@ _TEXT_PREFIX = r"""
           }
         }
         const workdir = String(codexCliState.workdir || "").trim();
-        if (workdir) {
+        if (workdir && codexCliState.noProject !== true) {
           const quoted = codexCliQuote(workdir, shell);
           lines.push(
             shell === "powershell"
@@ -537,9 +723,11 @@ _TEXT_PREFIX = r"""
           const known = !codexCliState.workdirCustom && Array.from(workdirSelect.options).some(
             (option) => option.value === codexCliState.workdir,
           );
-          workdirSelect.value = codexCliState.workdirCustom
-            ? "__custom__"
-            : (known ? codexCliState.workdir : "__custom__");
+          workdirSelect.value = codexCliState.noProject
+            ? "__no_project__"
+            : (codexCliState.workdirCustom
+              ? "__custom__"
+              : (known ? codexCliState.workdir : "__custom__"));
         }
         if (workdirInput) {
           workdirInput.value = codexCliState.workdir;
@@ -566,11 +754,14 @@ _TEXT_PREFIX = r"""
         codexCliState.resume = layer.querySelector('[data-codex-cli-field="resume"]')?.checked === true;
         codexCliState.migratedWorkdirs = layer.querySelector('[data-codex-cli-field="migratedWorkdirs"]')?.checked === true;
         const workdirSelect = value('[data-codex-cli-field="workdirSelect"]');
+        codexCliState.noProject = workdirSelect === "__no_project__";
         codexCliState.workdirCustom = workdirSelect === "__custom__";
         codexCliState.workdir = codexCliNormaliseWorkdirPath(
-          codexCliState.workdirCustom
-            ? value('[data-codex-cli-field="workdirInput"]')
-            : workdirSelect,
+          codexCliState.noProject
+            ? codexCliNoProjectWorkdir()
+            : (codexCliState.workdirCustom
+              ? value('[data-codex-cli-field="workdirInput"]')
+              : workdirSelect),
         );
       }
 
@@ -594,6 +785,7 @@ _TEXT_PREFIX = r"""
           codexCliState.workdir = codexCliNormaliseWorkdirPath(
             String(location[1] || "").replace(/''/g, "'"),
           );
+          codexCliState.noProject = false;
         }
         const workdirKnown = (Array.isArray(codexCliState.options?.workdirs) ? codexCliState.options.workdirs : [])
           .some((item) => String(item?.path || "") === codexCliState.workdir);
@@ -722,6 +914,9 @@ _TEXT_PREFIX = r"""
           </option>
         `).join("");
         const workdirOptions = codexCliWorkdirOptionsHtml();
+        const noProjectWorkdirOption = codexCliNoProjectWorkdir()
+          ? `<option value="__no_project__" ${codexCliState.noProject ? "selected" : ""}>不在项目中工作</option>`
+          : "";
         const chatTestState = codexCliChatTestState();
         const powershell7 = options.powershell7 || {};
         const powershellNotice = options.platform === "windows" && powershell7.available !== true
@@ -767,6 +962,7 @@ _TEXT_PREFIX = r"""
               <div class="codex-usage-hud-codex-cli-field-head"><span>工作目录</span><label class="codex-usage-hud-codex-cli-check codex-usage-hud-codex-cli-check-compact"><input type="checkbox" data-codex-cli-field="migratedWorkdirs" ${codexCliState.migratedWorkdirs ? "checked" : ""}><span>来自迁移</span></label></div>
               <select data-codex-cli-field="workdirSelect">
                 <option value="" disabled ${!codexCliState.workdir && codexCliState.workdirCustom !== true ? "selected" : ""}>请选择工作目录</option>
+                ${noProjectWorkdirOption}
                 ${codexCliState.migratedWorkdirs ? "" : '<option value="__custom__">自定义路径…</option>'}
                 ${workdirOptions}
               </select>
@@ -864,6 +1060,7 @@ _TEXT_PREFIX = r"""
       function openCodexCliDialog(provider = "") {
         const dialog = settingsDialogRoot();
         if (!dialog || codexCliState.launchRequestId) return false;
+        const requestedWorkdir = codexCliState.requestedWorkdir;
         closeCodexCliDialog();
         codexCliState.open = true;
         codexCliState.origin = "dialog";
@@ -884,6 +1081,9 @@ _TEXT_PREFIX = r"""
         codexCliState.launchRequestId = "";
         codexCliState.launchCancelRequestId = "";
         codexCliState.pendingLaunchState = null;
+        codexCliState.requestedWorkdir = requestedWorkdir && typeof requestedWorkdir === "object"
+          ? { ...requestedWorkdir }
+          : null;
         const layer = document.createElement("div");
         layer.className = "codex-usage-hud-codex-cli-layer";
         layer.dataset.codexCliDialog = "true";
@@ -893,7 +1093,7 @@ _TEXT_PREFIX = r"""
         return true;
       }
 
-      function openCodexCliQuickLaunch(provider = "") {
+      function openCodexCliQuickLaunch(provider = "", requestedWorkdir = null) {
         const normalizedProvider = String(provider || "").trim().toLowerCase();
         if (!normalizedProvider) return false;
         if (codexCliState.launchRequestId) {
@@ -925,6 +1125,9 @@ _TEXT_PREFIX = r"""
         codexCliState.launchRequestId = "";
         codexCliState.launchCancelRequestId = "";
         codexCliState.pendingLaunchState = null;
+        codexCliState.requestedWorkdir = requestedWorkdir && typeof requestedWorkdir === "object"
+          ? { ...requestedWorkdir }
+          : null;
         renderCodexCliQuickLaunch("discovering");
         if (!requestCodexCliDiscovery()) {
           renderCodexCliQuickLaunch("error", "无法连接 HUD 启动服务，请稍后重试或打开配置界面。");
@@ -961,6 +1164,8 @@ _TEXT_PREFIX = r"""
         codexCliState.launchCancelRequestId = "";
         codexCliState.launchStartedAt = 0;
         codexCliState.pendingLaunchState = null;
+        codexCliState.requestedWorkdir = null;
+        codexCliState.noProject = false;
         return true;
       }
 
@@ -994,7 +1199,7 @@ _TEXT_PREFIX = r"""
         return true;
       }
 
-      function openCodexCliQuickLaunchConfiguration() {
+      function openCodexCliQuickLaunchConfiguration(requestedWorkdir = codexCliState.requestedWorkdir) {
         if (!codexCliIsQuickLaunch() || codexCliState.launchRequestId) return false;
         const provider = String(codexCliState.provider || "").trim().toLowerCase();
         closeCodexCliDialog();
@@ -1003,6 +1208,9 @@ _TEXT_PREFIX = r"""
         if (!modal || modal.hidden || settingsActiveTab !== "settings") {
           renderSettingsModal("settings", "", { resetProviderDraft });
         }
+        codexCliState.requestedWorkdir = requestedWorkdir && typeof requestedWorkdir === "object"
+          ? { ...requestedWorkdir }
+          : null;
         openCodexCliDialog(provider);
         return true;
       }
@@ -1086,7 +1294,7 @@ _TEXT_PREFIX = r"""
           else if (status) status.textContent = "请先填写命令";
           return false;
         }
-        if (!String(codexCliState.workdir || "").trim()) {
+        if (!String(codexCliState.workdir || "").trim() && codexCliState.noProject !== true) {
           if (codexCliIsQuickLaunch()) renderCodexCliQuickLaunch("error", "上次配置没有工作目录，请重新选择后启动。");
           else if (status) status.textContent = "请先选择工作目录后再启动 Codex CLI";
           return false;
@@ -1126,6 +1334,7 @@ _TEXT_PREFIX = r"""
           command,
           workdir: codexCliState.workdir,
           workdirCustom: codexCliState.workdirCustom === true,
+          noProject: codexCliState.noProject === true,
           migratedWorkdirs: codexCliState.migratedWorkdirs === true,
         };
         codexCliState.launchTimeoutTimerId = ctx.lifecycle.timeout(
@@ -1312,6 +1521,10 @@ _TEXT_PREFIX = r"""
             return;
           }
           codexCliState.options = status.codexCli;
+          codexCliPersistActiveProfile(
+            status.codexCli.provider || codexCliState.provider,
+            status.codexCli.profile,
+          );
           const proxy = status.codexCli.proxy || {};
           codexCliState.terminalId = String(status.codexCli.defaultTerminal || "");
           codexCliState.useProxy = false;
@@ -1320,6 +1533,7 @@ _TEXT_PREFIX = r"""
           codexCliState.resume = false;
           codexCliState.workdir = "";
           codexCliState.workdirCustom = false;
+          codexCliState.noProject = false;
           codexCliState.migratedWorkdirs = false;
           codexCliState.commandText = "";
           codexCliState.commandEdited = false;
@@ -1334,6 +1548,10 @@ _TEXT_PREFIX = r"""
               return;
             }
             applyCodexCliPersistedLaunchState(validatedLaunchState);
+            if (codexCliState.requestedWorkdir && !codexCliApplyRequestedWorkdir()) {
+              openCodexCliQuickLaunchConfiguration();
+              return;
+            }
             renderCodexCliQuickLaunch("validating");
             codexCliState.quickLaunchFrameId = ctx.lifecycle.frame("codex_cli_quick_launch", () => {
               codexCliState.quickLaunchFrameId = 0;
@@ -1341,6 +1559,7 @@ _TEXT_PREFIX = r"""
             });
           } else {
             applyCodexCliPersistedLaunchState(persistedLaunchState);
+            codexCliApplyRequestedWorkdir();
             renderCodexCliDialog();
           }
           return;
@@ -1365,6 +1584,7 @@ _TEXT_PREFIX = r"""
               closeCodexCliDialog();
             } else if (String(status.kind || "") !== "error" && status.codexCliLaunch) {
               codexCliPersistLaunchState(pendingLaunchState);
+              codexCliPersistRecentWorkdir(pendingLaunchState);
               closeCodexCliDialog();
             } else if (quickLaunch && !quickDismissed && codexCliQuickLaunchConfigurationInvalid(status)) {
               openCodexCliQuickLaunchConfiguration();
@@ -5573,6 +5793,75 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
             pointer-events: auto;
             -webkit-app-region: no-drag;
           }
+          [data-codex-usage-hud-cli-provider-row="true"] {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto;
+            align-items: center;
+            gap: 2px;
+          }
+          [data-codex-usage-hud-cli-provider-row="true"] [data-codex-usage-hud-cli-provider="true"] {
+            min-width: 0;
+          }
+          [data-codex-usage-hud-cli-provider-workdirs="true"] {
+            min-width: 0;
+            min-height: 30px;
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            padding: 5px 8px;
+            border: 0;
+            border-radius: 5px;
+            background: transparent;
+            color: var(--text-tertiary, #a9b2bf);
+            font: 600 11px/1 system-ui, sans-serif;
+            cursor: pointer;
+            pointer-events: auto;
+            -webkit-app-region: no-drag;
+          }
+          [data-codex-usage-hud-cli-provider-workdirs="true"]:hover,
+          [data-codex-usage-hud-cli-provider-workdirs="true"]:focus-visible {
+            outline: none;
+            background: var(--surface-hover, rgba(255, 255, 255, .1));
+            color: inherit;
+          }
+          [data-codex-usage-hud-cli-workdir-surface="true"] {
+            min-width: 250px;
+            max-width: min(360px, calc(100vw - 12px));
+          }
+          [data-codex-usage-hud-cli-workdir="true"] {
+            align-items: center;
+          }
+          [data-codex-usage-hud-cli-workdir="true"] > span:first-child {
+            min-width: 0;
+            display: grid;
+            gap: 2px;
+            flex: 1 1 auto;
+          }
+          [data-codex-usage-hud-cli-workdir="true"] strong,
+          [data-codex-usage-hud-cli-workdir="true"] small {
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+          }
+          [data-codex-usage-hud-cli-workdir="true"] strong {
+            font: 600 12px/1.25 system-ui, sans-serif;
+          }
+          [data-codex-usage-hud-cli-workdir="true"] small {
+            color: var(--text-tertiary, #a9b2bf);
+            font: 400 10px/1.25 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+          }
+          [data-codex-usage-hud-cli-workdir="true"][data-default="true"] {
+            background: color-mix(in srgb, var(--accent, #7aa2ff) 16%, transparent);
+            box-shadow: inset 2px 0 0 var(--accent, #7aa2ff);
+          }
+          [data-codex-usage-hud-cli-workdir-default="true"] {
+            flex: 0 0 auto;
+            padding: 2px 5px;
+            border-radius: 4px;
+            color: var(--accent, #7aa2ff);
+            background: color-mix(in srgb, var(--accent, #7aa2ff) 13%, transparent);
+            font: 700 10px/1 system-ui, sans-serif;
+          }
           [data-codex-usage-hud-cli-menu-toggle="true"] {
             pointer-events: auto;
             -webkit-app-region: no-drag;
@@ -5738,6 +6027,88 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
         }
         codexCliQuickLaunchMenuState.surface?.remove();
         codexCliQuickLaunchMenuState.surface = null;
+        codexCliQuickLaunchMenuState.workdirSurface?.remove();
+        codexCliQuickLaunchMenuState.workdirSurface = null;
+        codexCliQuickLaunchMenuState.workdirProvider = "";
+        codexCliQuickLaunchMenuState.workdirToggle = null;
+        codexCliQuickLaunchMenuState.workdirExpanded = false;
+      }
+
+      function closeCodexCliQuickLaunchWorkdirMenu() {
+        codexCliQuickLaunchMenuState.workdirSurface?.remove();
+        codexCliQuickLaunchMenuState.workdirSurface = null;
+        codexCliQuickLaunchMenuState.workdirProvider = "";
+        codexCliQuickLaunchMenuState.workdirToggle = null;
+        codexCliQuickLaunchMenuState.workdirExpanded = false;
+      }
+
+      function codexCliWorkdirMenuItemHtml(provider, item, index) {
+        const path = String(item?.path || "");
+        const label = String(item?.label || codexCliWorkdirRecentLabel(path));
+        const defaultState = codexCliDefaultWorkdir(provider);
+        const defaultWorkdir = !defaultState.noProject && !!defaultState.path
+          && codexCliTransferWorkdirIdentity(defaultState.path) === codexCliTransferWorkdirIdentity(path);
+        return `
+          <button type="button" role="menuitem" tabindex="-1" data-codex-usage-hud-cli-workdir="true" data-provider="${escapeHtml(provider)}" data-workdir="${escapeHtml(path)}" ${defaultWorkdir ? 'data-default="true"' : ""} title="${escapeHtml(path)}">
+            <span><strong>${escapeHtml(label)}</strong><small>${escapeHtml(path)}</small></span>
+            ${defaultWorkdir ? '<span data-codex-usage-hud-cli-workdir-default="true">默认</span>' : ""}
+          </button>
+        `;
+      }
+
+      function renderCodexCliQuickLaunchWorkdirMenu(provider, toggle, expanded = false) {
+        const normalizedProvider = String(provider || "").trim().toLowerCase();
+        if (!normalizedProvider || !toggle?.isConnected) {
+          closeCodexCliQuickLaunchWorkdirMenu();
+          return;
+        }
+        let surface = codexCliQuickLaunchMenuState.workdirSurface;
+        if (!surface?.isConnected) {
+          surface = document.createElement("div");
+          surface.dataset.codexUsageHudCliMenuSurface = "true";
+          surface.dataset.codexUsageHudCliWorkdirSurface = "true";
+          surface.setAttribute("role", "menu");
+          document.body.appendChild(surface);
+          codexCliQuickLaunchMenuState.workdirSurface = surface;
+        }
+        const recents = codexCliRecentWorkdirs(normalizedProvider);
+        const visible = recents.slice(0, expanded ? 10 : 3);
+        const defaultState = codexCliDefaultWorkdir(normalizedProvider);
+        surface.setAttribute("aria-label", `${normalizedProvider} 工作目录`);
+        surface.innerHTML = `
+          <button type="button" role="menuitem" tabindex="-1" data-codex-usage-hud-cli-workdir="true" data-provider="${escapeHtml(normalizedProvider)}" data-no-project="true" ${defaultState.noProject ? 'data-default="true"' : ""}>
+            <span><strong>不在项目中工作</strong><small>清除 Codex 项目上下文</small></span>
+            ${defaultState.noProject ? '<span data-codex-usage-hud-cli-workdir-default="true">默认</span>' : ""}
+          </button>
+          ${visible.map((item, index) => codexCliWorkdirMenuItemHtml(normalizedProvider, item, index)).join("")}
+          ${!expanded && recents.length > 3 ? `<button type="button" role="menuitem" tabindex="-1" data-codex-usage-hud-cli-workdir-more="true" data-provider="${escapeHtml(normalizedProvider)}">更多...</button>` : ""}
+        `;
+        const rect = toggle.getBoundingClientRect();
+        const width = Math.min(360, Math.max(250, surface.scrollWidth || 250));
+        const rightAligned = rect.right + 4 + width > innerWidth - 6;
+        const left = rightAligned ? rect.left - width - 4 : rect.right + 4;
+        surface.style.left = `${Math.round(Math.max(6, Math.min(left, innerWidth - width - 6)))}px`;
+        surface.style.top = `${Math.round(Math.max(6, Math.min(rect.top, innerHeight - 8)))}px`;
+        surface.style.maxHeight = `${Math.max(120, innerHeight - 16)}px`;
+        surface.style.overflowY = "auto";
+        surface.hidden = false;
+        codexCliQuickLaunchMenuState.workdirProvider = normalizedProvider;
+        codexCliQuickLaunchMenuState.workdirToggle = toggle;
+        codexCliQuickLaunchMenuState.workdirExpanded = expanded;
+      }
+
+      function toggleCodexCliQuickLaunchWorkdirMenu(provider, toggle) {
+        const normalizedProvider = String(provider || "").trim().toLowerCase();
+        if (
+          codexCliQuickLaunchMenuState.workdirSurface?.isConnected
+          && codexCliQuickLaunchMenuState.workdirProvider === normalizedProvider
+          && codexCliQuickLaunchMenuState.workdirToggle === toggle
+        ) {
+          closeCodexCliQuickLaunchWorkdirMenu();
+          return;
+        }
+        closeCodexCliQuickLaunchWorkdirMenu();
+        renderCodexCliQuickLaunchWorkdirMenu(normalizedProvider, toggle, false);
       }
 
       function renderCodexCliQuickLaunchMenu() {
@@ -5757,7 +6128,10 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
           codexCliQuickLaunchMenuState.surface = surface;
         }
         surface.innerHTML = providers.map((provider) => `
-          <button type="button" role="menuitem" tabindex="-1" data-codex-usage-hud-cli-provider="true" data-provider="${escapeHtml(provider)}">${escapeHtml(provider)}</button>
+          <div data-codex-usage-hud-cli-provider-row="true">
+            <button type="button" role="menuitem" tabindex="-1" data-codex-usage-hud-cli-provider="true" data-provider="${escapeHtml(provider)}">${escapeHtml(provider)}</button>
+            <button type="button" tabindex="-1" data-codex-usage-hud-cli-provider-workdirs="true" data-provider="${escapeHtml(provider)}" aria-label="选择 ${escapeHtml(provider)} 的工作目录">工作目录 <span aria-hidden="true">›</span></button>
+          </div>
         `).join("");
         const rect = toggle.getBoundingClientRect();
         const width = Math.min(300, Math.max(190, surface.scrollWidth || 190));
@@ -5783,6 +6157,7 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
       function openCodexCliFromApplicationMenu(provider) {
         const normalizedProvider = String(provider || "").trim().toLowerCase();
         if (!normalizedProvider) return;
+        const requestedWorkdir = codexCliState.requestedWorkdir;
         closeCodexCliQuickLaunchMenu();
         if (
           settingsDirtyProviders.has(normalizedProvider)
@@ -5796,7 +6171,8 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
           openCodexCliDialog(normalizedProvider);
           return;
         }
-        openCodexCliQuickLaunch(normalizedProvider);
+        if (requestedWorkdir) openCodexCliQuickLaunch(normalizedProvider, requestedWorkdir);
+        else openCodexCliQuickLaunch(normalizedProvider);
       }
 
       function handleCodexCliQuickLaunchMenuClick(event) {
@@ -5808,6 +6184,35 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
           if (action === "stop") stopCodexCliQuickLaunch();
           else if (action === "configure") openCodexCliQuickLaunchConfiguration();
           else dismissCodexCliQuickLaunch();
+          return;
+        }
+        const workdirMore = event.target?.closest?.('[data-codex-usage-hud-cli-workdir-more="true"]');
+        if (workdirMore && codexCliQuickLaunchMenuState.workdirSurface?.contains(workdirMore)) {
+          event.preventDefault();
+          event.stopPropagation();
+          renderCodexCliQuickLaunchWorkdirMenu(
+            workdirMore.dataset.provider || "",
+            codexCliQuickLaunchMenuState.workdirToggle,
+            true,
+          );
+          return;
+        }
+        const workdirItem = event.target?.closest?.('[data-codex-usage-hud-cli-workdir="true"]');
+        if (workdirItem && codexCliQuickLaunchMenuState.workdirSurface?.contains(workdirItem)) {
+          event.preventDefault();
+          event.stopPropagation();
+          const requestedWorkdir = workdirItem.dataset.noProject === "true"
+            ? { noProject: true }
+            : { workdir: workdirItem.dataset.workdir || "" };
+          codexCliState.requestedWorkdir = requestedWorkdir;
+          openCodexCliFromApplicationMenu(workdirItem.dataset.provider || "");
+          return;
+        }
+        const workdirToggle = event.target?.closest?.('[data-codex-usage-hud-cli-provider-workdirs="true"]');
+        if (workdirToggle && codexCliQuickLaunchMenuState.surface?.contains(workdirToggle)) {
+          event.preventDefault();
+          event.stopPropagation();
+          toggleCodexCliQuickLaunchWorkdirMenu(workdirToggle.dataset.provider || "", workdirToggle);
           return;
         }
         const providerItem = event.target?.closest?.('[data-codex-usage-hud-cli-provider="true"]');
@@ -5926,8 +6331,14 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
         ctx.lifecycle.listen("codex_cli_quick_launch_menu", document, "pointerdown", (event) => {
           if (!codexCliQuickLaunchMenuState.open) return;
           const surface = codexCliQuickLaunchMenuState.surface;
+          const workdirSurface = codexCliQuickLaunchMenuState.workdirSurface;
           const toggle = codexCliQuickLaunchMenuState.toggle;
-          if (!surface?.contains(event.target) && event.target !== toggle && !toggle?.contains(event.target)) {
+          if (
+            !surface?.contains(event.target)
+            && !workdirSurface?.contains(event.target)
+            && event.target !== toggle
+            && !toggle?.contains(event.target)
+          ) {
             closeCodexCliQuickLaunchMenu();
           }
         }, true);
@@ -5939,6 +6350,11 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
             dismissCodexCliQuickLaunch();
             return;
           }
+          if (codexCliQuickLaunchMenuState.workdirSurface) {
+            event.preventDefault();
+            closeCodexCliQuickLaunchWorkdirMenu();
+            return;
+          }
           if (codexCliQuickLaunchMenuState.open) {
             event.preventDefault();
             closeCodexCliQuickLaunchMenu();
@@ -5946,6 +6362,13 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
         }, true);
         ctx.lifecycle.listen("codex_cli_quick_launch_menu", window, "resize", () => {
           if (codexCliQuickLaunchMenuState.open) renderCodexCliQuickLaunchMenu();
+          if (codexCliQuickLaunchMenuState.workdirSurface) {
+            renderCodexCliQuickLaunchWorkdirMenu(
+              codexCliQuickLaunchMenuState.workdirProvider,
+              codexCliQuickLaunchMenuState.workdirToggle,
+              codexCliQuickLaunchMenuState.workdirExpanded,
+            );
+          }
         }, { passive: true });
         if (document.body) {
           const observer = ctx.observers.set("codex_cli_quick_launch_menu", new MutationObserver(() => {
