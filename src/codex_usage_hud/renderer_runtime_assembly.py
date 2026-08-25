@@ -143,6 +143,10 @@ def assemble_renderer_session(
     command_refresh_requested = runtime_signals.command_refresh
     active_session_refresh_requested = runtime_signals.active_session_refresh
 
+    # AutoUpdateManager 的后台线程（检查更新/下载）完成后，主动唤醒事件循环，
+    # 否则 payload 不会刷新，前端 loading 弹窗会永远停留在 checking 状态。
+    update_manager._on_state_change = lambda _state: command_refresh_requested.set()
+
     pre_send_estimator = getattr(context, "pre_send_estimator", None)
     if pre_send_estimator is not None:
         pre_send_estimator.update_callback = (

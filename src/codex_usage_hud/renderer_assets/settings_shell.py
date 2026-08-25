@@ -4853,6 +4853,7 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
         if (mode) layer.dataset.loadingMode = mode;
         layer.innerHTML = `
           <div class="codex-usage-hud-settings-confirm-card" role="status" aria-live="polite" aria-label="${escapeHtml(title || "正在处理设置变更")}">
+            <button type="button" class="codex-usage-hud-settings-confirm-close" data-action="settings-confirm-close" aria-label="关闭">×</button>
             <div class="codex-usage-hud-settings-confirm-kicker">${escapeHtml(kicker)}</div>
             <div class="codex-usage-hud-settings-confirm-title">${escapeHtml(title)}</div>
             <div class="codex-usage-hud-settings-confirm-body">${escapeHtml(body)}</div>
@@ -4863,6 +4864,14 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
           </div>
         `;
         dialog.appendChild(layer);
+        const closeBtn = layer.querySelector('[data-action="settings-confirm-close"]');
+        if (closeBtn) {
+          closeBtn.addEventListener("click", (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            closeSettingsConfirm();
+          });
+        }
       }
 
       function openProviderDeleteLoading(requestId, provider, deleteSessionHistory = false) {

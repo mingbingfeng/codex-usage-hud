@@ -921,6 +921,39 @@ def test_pre_refresh_command_replaces_full_snapshot_with_partial_domains() -> No
     )
 
 
+def test_pre_refresh_async_update_commands_do_not_leave_sticky_command_status() -> None:
+    """checkUpdate/installUpdate/updateAction 由 AutoUpdateManager（updateState）
+    异步驱动最终状态。execute_command 只返回中间态（如 checking），不能作为粘性
+    settings_command_status 保留，否则状态栏会卡在"正在检查更新..."而 loading
+    弹窗已随 updateState 终态关闭。"""
+    for action in ("checkUpdate", "installUpdate", "updateAction"):
+        state = RendererLoopState()
+        executor = RendererPreRefreshExecutor(
+            state,
+            _pre_refresh_ports(
+                current_config=lambda: "cfg",
+                execute_command=lambda command: {
+                    "message": "正在检查更新...",
+                    "kind": "",
+                    "restartVisible": False,
+                },
+                update_status=lambda: {"phase": "checking", "message": "正在检查更新..."},
+                partial_domains_for_command=lambda command, previous, current: None,
+            ),
+        )
+        inputs = _tick_inputs(
+            plan=RefreshPlan(snapshot=True),
+            command={"action": action},
+        )
+
+        executor.apply_settings_command(inputs)
+
+        assert state.settings_command_status == {}, (
+            f"{action} 不应留下粘性 settings_command_status"
+        )
+        assert inputs.update_state == {"phase": "checking", "message": "正在检查更新..."}
+
+
 def test_pre_refresh_command_updates_overlay_for_partial_overlay_domain() -> None:
     configured = MagicMock()
     updated = MagicMock()

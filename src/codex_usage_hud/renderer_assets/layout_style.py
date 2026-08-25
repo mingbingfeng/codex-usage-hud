@@ -4020,6 +4020,7 @@ TEXT = r"""
             backdrop-filter: blur(4px);
           }
           #${rootId} .codex-usage-hud-settings-confirm-card {
+            position: relative;
             width: min(500px, calc(100% - 36px));
             display: grid;
             gap: 12px;
@@ -4029,6 +4030,33 @@ TEXT = r"""
             background: #1d1e20;
             box-shadow: 0 22px 58px rgba(0, 0, 0, .52);
             overflow: hidden;
+          }
+          #${rootId} .codex-usage-hud-settings-confirm-close {
+            position: absolute;
+            top: 8px;
+            right: 8px;
+            width: 28px;
+            height: 28px;
+            min-width: 28px;
+            min-height: 28px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            border: 0;
+            border-radius: 6px;
+            background: transparent;
+            color: var(--codex-usage-hud-text-muted, #8a93a0);
+            padding: 0;
+            margin: 0;
+            font-size: 18px;
+            font-weight: 700;
+            line-height: 1;
+            cursor: pointer;
+            z-index: 1;
+          }
+          #${rootId} .codex-usage-hud-settings-confirm-close:hover {
+            background: color-mix(in srgb, var(--codex-usage-hud-panel-border, #2e3846) 72%, #ffffff 28%);
+            color: #ffffff;
           }
           #${rootId} .codex-usage-hud-settings-confirm-card:has(.codex-usage-hud-settings-confirm-main),
           #${rootId} .codex-usage-hud-settings-confirm-card[data-tone="danger"] {

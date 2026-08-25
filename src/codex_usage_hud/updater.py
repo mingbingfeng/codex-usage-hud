@@ -22,7 +22,7 @@ LATEST_RELEASE_API_URL = (
     f"https://api.github.com/repos/{DEFAULT_REPOSITORY}/releases/latest"
 )
 UPDATE_USER_AGENT = "codex-usage-hud-updater"
-DEFAULT_UPDATE_TIMEOUT_SECONDS = 12.0
+DEFAULT_UPDATE_TIMEOUT_SECONDS = 8.0
 DEFAULT_UPDATE_DOWNLOAD_TIMEOUT_SECONDS = 60.0
 DEFAULT_AUTO_UPDATE_CHECK_INTERVAL_SECONDS = 6 * 60 * 60
 DEFAULT_AUTO_UPDATE_RETRY_SECONDS = 15 * 60
@@ -31,6 +31,12 @@ DEFAULT_UPDATE_CHUNK_BYTES = 256 * 1024
 # provide alternate transport for the exact, already-verified release asset.
 DEFAULT_UPDATE_MIRROR_URL_TEMPLATES = (
     "https://ghproxy.net/{url}",
+    "https://gh-proxy.com/{url}",
+)
+# Mirrors that can also proxy the GitHub REST API (api.github.com).
+# ghproxy.net returns 403 for api.github.com, so it is intentionally excluded
+# from the metadata-check mirror list. Download mirrors remain separate above.
+DEFAULT_UPDATE_CHECK_MIRROR_URL_TEMPLATES = (
     "https://gh-proxy.com/{url}",
 )
 INSTALLER_SUFFIX = "-windows-x64-setup.exe"
@@ -193,6 +199,29 @@ def latest_release_api_url(repository: str = DEFAULT_REPOSITORY) -> str:
     return f"https://api.github.com/repos/{repository}/releases/latest"
 
 
+def release_api_urls(
+    repository: str = DEFAULT_REPOSITORY,
+    *,
+    mirror_url_templates: tuple[str, ...] = DEFAULT_UPDATE_CHECK_MIRROR_URL_TEMPLATES,
+) -> tuple[str, ...]:
+    """Return official then mirrored GitHub Release API URLs.
+
+    The official ``api.github.com`` endpoint is always first so that users who
+    can reach GitHub directly get the lowest-latency, most authoritative
+    response. Mirrors are only tried after the official endpoint fails.
+    """
+    api_url = latest_release_api_url(repository)
+    urls = [api_url]
+    for template in mirror_url_templates:
+        candidate = str(template or "").strip()
+        if not candidate.startswith("https://") or "{url}" not in candidate:
+            continue
+        candidate = candidate.replace("{url}", api_url)
+        if candidate not in urls:
+            urls.append(candidate)
+    return tuple(urls)
+
+
 def _json_request(url: str, *, timeout_seconds: float) -> Mapping[str, Any]:
     request = Request(
         url,
@@ -336,11 +365,24 @@ def check_for_update(
     platform_name: str | None = None,
 ) -> UpdateInfo:
     """Check GitHub Releases and return update metadata."""
-    try:
-        payload = _json_request(
-            latest_release_api_url(repository),
-            timeout_seconds=timeout_seconds,
+    payload: Mapping[str, Any] | None = None
+    errors: list[str] = []
+    for api_url in release_api_urls(repository):
+        try:
+            payload = _json_request(api_url, timeout_seconds=timeout_seconds)
+            break
+        except Exception as exc:
+            errors.append(f"{api_url}: {exc}")
+    if payload is None:
+        detail = "; ".join(errors) or "unknown error"
+        return UpdateInfo(
+            current_version=current_version,
+            error=(
+                f"无法连接 GitHub 获取更新信息（{detail}），"
+                "请检查网络或稍后重试。"
+            ),
         )
+    try:
         latest_version = str(
             payload.get("tag_name") or payload.get("name") or ""
         ).strip()
@@ -375,8 +417,11 @@ def check_for_update(
             asset=asset,
             platform_supported=supported,
         )
-    except (HTTPError, URLError, OSError, ValueError, json.JSONDecodeError) as exc:
-        return UpdateInfo(current_version=current_version, error=str(exc))
+    except Exception as exc:
+        return UpdateInfo(
+            current_version=current_version,
+            error=f"更新信息解析失败：{exc}",
+        )
 
 
 def format_update_info(info: UpdateInfo) -> str:
@@ -558,6 +603,7 @@ class AutoUpdateManager:
         download_opener: Callable[..., Any] | None = None,
         launch_func: Callable[[Path], None] | None = None,
         monotonic: Callable[[], float] | None = None,
+        on_state_change: Callable[["AutoUpdateState"], None] | None = None,
     ) -> None:
         self.current_version = str(current_version or "").strip()
         self.repository = repository
@@ -570,6 +616,7 @@ class AutoUpdateManager:
         self._download_opener = download_opener or urlopen
         self._launch_func = launch_func or launch_installer
         self._monotonic = monotonic or time.monotonic
+        self._on_state_change = on_state_change
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._pause_event = threading.Event()
@@ -584,6 +631,25 @@ class AutoUpdateManager:
     def status(self) -> AutoUpdateState:
         with self._lock:
             return self._status
+
+    def _notify_state_change(self) -> None:
+        """Invoke the optional state-change callback after releasing the lock.
+
+        Called by internal methods immediately after mutating ``self._status``.
+        The snapshot is copied under the lock, then the callback is invoked
+        outside the lock so it cannot deadlock if it re-enters this manager
+        (e.g. by waking the event loop which later calls ``tick()``).
+        """
+        callback = self._on_state_change
+        if callback is None:
+            return
+        with self._lock:
+            snapshot = self._status
+        try:
+            callback(snapshot)
+        except Exception:
+            # 状态变化回调失败不应影响更新管理器本身的状态
+            pass
 
     def tick(self) -> AutoUpdateState:
         with self._lock:
@@ -771,56 +837,83 @@ class AutoUpdateManager:
         self._check_thread.start()
 
     def _check_worker(self) -> None:
-        info = self._check_func(
-            current_version=self.current_version,
-            repository=self.repository,
-            timeout_seconds=self.check_timeout_seconds,
-        )
-        now = self._monotonic()
-        with self._lock:
-            self._check_thread = None
-            if self._stop_event.is_set():
-                return
-            self._latest_info = info
-            download_on_available = self._check_download_on_available
-            self._check_download_on_available = False
-            if info.error:
-                self._next_check_at = now + self.retry_interval_seconds
-                self._status = AutoUpdateState(
-                    phase="error",
+        needs_notify = False
+        try:
+            try:
+                info = self._check_func(
                     current_version=self.current_version,
-                    latest_version=info.latest_version,
-                    release_url=info.release_url,
-                    message=f"检查更新失败：{info.error}",
-                    error=info.error,
+                    repository=self.repository,
+                    timeout_seconds=self.check_timeout_seconds,
                 )
+            except Exception as exc:
+                # 防御性兜底：check_func 理论上不应抛出异常（内部已捕获），
+                # 但若因未知异常逃逸，必须更新状态并释放 check_thread，
+                # 否则 phase 会永远卡在 checking、loading 弹窗永不消失。
+                with self._lock:
+                    self._check_thread = None
+                    if self._stop_event.is_set():
+                        return
+                    self._next_check_at = self._monotonic() + self.retry_interval_seconds
+                    self._status = AutoUpdateState(
+                        phase="error",
+                        current_version=self.current_version,
+                        message=f"检查更新失败：{exc}",
+                        error=str(exc),
+                    )
+                needs_notify = True
                 return
-            self._next_check_at = now + self.check_interval_seconds
-            if not info.available:
-                self._status = AutoUpdateState(
-                    phase="up_to_date",
-                    current_version=self.current_version,
-                    latest_version=info.latest_version,
-                    release_url=info.release_url,
-                    message=format_update_info(info),
-                )
-                return
-            if not download_on_available:
-                self._launch_after_download = False
-                self._status = AutoUpdateState(
-                    phase="available",
-                    current_version=self.current_version,
-                    latest_version=info.latest_version,
-                    release_url=info.release_url,
-                    asset_name=info.asset_name,
-                    asset_size=info.asset.size if info.asset else 0,
-                    visible=True,
-                    icon="download",
-                    message=f"发现新版本 {info.latest_version}，点击安装更新开始下载。",
-                )
-                return
-            self._pause_event.clear()
-            self._start_download_locked(info)
+            now = self._monotonic()
+            with self._lock:
+                self._check_thread = None
+                if self._stop_event.is_set():
+                    return
+                self._latest_info = info
+                download_on_available = self._check_download_on_available
+                self._check_download_on_available = False
+                if info.error:
+                    self._next_check_at = now + self.retry_interval_seconds
+                    self._status = AutoUpdateState(
+                        phase="error",
+                        current_version=self.current_version,
+                        latest_version=info.latest_version,
+                        release_url=info.release_url,
+                        message=f"检查更新失败：{info.error}",
+                        error=info.error,
+                    )
+                    needs_notify = True
+                    return
+                self._next_check_at = now + self.check_interval_seconds
+                if not info.available:
+                    self._status = AutoUpdateState(
+                        phase="up_to_date",
+                        current_version=self.current_version,
+                        latest_version=info.latest_version,
+                        release_url=info.release_url,
+                        message=format_update_info(info),
+                    )
+                    needs_notify = True
+                    return
+                if not download_on_available:
+                    self._launch_after_download = False
+                    self._status = AutoUpdateState(
+                        phase="available",
+                        current_version=self.current_version,
+                        latest_version=info.latest_version,
+                        release_url=info.release_url,
+                        asset_name=info.asset_name,
+                        asset_size=info.asset.size if info.asset else 0,
+                        visible=True,
+                        icon="download",
+                        message=f"发现新版本 {info.latest_version}，点击安装更新开始下载。",
+                    )
+                    needs_notify = True
+                    return
+                self._pause_event.clear()
+                self._start_download_locked(info)
+                needs_notify = True
+        finally:
+            if needs_notify:
+                self._notify_state_change()
 
     def _start_download_locked(self, info: UpdateInfo) -> None:
         if not info.asset:
@@ -1028,7 +1121,8 @@ class AutoUpdateManager:
                     message=f"下载更新失败：{exc}",
                     error=str(exc),
                 )
-                return
+            self._notify_state_change()
+            return
         with self._lock:
             final_size = self._existing_file_bytes(target, asset.size)
             self._download_thread = None
@@ -1049,6 +1143,7 @@ class AutoUpdateManager:
             )
             auto_launch = self._launch_after_download
             self._launch_after_download = False
+        self._notify_state_change()
         if not auto_launch:
             return
         try:
@@ -1062,6 +1157,7 @@ class AutoUpdateManager:
                     message=f"打开安装程序失败：{exc}",
                     error=str(exc),
                 )
+            self._notify_state_change()
             return
         with self._lock:
             self._status = replace(
@@ -1069,6 +1165,7 @@ class AutoUpdateManager:
                 message=f"已启动 {target.name}。",
                 error="",
             )
+        self._notify_state_change()
 
     @staticmethod
     def _existing_file_bytes(path: Path, expected_size: int) -> int:
@@ -1105,6 +1202,7 @@ __all__ = [
     "DEFAULT_AUTO_UPDATE_RETRY_SECONDS",
     "DEFAULT_UPDATE_DOWNLOAD_TIMEOUT_SECONDS",
     "DEFAULT_UPDATE_MIRROR_URL_TEMPLATES",
+    "DEFAULT_UPDATE_CHECK_MIRROR_URL_TEMPLATES",
     "INSTALLER_SUFFIX",
     "LATEST_RELEASE_API_URL",
     "RELEASES_URL",
@@ -1121,6 +1219,7 @@ __all__ = [
     "is_newer_version",
     "launch_installer",
     "latest_release_api_url",
+    "release_api_urls",
     "normalize_tag",
     "select_windows_installer_asset",
     "update_download_urls",

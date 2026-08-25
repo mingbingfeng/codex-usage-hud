@@ -58,6 +58,13 @@ class RendererPreRefreshExecutor:
     )
     _REQUEST_ROWS_LOAD_MORE_ACTION = "loadMoreRequestRows"
     _REQUEST_ROWS_PAGE_SIZE = 30
+    # 更新类命令由 AutoUpdateManager（payload.updateState）异步驱动最终状态。
+    # execute_command 只返回中间态（如 checking/downloading），不能作为粘性
+    # settings_command_status 保留，否则会一直覆盖 updateState 的最终状态，
+    # 导致状态栏卡在"正在检查更新..."而 loading 弹窗已关闭。
+    _ASYNC_UPDATE_ACTIONS = frozenset(
+        {"checkUpdate", "installUpdate", "updateAction"}
+    )
 
     def __init__(
         self,
@@ -350,6 +357,10 @@ class RendererPreRefreshExecutor:
             self.ports.reset_background_retry()
         self.state.settings_command_status = self.ports.execute_command(inputs.command)
         inputs.update_state = self.ports.update_status()
+        if action in self._ASYNC_UPDATE_ACTIONS:
+            # 异步更新命令的最终状态由 updateState 驱动，不保留中间态作为
+            # 粘性 settings_command_status，否则状态栏会卡在"正在检查更新..."。
+            self.state.settings_command_status = {}
         mode_switch = str(
             self.state.settings_command_status.get("switchMode") or ""
         ).strip()

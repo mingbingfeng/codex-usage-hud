@@ -19,10 +19,12 @@ from codex_usage_hud.updater import (
     UpdateInfo,
     UpdateAsset,
     UpdateVerificationError,
+    check_for_update,
     download_update_asset,
     format_update_info,
     installer_asset_name,
     is_newer_version,
+    release_api_urls,
     select_windows_installer_asset,
     verify_update_asset,
     version_key,
@@ -429,6 +431,148 @@ class AutoUpdateManagerTests(unittest.TestCase):
             self.assertFalse(installer.with_name(f"{installer.name}.part").exists())
             self.assertEqual(requests[0], asset.url)
             self.assertIn("ghproxy.net", requests[1])
+
+    def test_check_worker_handles_unexpected_exception_without_leaving_checking_phase(self) -> None:
+        """check_func 若抛出未捕获异常，_check_worker 必须兜底更新为 error
+        状态并释放 check_thread，否则 phase 永远卡在 checking、loading 弹窗
+        永不消失。"""
+
+        def exploding_check(**_kwargs: object) -> UpdateInfo:
+            raise RuntimeError("simulated unexpected failure in check_func")
+
+        manager = AutoUpdateManager(
+            current_version="1.0.0",
+            check_interval_seconds=3600,
+            retry_interval_seconds=60,
+            check_func=exploding_check,
+        )
+        try:
+            manager.request_check(auto_download=False)
+            self._wait_for_phase(manager, "error")
+            state = manager.status()
+            self.assertEqual(state.phase, "error")
+            self.assertIn("simulated unexpected failure", state.error)
+            self.assertIn("检查更新失败", state.message)
+            # check_thread 已释放，不会永远卡在 checking
+            self.assertIsNone(manager._check_thread)
+        finally:
+            manager.close()
+
+    def test_check_worker_invokes_on_state_change_callback_when_finished(self) -> None:
+        """后台检查完成后必须调用 on_state_change 回调，否则事件循环
+        不会被唤醒、payload 不刷新、loading 弹窗永远不消失。"""
+        notifications: list[AutoUpdateState] = []
+
+        def fake_check(**_kwargs: object) -> UpdateInfo:
+            return UpdateInfo(current_version="1.0.0", latest_version="1.0.0")
+
+        manager = AutoUpdateManager(
+            current_version="1.0.0",
+            check_interval_seconds=3600,
+            retry_interval_seconds=60,
+            check_func=fake_check,
+            on_state_change=lambda state: notifications.append(state),
+        )
+        try:
+            manager.request_check(auto_download=False)
+            self._wait_for_phase(manager, "up_to_date")
+            self.assertTrue(notifications, "on_state_change 回调未被调用")
+            self.assertEqual(notifications[-1].phase, "up_to_date")
+        finally:
+            manager.close()
+
+
+class UpdateCheckMirrorTests(unittest.TestCase):
+    """GitHub API 多源（官方+镜像）检查更新的回归测试。"""
+
+    def test_release_api_urls_includes_official_then_mirror(self) -> None:
+        urls = release_api_urls("owner/repo")
+        self.assertEqual(
+            urls[0],
+            "https://api.github.com/repos/owner/repo/releases/latest",
+        )
+        self.assertEqual(len(urls), 2)
+        self.assertIn("gh-proxy.com", urls[1])
+        self.assertIn("api.github.com", urls[1])
+
+    def test_release_api_urls_deduplicates_identical_urls(self) -> None:
+        urls = release_api_urls(
+            "owner/repo",
+            mirror_url_templates=("https://gh-proxy.com/{url}",),
+        )
+        self.assertEqual(len(urls), 2)
+        self.assertEqual(len(set(urls)), 2)
+
+    def test_check_for_update_falls_back_to_mirror_when_official_fails(self) -> None:
+        from unittest.mock import patch
+
+        mirror_payload = {
+            "tag_name": "v1.0.1",
+            "html_url": "https://github.com/owner/repo/releases/tag/v1.0.1",
+            "assets": [],
+        }
+        call_urls: list[str] = []
+
+        def fake_json_request(url: str, *, timeout_seconds: float):
+            del timeout_seconds
+            call_urls.append(url)
+            if len(call_urls) == 1:
+                raise OSError("official route unavailable")
+            return mirror_payload
+
+        with patch(
+            "codex_usage_hud.updater._json_request",
+            side_effect=fake_json_request,
+        ):
+            info = check_for_update(current_version="1.0.0")
+
+        self.assertEqual(info.latest_version, "v1.0.1")
+        self.assertFalse(info.error)
+        self.assertEqual(len(call_urls), 2)
+        self.assertIn("api.github.com", call_urls[0])
+        self.assertIn("gh-proxy.com", call_urls[1])
+
+    def test_check_for_update_returns_friendly_error_when_all_sources_fail(self) -> None:
+        from unittest.mock import patch
+
+        def fake_json_request(url: str, *, timeout_seconds: float):
+            del url, timeout_seconds
+            raise OSError("connection timed out")
+
+        with patch(
+            "codex_usage_hud.updater._json_request",
+            side_effect=fake_json_request,
+        ):
+            info = check_for_update(current_version="1.0.0")
+
+        self.assertTrue(info.error)
+        self.assertIn("无法连接 GitHub", info.error)
+        self.assertIn("connection timed out", info.error)
+
+    def test_check_for_update_uses_official_when_it_succeeds(self) -> None:
+        from unittest.mock import patch
+
+        official_payload = {
+            "tag_name": "v1.0.0",
+            "html_url": "https://github.com/owner/repo/releases/tag/v1.0.0",
+            "assets": [],
+        }
+        call_count = [0]
+
+        def fake_json_request(url: str, *, timeout_seconds: float):
+            del url, timeout_seconds
+            call_count[0] += 1
+            return official_payload
+
+        with patch(
+            "codex_usage_hud.updater._json_request",
+            side_effect=fake_json_request,
+        ):
+            info = check_for_update(current_version="1.0.0")
+
+        self.assertEqual(info.latest_version, "v1.0.0")
+        self.assertFalse(info.error)
+        self.assertEqual(call_count[0], 1, "官方成功时不应尝试镜像")
 
 
 if __name__ == "__main__":
