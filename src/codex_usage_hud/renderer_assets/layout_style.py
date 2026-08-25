@@ -3473,6 +3473,40 @@ TEXT = r"""
             font-size: 12px;
             line-height: 1.5;
           }
+          #${rootId} .codex-usage-hud-cleanup-empty {
+            display: grid;
+            place-content: center;
+            justify-items: center;
+            gap: 10px;
+            min-height: 200px;
+            padding: 32px 20px;
+            text-align: center;
+          }
+          #${rootId} .codex-usage-hud-cleanup-empty-mark {
+            width: 56px;
+            height: 56px;
+            display: grid;
+            place-items: center;
+            border: 1px solid #3f5f82;
+            border-radius: 50%;
+            background: #17202a;
+            color: #6b9fd9;
+            opacity: .85;
+          }
+          #${rootId} .codex-usage-hud-cleanup-empty-title {
+            margin: 0;
+            color: var(--codex-usage-hud-text, #d8dde3);
+            font-size: 14px;
+            font-weight: 650;
+            line-height: 1.3;
+          }
+          #${rootId} .codex-usage-hud-cleanup-empty-hint {
+            margin: 0;
+            color: var(--codex-usage-hud-muted, #7d848e);
+            font-size: 11px;
+            line-height: 1.5;
+            max-width: 260px;
+          }
           #${rootId} .codex-usage-hud-cleanup-scan-mark[data-live="true"] {
             position: relative;
           }
