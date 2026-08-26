@@ -186,3 +186,8 @@ tests/                   解析、UI、daemon、打包和更新回归测试
 ## 说明
 
 `codex-usage-hud` 是外部本地监控工具，不修改 Codex App 原始安装文件。Codex App 或日志格式变化后，可能需要更新解析和 renderer 注入逻辑。
+
+## 致谢
+
+- 感谢 [shu26.cfd](https://shu26.cfd/) 对开源项目的支持与赞助。
+- 本开源项目已入选并认可 [LINUX DO 社区](https://linux.do/)，愿与社区共建开放生态。
