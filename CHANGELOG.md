@@ -20,6 +20,64 @@ and this repository follows Semantic Versioning for release tags.
   dedicated visual-capture tool. Renderer remains the only main HUD surface;
   the optional PySide6 desktop work-bubble helper is unchanged.
 
+## [1.1.0] - 2026-08-26
+
+Renderer Delivery, Multi-Provider, and Work-Bubble Edition.
+
+### Added
+
+- Multi-provider support: add/delete/edit providers, per-provider model lists,
+  model unit prices, default-provider editable configuration, and
+  provider-aware usage sessions.
+- Desktop session management: duplicate and migrate sessions with progress,
+  open session working directories, and multi-threaded migrations.
+- Windows system tray icon with exit menu.
+- Codex App background-task switch and background usage audit with
+  per-provider English names and role descriptions for background tasks.
+- Bottom HUD backend connection breathing light, need-pick tiktoken panel,
+  work-directory submenu in the CLI quick menu, and open work-directory
+  actions in session management and usage overview.
+- Safe cleanup and permanent session deletion with scan progress UI and a
+  persisted deleted-usage ledger.
+- Work-bubble improvements: motion animations, transparency/click handling,
+  filtering of multi-agent sub-session bubbles, and completed-bubble
+  restoration.
+- Rest reminder schedule-aware reminders and clickable toast buttons.
+- Renderer HUD startup/follow reliability: debug-launch support,
+  session-switch latency reduction, and new-session reconciliation after
+  composer send.
+
+### Fixed
+
+- 用量统计重复累加计算错误 (duplicate accumulation in usage statistics).
+- Lock-screen white-screen freeze of Codex Desktop.
+- Windows tray provider-id display and default-provider editability.
+- Migration residue after session migration; deleted usage ledger for
+  deleted providers; historical-session bubbles; bubble memory leaks; bubble
+  spread/animations.
+- Cross-day budget cache causing zero usage/amount; today/week usage refresh.
+- Chinese input in session search box; settings dialog closing during scans;
+  rest-reminder persistent test writing real user config.
+- Session usage totalling aligned with live subagent totals.
+
+### Changed
+
+- Runtime surface is renderer-only; CDP failures return diagnostics instead
+  of falling back to standalone HUDs. Tk/Qt HUD source removed from the
+  default import graph.
+- PySide6 desktop work-bubble helper ships inside the Windows installer as a
+  default-included dependency, based on a slim Essentials Qt core
+  (QtCore/QtGui/QtWidgets/Network) so the bundle stays compact (~25MB vs
+  52MB full Addons).
+- Build tooling excludes PySide6 Addons modules by default for the Windows
+  installer (`--no-exclude-qt` restores the full bundle).
+- HUD width self-adaptive; non-expanded HUD can be dragged directly.
+
+### Removed
+
+- Legacy standalone Qt/Tk HUD implementations and their dedicated
+  visual-capture tool removed from the build path.
+
 ## [1.0.5] - 2026-06-28
 
 Renderer Session Follow Hotfix.

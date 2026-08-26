@@ -66,6 +66,64 @@ DEFAULT_EXCLUDED_MODULES = (
     "codex_usage_hud.platforms.macos",
 )
 
+# PySide6 Addons modules are not used by the desktop work-overlay helper
+# (it only needs QtCore/QtGui/QtWidgets/Network from Essentials). Excluding
+# them keeps the PyInstaller bundle slim (~25MB vs ~52MB full Addons).
+DEFAULT_EXCLUDED_QT_MODULES = (
+    "PySide6.QtQuick",
+    "PySide6.QtQuickControls2",
+    "PySide6.QtQuickWidgets",
+    "PySide6.QtQml",
+    "PySide6.QtQmlModels",
+    "PySide6.QtQmlWorkerScript",
+    "PySide6.QtQmlMeta",
+    "PySide6.Qt3DCore",
+    "PySide6.Qt3DRender",
+    "PySide6.Qt3DInput",
+    "PySide6.Qt3DLogic",
+    "PySide6.Qt3DAnimation",
+    "PySide6.Qt3DExtras",
+    "PySide6.QtCharts",
+    "PySide6.QtDataVisualization",
+    "PySide6.QtGraphs",
+    "PySide6.QtWebEngineCore",
+    "PySide6.QtWebEngineWidgets",
+    "PySide6.QtWebEngineQuick",
+    "PySide6.QtWebChannel",
+    "PySide6.QtWebSockets",
+    "PySide6.QtWebView",
+    "PySide6.QtPdf",
+    "PySide6.QtPdfWidgets",
+    "PySide6.QtMultimedia",
+    "PySide6.QtMultimediaWidgets",
+    "PySide6.QtSensors",
+    "PySide6.QtLocation",
+    "PySide6.QtPositioning",
+    "PySide6.QtBluetooth",
+    "PySide6.QtNfc",
+    "PySide6.QtSql",
+    "PySide6.QtSvg",
+    "PySide6.QtSvgWidgets",
+    "PySide6.QtPrintSupport",
+    "PySide6.QtTest",
+    "PySide6.QtDBus",
+    "PySide6.QtDesigner",
+    "PySide6.QtHelp",
+    "PySide6.QtUiTools",
+    "PySide6.QtNetworkAuth",
+    "PySide6.QtRemoteObjects",
+    "PySide6.QtScxml",
+    "PySide6.QtSerialPort",
+    "PySide6.QtSerialBus",
+    "PySide6.QtTextToSpeech",
+    "PySide6.QtOpenGL",
+    "PySide6.QtOpenGLWidgets",
+    "PySide6.QtConcurrent",
+    "PySide6.QtCore5Compat",
+)
+# QtCore/QtGui/QtWidgets/QtNetwork must NOT be excluded: they are the
+# Essentials modules the desktop work-overlay helper actually imports.
+
 
 def _resolve_project_path(value: Path) -> Path:
     """Resolve ``value`` relative to the repository root when needed."""
@@ -104,6 +162,7 @@ def build_pyinstaller_command(
     collect_packages: Sequence[str] = DEFAULT_COLLECT_PACKAGES,
     data_files: Sequence[tuple[Path, str]] = DEFAULT_DATA_FILES,
     excluded_modules: Sequence[str] = DEFAULT_EXCLUDED_MODULES,
+    excluded_qt_modules: Sequence[str] = DEFAULT_EXCLUDED_QT_MODULES,
 ) -> list[str]:
     """Return the exact PyInstaller command used for the Windows exe build."""
     command = [
@@ -134,6 +193,8 @@ def build_pyinstaller_command(
     for source, destination in data_files:
         command.extend(["--add-data", pyinstaller_data_spec(source, destination)])
     for module in excluded_modules:
+        command.extend(["--exclude-module", module])
+    for module in excluded_qt_modules:
         command.extend(["--exclude-module", module])
     command.append(str(entry_script))
     return command
@@ -222,6 +283,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Fail instead of auto-installing PyInstaller into the active environment.",
     )
     parser.add_argument(
+        "--no-exclude-qt",
+        action="store_true",
+        help="Do not exclude PySide6 Addons modules; bundle the full Qt runtime.",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Print the PyInstaller command without running it.",
@@ -242,6 +308,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         dist_root=dist_root,
         build_root=build_root,
         name=args.name,
+        excluded_qt_modules=() if args.no_exclude_qt else DEFAULT_EXCLUDED_QT_MODULES,
     )
 
     if args.dry_run:
