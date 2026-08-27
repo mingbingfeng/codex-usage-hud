@@ -9,6 +9,7 @@ import subprocess
 import sys
 import threading
 import time
+import datetime
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -390,6 +391,7 @@ class ActiveSessionTracker:
         self._title_cache_key: tuple[str, str] | None = None
         self._title_cache_value = ""
         self._thread_path_cache: dict[str, tuple[Path | None, float]] = {}
+        self._threads_table_available: bool | None = None
         self._proc: subprocess.Popen[str] | None = None
         self._thread: threading.Thread | None = None
         self._watcher: RealtimeSessionWatcher | None = None
@@ -1400,6 +1402,67 @@ class ActiveSessionTracker:
                 and self._follow_state == "confirmed"
             )
 
+    def _threads_table_exists(self) -> bool:
+        """Lazily check whether the state DB has the legacy ``threads`` table.
+
+        Newer Codex builds store thread metadata in ``local_thread_catalog``
+        (without a ``rollout_path`` column), so the old
+        ``select rollout_path from threads`` query always fails. Cached for
+        the process lifetime because table schema does not change at runtime.
+        """
+        if self._threads_table_available is not None:
+            return self._threads_table_available
+        if not self.state_db.exists():
+            self._threads_table_available = False
+            return False
+        try:
+            con = sqlite3.connect(f"file:{self.state_db}?mode=ro", uri=True)
+            try:
+                row = con.execute(
+                    "select 1 from sqlite_master "
+                    "where type='table' and name='threads' limit 1"
+                ).fetchone()
+                self._threads_table_available = row is not None
+            finally:
+                con.close()
+        except sqlite3.Error:
+            self._threads_table_available = False
+        return self._threads_table_available
+
+    def _session_date_dir_from_catalog(self, thread_id: str) -> Path | None:
+        """Derive the per-day session directory from local_thread_catalog.
+
+        Newer Codex builds store thread metadata in ``local_thread_catalog``
+        with a ``source_created_at`` unix timestamp. Session JSONL files are
+        organised under ``sessions/YYYY/MM/DD/`` by local date. Using this
+        hint narrows the filesystem search from a full recursive rglob to a
+        single directory glob, which stays fast regardless of how many
+        historical sessions accumulate.
+        """
+        if not self.state_db.exists():
+            return None
+        try:
+            con = sqlite3.connect(f"file:{self.state_db}?mode=ro", uri=True)
+            try:
+                row = con.execute(
+                    "select source_created_at from local_thread_catalog "
+                    "where thread_id = ? limit 1",
+                    (thread_id,),
+                ).fetchone()
+            finally:
+                con.close()
+        except sqlite3.Error:
+            return None
+        if not row or not row[0]:
+            return None
+        try:
+            ts = float(row[0])
+        except (TypeError, ValueError):
+            return None
+        # Session directories use local date, matching the filename timestamp.
+        local_dt = datetime.datetime.fromtimestamp(ts)
+        return self.sessions_root / f"{local_dt.year:04d}" / f"{local_dt.month:02d}" / f"{local_dt.day:02d}"
+
     def path_from_renderer_thread_id(
         self,
         thread_id: str,
@@ -1432,6 +1495,7 @@ class ActiveSessionTracker:
 
         cache_key = f"renderer:{thread_id}"
         now = time.monotonic()
+        threads_table_ok = self._threads_table_exists()
         cached = self._thread_path_cache.get(cache_key)
         if cached is not None:
             cached_path, cached_at = cached
@@ -1440,12 +1504,13 @@ class ActiveSessionTracker:
             if (
                 cached_path is None
                 and now - cached_at <= _THREAD_PATH_NEGATIVE_CACHE_SECONDS
+                and threads_table_ok
                 and not allow_filesystem_fallback
             ):
                 return None
 
         path = None
-        if self.state_db.exists():
+        if threads_table_ok and self.state_db.exists():
             try:
                 con = sqlite3.connect(f"file:{self.state_db}?mode=ro", uri=True)
                 try:
@@ -1458,9 +1523,28 @@ class ActiveSessionTracker:
             except sqlite3.Error:
                 row = None
             path = self._normalize_rollout_path(str(row[0] or "")) if row else None
-        if path is None and allow_filesystem_fallback:
-            # Exact id in the filename only — still not a title heuristic.
-            path = find_session_file(thread_id, self.sessions_root)
+        # Filesystem fallback:
+        # - threads table missing (newer Codex builds): always search by filename
+        # - threads table present but row absent / lagging: only when explicitly allowed
+        if path is None and (not threads_table_ok or allow_filesystem_fallback):
+            # Narrow the search to the session's creation-date directory when
+            # local_thread_catalog has source_created_at. A single-directory
+            # glob is O(files_in_day) instead of O(all_historical_sessions).
+            date_dir = self._session_date_dir_from_catalog(thread_id)
+            if date_dir is not None and date_dir.is_dir():
+                try:
+                    date_matches = list(date_dir.glob(f"*{thread_id}*.jsonl"))
+                    if date_matches:
+                        date_matches.sort(
+                            key=lambda item: item.stat().st_mtime, reverse=True
+                        )
+                        path = date_matches[0]
+                except OSError:
+                    path = None
+            # Fall back to full recursive search if the date hint was absent
+            # or the file was not found there (e.g. archived / moved sessions).
+            if path is None:
+                path = find_session_file(thread_id, self.sessions_root)
             if path is not None:
                 _LOGGER.info(
                     "RENDERER_MAPPING_FILESYSTEM_FALLBACK thread_id=%s path=%s",

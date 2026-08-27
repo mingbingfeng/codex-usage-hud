@@ -119,6 +119,12 @@ def activity_main(
     detail = context.compact(snapshot.activity.detail, limit)
     if not detail:
         detail = context.request_status_label(snapshot.request.status or snapshot.status)
+    # Safety net: when the last JSONL record is an unrecognized bookkeeping
+    # event but the SSE tracker confirms the request is running, avoid showing
+    # "空闲：no activity" and surface the running state instead.
+    if snapshot.activity.kind == "idle" and snapshot.request.status == "running":
+        activity = "运行中"
+        detail = "正在处理"
     return f"{activity}：{detail}"
 
 

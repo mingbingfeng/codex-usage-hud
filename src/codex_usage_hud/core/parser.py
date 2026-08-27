@@ -2030,6 +2030,12 @@ class JsonlSessionParser:
                     f"{payload.get('name')} {compact_text(payload.get('arguments'), 140)}",
                     timestamp,
                 )
+            if record_type == "response_item" and payload_type == "custom_tool_call":
+                return Activity(
+                    "tool call",
+                    f"{payload.get('name')} {compact_text(payload.get('arguments'), 140)}",
+                    timestamp,
+                )
             if (
                 record_type == "response_item"
                 and payload_type == "function_call_output"
@@ -2039,6 +2045,46 @@ class JsonlSessionParser:
                     f"{payload.get('call_id')} {compact_text(payload.get('output'), 140)}",
                     timestamp,
                 )
+            if (
+                record_type == "response_item"
+                and payload_type == "custom_tool_call_output"
+            ):
+                return Activity(
+                    "tool output",
+                    f"{payload.get('call_id')} {compact_text(payload.get('output'), 140)}",
+                    timestamp,
+                )
+            # Newer Codex builds emit command execution as
+            # event_msg/item_completed with item.type=CommandExecution (no
+            # preceding response_item/custom_tool_call). Recognise it so the
+            # bubble shows "执行命令" instead of falling through to an older
+            # "正在思考" reasoning event while commands are running.
+            if (
+                record_type == "event_msg"
+                and payload_type == "item_completed"
+            ):
+                item = payload.get("item") or {}
+                if isinstance(item, Mapping) and item.get("type") == "CommandExecution":
+                    cmd = item.get("command") or []
+                    if isinstance(cmd, list) and cmd:
+                        cmd_parts = [str(c) for c in cmd if c]
+                        # Skip shell wrapper (pwsh.exe -Command / bash -c)
+                        if (
+                            len(cmd_parts) >= 3
+                            and cmd_parts[1].lower() in ("-command", "-c", "--command")
+                        ):
+                            cmd_text = " ".join(cmd_parts[2:])
+                        else:
+                            cmd_text = " ".join(cmd_parts)
+                    else:
+                        cmd_text = str(cmd)
+                    status = str(item.get("status") or "")
+                    prefix = "执行命令" if status == "completed" else "命令失败"
+                    return Activity(
+                        "tool call",
+                        f"{prefix}: {compact_text(cmd_text, 140)}",
+                        timestamp,
+                    )
             if record_type == "response_item" and payload_type == "message":
                 if is_turn_aborted_message(payload):
                     continue
@@ -2048,6 +2094,10 @@ class JsonlSessionParser:
                 return Activity(
                     "assistant", compact_text(message_text(payload), 160), timestamp
                 )
+            if record_type == "response_item" and payload_type == "reasoning":
+                return Activity("reasoning", "正在思考", timestamp)
+            if record_type == "event_msg" and payload_type == "task_started":
+                return Activity("reasoning", "正在思考", timestamp)
             if record_type == "event_msg" and payload_type == "token_count":
                 return Activity("confirmed", "received token_count", timestamp)
         return Activity("idle", "no activity", None)

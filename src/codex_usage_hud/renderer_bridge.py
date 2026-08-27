@@ -49,6 +49,87 @@ def _observation_key_sequence(observation_key: object | None) -> int:
         return 0
 
 
+_COMPOSER_SEND_REASONS = frozenset({
+    "composer-send",
+    "composer-enter",
+    "composer-submit",
+})
+
+_SESSION_ID_PREFIXES = frozenset({"local", "remote", "thread", "session", "conversation"})
+
+
+def _normalize_session_id(value: object) -> str:
+    """Strip renderer transport prefix (local:/remote:/thread:/etc.) for comparison."""
+    text = str(value or "").strip()
+    if ":" in text:
+        prefix, suffix = text.split(":", 1)
+        if prefix.lower() in _SESSION_ID_PREFIXES:
+            return suffix.strip()
+    return text
+
+
+def _invalidate_cache_on_composer_send(
+    tracker: object,
+    payload: Mapping[str, object],
+) -> None:
+    """Invalidate the thread-id→path cache on a composer send, but only when
+    the session identity may actually have changed.
+
+    The in-page script reports composer-send / composer-enter / composer-submit
+    within ~32ms of the user action. For a genuine new session, Codex's state
+    DB may not yet contain the rollout_path, so the first lookup caches a
+    negative result for 2s. Invalidating the cache lets the subsequent
+    state-db write (watched as a session-map file event) be re-queried
+    immediately.
+
+    However, sending a message in an *existing* session keeps the same
+    session_id. Unconditionally invalidating the cache there causes a transient
+    None lookup that briefly overwrites the already-resolved path with pending
+    state — the bubble flashes out then back in, or stays gone for the full
+    follow-up backoff. Guard against that by comparing the incoming session
+    identity against the tracker's current identity, normalizing both to the
+    canonical (prefix-stripped) form because payload.sessionId is canonical
+    while tracker.renderer_session_id retains the raw transport prefix.
+    """
+    reason = str(payload.get("reason") or "").strip()
+    if reason not in _COMPOSER_SEND_REASONS:
+        return
+    is_new = bool(payload.get("newSession") or payload.get("new_session"))
+    is_pending = bool(payload.get("pendingSession") or payload.get("pending_session"))
+    if is_new or is_pending:
+        _do_invalidate_mapping_cache(tracker)
+        return
+    payload_session_id = _normalize_session_id(
+        payload.get("sessionId")
+        or payload.get("session_id")
+        or payload.get("rendererSessionId")
+        or payload.get("renderer_session_id")
+        or ""
+    )
+    # latest_session_id is already canonical; renderer_session_id is raw-prefixed.
+    # Normalize both to be safe.
+    current_session_id = _normalize_session_id(
+        getattr(tracker, "latest_session_id", "")
+        or getattr(tracker, "renderer_session_id", "")
+        or ""
+    )
+    # Same session_id as the already-resolved current session → this is a
+    # message send in an existing conversation, not a session switch. Keep the
+    # cache intact to avoid the flash-out / long-disappear regression.
+    if current_session_id and payload_session_id == current_session_id:
+        return
+    _do_invalidate_mapping_cache(tracker)
+
+
+def _do_invalidate_mapping_cache(tracker: object) -> None:
+    invalidate = getattr(tracker, "invalidate_mapping_cache", None)
+    if callable(invalidate):
+        try:
+            invalidate()
+        except Exception:
+            pass
+
+
 class RuntimeSignalsPort(Protocol):
     def enqueue_command(self, command: dict[str, object]) -> None: ...
 
@@ -323,6 +404,13 @@ class RendererBridgeCallbacks:
                 self._active_session_highest_observation_seq = incoming_sequence
             self._active_session_observation_generation += 1
             observation_generation = self._active_session_observation_generation
+        # A composer send (button click / Enter / form submit) means Codex is
+        # starting a new task or session. Invalidate the thread-id→path cache
+        # immediately so the first state-db write after send is re-queried
+        # instead of being blocked by the 2s negative-cache from the pre-send
+        # probe. This is event-driven (triggered by the in-page send listener),
+        # not polling.
+        _invalidate_cache_on_composer_send(tracker, payload)
         changed = observer(**observer_kwargs)
         if not bool(payload.get("newSession") or payload.get("new_session")):
             channel_available = bool(

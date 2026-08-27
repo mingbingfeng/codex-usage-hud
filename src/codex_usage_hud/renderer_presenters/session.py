@@ -92,6 +92,7 @@ def activity_label(value: str) -> str:
         "tool output": "工具返回",
         "assistant": "助手输出",
         "confirmed": "Token确认",
+        "reasoning": "思考中",
     }
     return labels.get(value, value)
 

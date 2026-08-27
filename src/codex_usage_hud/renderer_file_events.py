@@ -9,7 +9,10 @@ import threading
 
 from .platforms.file_watcher import FileChangeWatcher, FileWatchSpec
 
-DEFAULT_DEBOUNCE_SECONDS = 0.75
+# Debounce for non-immediate wake reasons (sessions-root, settings, sse-log).
+# 0.2s balances new-session-file detection latency against coalescing frequent
+# tree/watch writes. The loop's own wait delay further throttles processing.
+DEFAULT_DEBOUNCE_SECONDS = 0.2
 DEFAULT_FALLBACK_POLL_SECONDS = 5.0
 
 
@@ -39,6 +42,12 @@ def renderer_file_watch_specs(
         path = getattr(context, attribute, None)
         if path is not None:
             specs.append(FileWatchSpec.file(Path(path), "session-map"))
+    sqlite_log_path = getattr(context, "sqlite_log_path", None)
+    if sqlite_log_path is not None:
+        # SSE/OTel log DB carries response.in_progress and streaming deltas.
+        # Watched with the default debounce (not immediate) to coalesce the
+        # high-frequency WAL writes during token streaming.
+        specs.append(FileWatchSpec.file(Path(sqlite_log_path), "sse-log"))
     sessions_root = getattr(context, "sessions_root", None)
     if sessions_root is not None and not skip_recursive_session_tree_watch():
         root = Path(sessions_root)
@@ -171,7 +180,7 @@ class RendererFileEventSource:
         session = (
             session_path_key(sorted(paths, key=session_path_key)[0]) if paths else None
         )
-        if reasons.intersection({"session", "sessions-root"}):
+        if reasons.intersection({"session", "sessions-root", "sse-log"}):
             publish("session_file_changed", source="file_watcher", session=session, context=context)
         if "settings" in reasons:
             publish("settings_changed", source="file_watcher", context=context)
