@@ -148,6 +148,8 @@ class RendererTickSampler:
         session_map_changed = "session-map" in reasons
         if session_map_changed:
             self._rematerialize_mapping()
+        if "sessions-root" in reasons:
+            self._heal_pending_session_from_file()
         command = self.ports.take_command()
         runtime_events = self.ports.drain_events()
         active_session_only = self._active_session_only_wake(
@@ -339,6 +341,25 @@ class RendererTickSampler:
                     setter()
         except Exception as exc:
             _LOGGER.debug("renderer_mapping_rematerialize_failed error=%s", exc)
+
+    def _heal_pending_session_from_file(self) -> None:
+        """When a new session JSONL appears on disk but the renderer DOM has
+        not yet exposed the canonical thread id, extract the id from the
+        filename and feed it into the tracker so the bubble appears without
+        waiting for the DOM to catch up.
+        """
+        tracker = self.ports.tracker()
+        heal = getattr(tracker, "heal_pending_from_filesystem", None)
+        if not callable(heal):
+            return
+        try:
+            if heal():
+                self.state.activity_wake_pending = ""
+                setter = getattr(self.ports.bridge_wake_event, "set", None)
+                if callable(setter):
+                    setter()
+        except Exception as exc:
+            _LOGGER.debug("renderer_mapping_filesystem_heal_failed error=%s", exc)
 
     def _publish(
         self,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sqlite3
 import subprocess
 import sys
@@ -182,6 +183,22 @@ def find_session_file(session_id: str, sessions_root: Path) -> Path | None:
             reverse=True,
         )
     return matches[0] if matches else None
+
+
+_THREAD_ID_FILENAME_RE = re.compile(
+    r"rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})",
+    re.IGNORECASE,
+)
+
+
+def _thread_id_from_session_filename(filename: str) -> str:
+    """Extract the canonical thread id from a rollout JSONL filename.
+
+    Filename format: ``rollout-YYYY-MM-DDTHH-MM-SS-<thread_uuid>_<turn_uuid>.jsonl``
+    Returns the thread uuid or an empty string if the filename does not match.
+    """
+    match = _THREAD_ID_FILENAME_RE.search(filename or "")
+    return match.group(1) if match else ""
 
 
 class RealtimeSessionWatcher:
@@ -1667,6 +1684,89 @@ class ActiveSessionTracker:
             confirmed,
         )
         return confirmed or changed
+
+    def heal_pending_from_filesystem(self) -> bool:
+        """Resolve a stuck new-session / pending mapping from the newest
+        session file on disk.
+
+        When the user sends a message in a brand-new conversation, Codex
+        creates the rollout JSONL within ~100-500ms but the canonical
+        thread id may not appear in the renderer DOM for several seconds.
+        The sessions-root file watcher fires on the new file; this method
+        extracts the thread id directly from the filename (which embeds the
+        UUID right after the creation timestamp) and feeds it into
+        observe_conversation_ref, so the bubble can appear without waiting
+        for the DOM to expose the canonical id.
+
+        Returns True when the mapping advanced to a real path.
+        """
+        if not self.enabled:
+            return False
+        with self._lock:
+            follow_state = self._follow_state
+            renderer_session_id = self._renderer_session_id
+            renderer_path = self._renderer_path
+            stuck_ms = self.follow_stuck_elapsed_ms
+        if follow_state not in ("new-session", "pending"):
+            return False
+        if renderer_session_id and renderer_path is not None:
+            return False
+        # Only heal within a reasonable window after the send event.
+        if stuck_ms > 30_000:
+            return False
+        try:
+            now = time.time()
+            cutoff = now - 15.0
+            candidates: list[tuple[float, Path]] = []
+            for root in _session_search_roots(self.sessions_root):
+                if not root.exists():
+                    continue
+                try:
+                    for path in root.rglob("*.jsonl"):
+                        try:
+                            mtime = path.stat().st_mtime
+                        except OSError:
+                            continue
+                        if mtime >= cutoff:
+                            candidates.append((mtime, path))
+                except OSError:
+                    continue
+            if not candidates:
+                return False
+            candidates.sort(key=lambda item: item[0], reverse=True)
+            newest_path = candidates[0][1]
+            thread_id = _thread_id_from_session_filename(newest_path.name)
+            if not thread_id:
+                return False
+            # Don't heal if the newest file is already the current one.
+            with self._lock:
+                if (
+                    self._renderer_path is not None
+                    and self._renderer_path == newest_path
+                ):
+                    return False
+            changed = self.observe_conversation_ref(
+                thread_id,
+                "",
+                source="filesystem-heal",
+                renderer_session_id=thread_id,
+            )
+            with self._lock:
+                confirmed = (
+                    self._renderer_path is not None
+                    and self._follow_state == "confirmed"
+                )
+            if confirmed or changed:
+                _LOGGER.info(
+                    "RENDERER_MAPPING_FILESYSTEM_HEAL thread_id=%s path=%s stuck_ms=%s",
+                    compact_text(thread_id, 64),
+                    newest_path,
+                    stuck_ms,
+                )
+                return True
+        except Exception as exc:
+            _LOGGER.debug("renderer_mapping_filesystem_heal_failed error=%s", exc)
+        return False
 
     def path_from_thread_id(self, thread_id: str) -> Path | None:
         """Resolve a known thread id to a local rollout JSONL path."""
