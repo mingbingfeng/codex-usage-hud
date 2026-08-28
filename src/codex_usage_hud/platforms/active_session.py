@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from .base import BasePlatform
+from ..process_environment import external_process_environment
 
 _LOGGER = logging.getLogger("codex_usage_hud.active_session")
 _LOGGER.addHandler(logging.NullHandler())
@@ -296,6 +297,7 @@ class RealtimeSessionWatcher:
                 text=True,
                 encoding="utf-8",
                 errors="replace",
+                env=external_process_environment(),
                 **kwargs,
             )
         except OSError:

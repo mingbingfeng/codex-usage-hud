@@ -16,6 +16,8 @@ from typing import Any, Callable, Mapping
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from .process_environment import external_process_environment
+
 DEFAULT_REPOSITORY = "fengbuming/codex-usage-hud"
 RELEASES_URL = f"https://github.com/{DEFAULT_REPOSITORY}/releases"
 LATEST_RELEASE_API_URL = (
@@ -581,6 +583,7 @@ def launch_installer(path: Path) -> None:
         [str(installer)],
         cwd=str(installer.parent),
         close_fds=True,
+        env=external_process_environment(),
         creationflags=getattr(subprocess, "DETACHED_PROCESS", 0)
         | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
     )

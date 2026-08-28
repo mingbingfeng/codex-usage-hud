@@ -34,6 +34,7 @@ from .config import (
 from .core import WorkStatusItem
 from .platforms.codex_theme import CodexThemeProbe
 from .platforms.file_watcher import FileChangeWatcher, FileWatchSpec
+from .process_environment import internal_process_environment
 
 WORK_OVERLAY_COMMAND_FALLBACK_POLL_SECONDS = 5.0
 WORK_OVERLAY_SWITCH_COMPLETED_HOLD_SECONDS = 1.4
@@ -813,6 +814,9 @@ class DesktopWorkOverlay:
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                # This is the same frozen executable, so its PyInstaller
+                # parent/child environment must remain intact.
+                env=internal_process_environment(),
             )
             started_at = self._clock.time()
             self._helper_started_at = started_at

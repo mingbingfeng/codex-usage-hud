@@ -18,6 +18,11 @@ from typing import TypeAlias
 
 from .codex_cli_launcher import _windows_registry_environment
 from .instance_lock import process_exists, terminate_process
+from .process_environment import (
+    PYINSTALLER_INTERNAL_ENV_PREFIX,
+    external_environment_scope,
+    external_process_environment,
+)
 from .platforms.cdp_probe import cdp_port_from_env
 from .runtime_paths import (
     CODEX_APP_DEFAULT_ID,
@@ -178,14 +183,15 @@ def _shell_execute_open(
             ctypes.c_int,
         ]
         shell32.ShellExecuteW.restype = wintypes.HINSTANCE
-        result = shell32.ShellExecuteW(
-            None,
-            verb,
-            str(target),
-            parameters or None,
-            str(working_dir) if working_dir else None,
-            1,
-        )
+        with external_environment_scope():
+            result = shell32.ShellExecuteW(
+                None,
+                verb,
+                str(target),
+                parameters or None,
+                str(working_dir) if working_dir else None,
+                1,
+            )
         return int(result or 0) > 32
     except Exception as exc:
         _LOGGER.info(
@@ -194,7 +200,36 @@ def _shell_execute_open(
             target,
             exc,
         )
+    return False
+
+
+def _direct_windows_executable_open(
+    target: str | Path,
+    *,
+    parameters: str = "",
+    working_dir: str | Path | None = None,
+) -> bool:
+    """Open a verified executable with an explicit clean environment.
+
+    ``ShellExecuteW`` has no environment-block parameter.  Use CreateProcess
+    through ``subprocess`` for the normal executable-candidate path and keep
+    ShellExecute for shell targets (AppX/shortcuts) where it is required.
+    """
+    if not sys.platform.startswith("win"):
         return False
+    executable = Path(str(target))
+    try:
+        if not executable.is_file():
+            return False
+        args = shlex.split(str(parameters or ""), posix=False)
+        subprocess.Popen(
+            [str(executable), *args],
+            cwd=str(working_dir) if working_dir else None,
+            env=external_process_environment(),
+        )
+    except (OSError, ValueError):
+        return False
+    return True
 
 
 def _shell_execute_open_with_elevation_fallback(
@@ -203,6 +238,12 @@ def _shell_execute_open_with_elevation_fallback(
     parameters: str = "",
     working_dir: str | Path | None = None,
 ) -> bool:
+    if _direct_windows_executable_open(
+        target,
+        parameters=parameters,
+        working_dir=working_dir,
+    ):
+        return True
     if _shell_execute_open(target, parameters=parameters, working_dir=working_dir):
         return True
     if _shell_execute_open(
@@ -232,6 +273,8 @@ def _catch_up_process_environment_from_windows_registry() -> None:
     merged = 0
     for name, value in _windows_registry_environment().items():
         normalized_name = str(name)
+        if normalized_name.casefold().startswith(PYINSTALLER_INTERNAL_ENV_PREFIX):
+            continue
         if normalized_name.casefold() in existing_names:
             continue
         os.environ[normalized_name] = str(value)
@@ -293,6 +336,7 @@ def launch_macos_codex_app(
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            env=external_process_environment(),
         )
     except Exception as exc:
         _LOGGER.info("codex_app_macos_launch_failed target=%s error=%s", target, exc)

@@ -41,6 +41,10 @@ from .config import (
 )
 from .core.background_usage import valid_background_event_id
 from .provider_cleanup import delete_provider_for_context
+from .process_environment import (
+    external_environment_scope,
+    external_process_environment,
+)
 from .desktop_overlay import DesktopWorkOverlay
 from .desktop_overlay_setup import (
     _desktop_overlay_dependency_status,
@@ -416,12 +420,13 @@ def _pricing_file_path(filename: object) -> Path:
 
 def _open_system_path(path: Path) -> None:
     if sys.platform.startswith("win"):
-        os.startfile(str(path))  # type: ignore[attr-defined]
+        with external_environment_scope():
+            os.startfile(str(path))  # type: ignore[attr-defined]
         return
     if sys.platform == "darwin":
-        subprocess.Popen(["open", str(path)])
+        subprocess.Popen(["open", str(path)], env=external_process_environment())
         return
-    subprocess.Popen(["xdg-open", str(path)])
+    subprocess.Popen(["xdg-open", str(path)], env=external_process_environment())
 
 
 def _sync_imported_current_prices(

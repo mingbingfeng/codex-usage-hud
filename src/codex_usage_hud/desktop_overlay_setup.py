@@ -15,6 +15,7 @@ from typing import Any
 
 from .config import DEFAULT_WORK_OVERLAY_MAX_ITEMS
 from .instance_lock import process_exists as _process_exists
+from .process_environment import external_process_environment
 from .runtime_paths import hud_runtime_dir
 
 
@@ -151,6 +152,7 @@ def _start_desktop_overlay_install() -> bool:
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            env=external_process_environment(),
         )
     except Exception:
         _DESKTOP_OVERLAY_INSTALL_PROCESS = None

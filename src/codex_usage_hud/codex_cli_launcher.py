@@ -17,6 +17,11 @@ import subprocess
 import sys
 import uuid
 
+from .process_environment import (
+    PYINSTALLER_INTERNAL_ENV_PREFIX,
+    external_process_environment,
+)
+
 
 POWERSHELL_INSTALL_URL = (
     "https://learn.microsoft.com/powershell/scripting/install/installing-powershell-on-windows"
@@ -89,7 +94,7 @@ def _launch_environment(
     platform_name: str | None = None,
     codex_home: str | Path | None = None,
 ) -> dict[str, str]:
-    environment = os.environ.copy()
+    environment = external_process_environment()
     if codex_home is not None:
         home = _normalise_existing_path(codex_home)
         if home is None:
@@ -104,6 +109,8 @@ def _launch_environment(
     existing_names = {str(name).casefold() for name in environment}
     for name, value in _windows_registry_environment().items():
         normalized_name = str(name)
+        if normalized_name.casefold().startswith(PYINSTALLER_INTERNAL_ENV_PREFIX):
+            continue
         if normalized_name.casefold() == "path":
             current_name = next(
                 (item for item in environment if str(item).casefold() == "path"),
