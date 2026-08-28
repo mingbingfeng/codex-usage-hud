@@ -160,6 +160,17 @@ def activity_trail(
         active=snapshot.request.status == "running"
         and snapshot.request.completed_at is None,
     )
+    for step in getattr(snapshot, "activity_steps", []) or []:
+        status = str(getattr(step, "status", "") or "").strip().lower()
+        detail = str(getattr(step, "detail", "") or "").strip()
+        if status == "failed":
+            detail = f"失败：{detail}" if detail else "命令执行失败"
+        add(
+            getattr(step, "timestamp", None),
+            str(getattr(step, "title", "执行命令") or "执行命令"),
+            detail,
+            active=status == "running",
+        )
     call = snapshot.slow.slowest_tool_call
     if call is not None:
         duration = context.duration_text(_running_duration(call.start, call.end, now))

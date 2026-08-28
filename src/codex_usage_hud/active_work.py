@@ -225,6 +225,7 @@ def _work_activity_label(value: str) -> str:
         "tool output": "工具返回",
         "assistant": "助手输出",
         "confirmed": "Token确认",
+        "reasoning": "思考中",
     }
     return labels.get(value, value)
 
@@ -274,7 +275,22 @@ def _tool_status_text(detail: str) -> str:
     lower_name = name.lower()
     target = _extract_tool_file_target(args)
     if lower_name in {"exec", "unified_exec", "functions.exec"}:
-        return "正在执行命令"
+        command = ""
+        try:
+            parsed_args = json.loads(args) if args else {}
+        except json.JSONDecodeError:
+            parsed_args = {}
+        if isinstance(parsed_args, Mapping):
+            command_value = parsed_args.get("command") or parsed_args.get("cmd")
+            if isinstance(command_value, (list, tuple)):
+                command = " ".join(str(part) for part in command_value if part)
+            else:
+                command = str(command_value or "").strip()
+        return (
+            f"正在运行 {_compact_work_text(command, 52)}"
+            if command
+            else "正在执行命令"
+        )
     if "apply_patch" in lower_name or "edit" in lower_name:
         return f"正在编辑 {target}" if target else "正在编辑文件"
     if "shell" in lower_name:
@@ -611,7 +627,6 @@ def _work_item_model_startup_timed_out(
         or snapshot.activity.kind != "user"
     ):
         return False
-    draft_text = str(getattr(snapshot, "composer_draft", "") or "").strip()
     draft_updated_at_ms = int(
         getattr(snapshot, "composer_draft_updated_at_ms", 0) or 0
     )
@@ -620,7 +635,7 @@ def _work_item_model_startup_timed_out(
         try:
             draft_updated_at = datetime.fromtimestamp(
                 draft_updated_at_ms / 1000.0,
-                tz=current_time.tzinfo,
+                tz=now.tzinfo,
             )
         except (OverflowError, OSError, ValueError):
             draft_updated_at = None

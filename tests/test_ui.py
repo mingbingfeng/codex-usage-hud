@@ -4064,6 +4064,23 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertEqual(sending_items[0].status, "running")
         self.assertEqual(sending_items[0].status_text, "正在发送请求")
 
+    def test_model_startup_timeout_uses_provisional_draft_timestamp(self) -> None:
+        now = datetime(2026, 8, 28, 10, 0, tzinfo=timezone.utc)
+        snapshot = ParsedSession(
+            status="parsed",
+            selection_source="renderer-pending-session",
+            composer_draft="Run a long task",
+            composer_draft_updated_at_ms=int(
+                (now - timedelta(seconds=91)).timestamp() * 1000
+            ),
+            request=RequestTokens(status="running"),
+            activity=Activity(kind="user", detail="Run a long task", timestamp=now),
+        )
+
+        timed_out = active_work._work_item_model_startup_timed_out(snapshot, now=now)
+
+        self.assertTrue(timed_out)
+
     def test_work_overlay_formats_completed_command_activity(self) -> None:
         self.assertEqual(
             active_work._tool_status_text("执行命令: git status --short"),

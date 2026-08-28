@@ -18,6 +18,7 @@ from .session_cleanup import (
 )
 from .parser import (
     Activity,
+    ActivityStep,
     ConfirmedTokens,
     CostEstimator,
     EstimateTokens,
@@ -40,6 +41,7 @@ from .parser import (
 
 __all__ = [
     "Activity",
+    "ActivityStep",
     "AttachmentEstimate",
     "BaseEstimate",
     "CodexActivityMonitor",

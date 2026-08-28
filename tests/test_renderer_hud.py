@@ -1778,7 +1778,13 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn('scheduleActiveSessionSendFollowup("composer-enter")', script)
         self.assertIn('activeSessionScope.listen(document, "submit", submit, true)', script)
         self.assertIn('activeSessionScope.listen(document, "keydown", keydown, true)', script)
-        self.assertIn("const delays = [32, 120, 320, 800, 1600, 3200, 5600, 9000]", script)
+        self.assertIn("keepFollowup = report();", script)
+        self.assertIn("const delays = keepFollowup", script)
+        self.assertIn(
+            "? [32, 120, 320, 800, 1600, 3200, 5600, 9000]",
+            script,
+        )
+        self.assertIn(': [32, 120, 320];', script)
 
     def test_renderer_active_session_filters_out_folder_rows(self) -> None:
         script = renderer_hud.RENDERER_HUD_SCRIPT
@@ -1811,12 +1817,18 @@ class RendererHudPayloadTests(unittest.TestCase):
             "function scheduleActiveSessionSendFollowup(reason = \"composer-send\", expectedSessionId = \"\")",
             script,
         )
-        self.assertIn("const delays = [32, 120, 320, 800, 1600, 3200, 5600, 9000]", script)
+        self.assertIn("keepFollowup = report();", script)
+        self.assertIn("const delays = keepFollowup", script)
         self.assertIn("delays.map((ms) => ctx.lifecycle.timeout(", script)
         self.assertIn(
             "function activeSessionComposerSubmitButton(button)",
             script,
         )
+        self.assertIn(
+            'button.getAttribute("type")?.toLowerCase() === "submit"',
+            script,
+        )
+        self.assertIn('button.getAttribute("aria-disabled") === "true"', script)
         self.assertIn(
             'scheduleActiveSessionSendFollowup("composer-enter")',
             script,

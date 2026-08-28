@@ -98,6 +98,10 @@ class RendererLoopExecutorPorts:
     # is only cleared by the sampler, which the quiesce branch never runs, so a
     # set event would make wait() return immediately and busy-spin all lock.
     quiesce_wait: Callable[[float], object] | None = None
+    # Keep the independent desktop bubble current while CDP is in backoff.
+    apply_local_refresh: Callable[[RendererTickInputs], object | None] = (
+        lambda _inputs: None
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -532,6 +536,44 @@ class RendererRefreshExecutor:
             self._record_failure()
         return fresh
 
+    def apply_local(self, inputs: RendererTickInputs) -> ParsedSession | None:
+        """Refresh local session/overlay state without issuing CDP traffic.
+
+        Renderer update backoff protects an unresponsive page, but must not
+        freeze the independent desktop work bubble. The current JSONL is cheap
+        to preview and the current item can be projected from memory while the
+        normal CDP retry remains pending.
+        """
+        latest = self.state.latest_snapshot
+        kwargs: dict[str, object] = {
+            "refresh_budget_aggregate": False,
+            "refresh_budget_paths": tuple(
+                Path(path)
+                for path in inputs.file_change_paths
+                if Path(path).suffix.lower() == ".jsonl"
+            ),
+            "refresh_active_work_items": latest is None,
+            "refresh_current_session_usage": False,
+            "refresh_visible_app_error": False,
+        }
+        if latest is not None:
+            kwargs["reuse_budget_from"] = latest
+        try:
+            fresh = self.ports.build_snapshot(kwargs)
+        except Exception:
+            _LOGGER.debug("renderer_local_refresh_failed", exc_info=True)
+            return latest
+        if latest is not None and self.ports.selection_is_stale(fresh):
+            return latest
+        if latest is not None:
+            fresh.active_work_items = self.ports.refresh_current_work(
+                list(latest.active_work_items),
+                fresh,
+            )
+        self.state.latest_snapshot = fresh
+        self.ports.publish_overlay(fresh)
+        return fresh
+
     def _reset_request_rows_page_for_session(self, snapshot: ParsedSession) -> None:
         session_id = str(
             snapshot.renderer_session_id or snapshot.session_id or ""
@@ -750,6 +792,14 @@ class RendererEventLoop:
                     inputs.started + max(0.05, float(remaining or 0.0)),
                 )
                 snapshot = self.ports.current_snapshot()
+                if (
+                    inputs.file_change_reasons
+                    or inputs.active_session_wakeup
+                    or inputs.event_refresh_request.active_session
+                ):
+                    local_snapshot = self.ports.apply_local_refresh(inputs)
+                    if local_snapshot is not None:
+                        snapshot = local_snapshot
             elif snapshot_requested:
                 snapshot = self.ports.apply_refresh(inputs, force_fast)
                 if self.state.failures:

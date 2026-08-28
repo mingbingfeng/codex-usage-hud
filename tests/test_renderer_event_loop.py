@@ -347,6 +347,112 @@ def test_event_loop_idle_iteration_does_not_build_scan_or_push() -> None:
     }
 
 
+def test_event_loop_refreshes_local_overlay_during_cdp_backoff_for_file_event() -> None:
+    class StopLoop(Exception):
+        pass
+
+    latest = SimpleNamespace(name="stale")
+    local = SimpleNamespace(name="local")
+    state = RendererLoopState(latest_snapshot=latest)
+    inputs = RendererTickInputs(
+        started=1.0,
+        update_state={},
+        bridge_wakeup=False,
+        active_session_wakeup=False,
+        file_change_reasons={"session"},
+        file_change_paths={Path("session.jsonl")},
+        command=None,
+        budget_window_keys=("day", "week"),
+        runtime_events=[],
+        event_refresh_request=RefreshPlan(snapshot=True),
+    )
+    calls: list[tuple[str, object]] = []
+
+    loop = RendererEventLoop(
+        state,
+        RendererLoopExecutorPorts(
+            sample_inputs=lambda: inputs,
+            apply_inputs=lambda value: None,
+            exit_requested=lambda: False,
+            restart_requested=lambda: False,
+            restart_result=lambda: 10,
+            daemon_tick=lambda: None,
+            compute_force_fast=lambda value: False,
+            apply_refresh=lambda value, force_fast: (_ for _ in ()).throw(
+                AssertionError("CDP refresh must remain deferred during backoff")
+            ),
+            current_snapshot=lambda: latest,
+            apply_domain_update=lambda value: False,
+            keep_alive=lambda: calls.append(("keepalive", latest)),
+            after_iteration=lambda snapshot: calls.append(("after", snapshot)),
+            compute_wait_delay=lambda snapshot, value, force_fast: 0.1,
+            wait=lambda delay: (_ for _ in ()).throw(StopLoop()),
+            update_gate=lambda: (False, "cdp-backoff", 0.5),
+            apply_local_refresh=lambda value: calls.append(("local", value)) or local,
+        ),
+    )
+
+    with pytest.raises(StopLoop):
+        loop.run()
+
+    assert state.pending_refresh_plan.snapshot
+    assert calls == [("local", inputs), ("keepalive", latest), ("after", local)]
+
+
+def test_refresh_executor_local_refresh_updates_overlay_without_cdp() -> None:
+    latest = ParsedSession(session_id="old-session")
+    latest.active_work_items = ["old-item"]
+    fresh = ParsedSession(session_id="new-session")
+    calls: dict[str, object] = {}
+    state = RendererLoopState(latest_snapshot=latest)
+
+    def build_snapshot(kwargs: dict[str, object]) -> ParsedSession:
+        calls["kwargs"] = kwargs
+        return fresh
+
+    def refresh_current_work(
+        items: list[object], snapshot: ParsedSession
+    ) -> list[object]:
+        calls["current_work"] = (items, snapshot)
+        return ["new-item"]
+
+    ports = SimpleNamespace(
+        build_snapshot=build_snapshot,
+        selection_is_stale=lambda snapshot: False,
+        refresh_current_work=refresh_current_work,
+        publish_overlay=lambda snapshot: calls.setdefault("overlay", snapshot),
+    )
+    executor = RendererRefreshExecutor(state, ports)
+    inputs = RendererTickInputs(
+        started=0.0,
+        update_state={},
+        bridge_wakeup=False,
+        active_session_wakeup=False,
+        file_change_reasons={"session"},
+        file_change_paths={Path("changed.jsonl"), Path("settings.json")},
+        command=None,
+        budget_window_keys=("day", "week"),
+        runtime_events=[],
+        event_refresh_request=RefreshPlan(),
+    )
+
+    result = executor.apply_local(inputs)
+
+    assert result is fresh
+    assert state.latest_snapshot is fresh
+    assert calls["kwargs"] == {
+        "refresh_budget_aggregate": False,
+        "refresh_budget_paths": (Path("changed.jsonl"),),
+        "refresh_active_work_items": False,
+        "refresh_current_session_usage": False,
+        "refresh_visible_app_error": False,
+        "reuse_budget_from": latest,
+    }
+    assert calls["current_work"] == (["old-item"], fresh)
+    assert fresh.active_work_items == ["new-item"]
+    assert calls["overlay"] is fresh
+
+
 def _minimal_inputs() -> RendererTickInputs:
     return RendererTickInputs(
         started=0.0,

@@ -112,6 +112,71 @@ class JsonlSessionParserTests(unittest.TestCase):
         self.assertEqual(activity.kind, "tool call")
         self.assertEqual(activity.detail, "执行命令: git status")
 
+    def test_activity_steps_closes_unique_exec_without_merging_other_tools(self) -> None:
+        parser = JsonlSessionParser()
+        records = [
+            record("2026-05-28T00:00:00Z", "event_msg", {"type": "task_started"}),
+            record(
+                "2026-05-28T00:00:01Z",
+                "response_item",
+                {
+                    "type": "function_call",
+                    "name": "wait",
+                    "call_id": "wait-call",
+                    "arguments": "{}",
+                },
+            ),
+            record(
+                "2026-05-28T00:00:02Z",
+                "response_item",
+                {
+                    "type": "custom_tool_call",
+                    "name": "exec",
+                    "call_id": "exec-call",
+                    "input": json.dumps({"cmd": "git status --short"}),
+                },
+            ),
+            record(
+                "2026-05-28T00:00:03Z",
+                "event_msg",
+                {
+                    "type": "item_completed",
+                    "item": {
+                        "id": "desktop-command-id",
+                        "type": "CommandExecution",
+                        "command": [
+                            "pwsh.exe",
+                            "-NoProfile",
+                            "-Command",
+                            "git status --short",
+                        ],
+                        "status": "failed",
+                    },
+                },
+            ),
+            record(
+                "2026-05-28T00:00:04Z",
+                "response_item",
+                {
+                    "type": "custom_tool_call_output",
+                    "call_id": "exec-call",
+                    "output": "exit code: 1",
+                },
+            ),
+        ]
+        for index, item in enumerate(records, 1):
+            item["_line"] = index
+            item["_dt"] = parse_timestamp(item["timestamp"])
+
+        steps = parser.activity_steps(records, task_started_index=0)
+
+        self.assertEqual(len(steps), 2)
+        self.assertEqual(steps[0].title, "调用工具")
+        self.assertEqual(steps[0].status, "running")
+        self.assertEqual(steps[1].title, "命令失败")
+        self.assertEqual(steps[1].status, "failed")
+        self.assertIn("git status --short", steps[1].detail)
+
     def test_session_meta_exposes_provider_and_cli_client_kind(self) -> None:
         parser = JsonlSessionParser()
         snapshot = parser.parse_records(

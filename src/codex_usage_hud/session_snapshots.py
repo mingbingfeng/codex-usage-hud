@@ -107,6 +107,9 @@ def clone_cached_snapshot(snapshot: ParsedSession) -> ParsedSession:
     cloned.request = copy.copy(snapshot.request)
     cloned.budget_warnings = list(snapshot.budget_warnings)
     cloned.active_work_items = list(snapshot.active_work_items)
+    cloned.activity_steps = [
+        copy.copy(step) for step in getattr(snapshot, "activity_steps", [])
+    ]
     cloned.follow_timing = dict(snapshot.follow_timing)
     cloned.match_candidates = [dict(item) for item in snapshot.match_candidates]
     return cloned

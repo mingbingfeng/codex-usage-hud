@@ -103,6 +103,129 @@ def reasoning_text(payload: Mapping[str, Any]) -> str:
     return " ".join(part for part in parts if part)
 
 
+def _tool_argument_value(payload: Mapping[str, Any]) -> Any:
+    """Return tool arguments across the legacy and current JSONL shapes."""
+    for key in ("arguments", "input", "parameters"):
+        if key in payload and payload.get(key) is not None:
+            return payload.get(key)
+    return None
+
+
+def _mapping_from_tool_arguments(value: Any) -> Mapping[str, Any] | None:
+    if isinstance(value, Mapping):
+        return value
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    return parsed if isinstance(parsed, Mapping) else None
+
+
+def tool_call_detail(payload: Mapping[str, Any]) -> str:
+    """Normalize function/custom tool calls for activity and status display."""
+    name = str(payload.get("name") or payload.get("tool_name") or "工具调用").strip()
+    value = _tool_argument_value(payload)
+    if value is None:
+        return name
+    if isinstance(value, str):
+        argument_text = value.strip()
+    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        argument_text = json.dumps(list(value), ensure_ascii=False, separators=(",", ":"))
+    else:
+        try:
+            argument_text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        except (TypeError, ValueError):
+            argument_text = str(value)
+    return f"{name} {compact_text(argument_text, 140)}".strip()
+
+
+def command_execution_text(item: Mapping[str, Any]) -> str:
+    """Extract a readable command from a CommandExecution item."""
+    value = item.get("command") or item.get("cmd") or ""
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        parts = [str(part) for part in value if part]
+        if (
+            len(parts) >= 3
+            and parts[1].casefold() in {"-command", "-c", "--command"}
+        ):
+            parts = parts[2:]
+        value = " ".join(parts)
+    return compact_text(value, 140)
+
+
+def tool_command_text(payload: Mapping[str, Any]) -> str:
+    """Extract a command from function/custom tool arguments when present."""
+    value = _tool_argument_value(payload)
+    mapped = _mapping_from_tool_arguments(value)
+    if mapped is not None:
+        value = mapped.get("command") or mapped.get("cmd") or value
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        value = " ".join(str(part) for part in value if part)
+    return compact_text(value, 140)
+
+
+def _activity_from_record(record: Mapping[str, Any]) -> "Activity | None":
+    payload = record.get("payload") or {}
+    if not isinstance(payload, Mapping):
+        return None
+    record_type = record.get("type")
+    payload_type = payload.get("type")
+    timestamp = record.get("_dt")
+
+    if record_type == "event_msg" and payload_type == "user_message":
+        return Activity("user", compact_text(payload.get("message"), 160), timestamp)
+    if record_type == "event_msg" and payload_type == "agent_message":
+        return Activity("agent", compact_text(payload.get("message"), 160), timestamp)
+    if record_type == "response_item" and payload_type in {
+        "function_call",
+        "custom_tool_call",
+    }:
+        return Activity("tool call", tool_call_detail(payload), timestamp)
+    if record_type == "response_item" and payload_type in {
+        "function_call_output",
+        "custom_tool_call_output",
+    }:
+        call_id = str(payload.get("call_id") or "").strip()
+        output = compact_text(payload.get("output"), 140)
+        return Activity("tool output", f"{call_id} {output}".strip(), timestamp)
+    if record_type == "event_msg" and payload_type in {
+        "item_started",
+        "item_updated",
+        "item_completed",
+    }:
+        item = payload.get("item") or {}
+        if isinstance(item, Mapping):
+            item_type = str(item.get("type") or "").replace("_", "").casefold()
+            if item_type == "commandexecution":
+                command = command_execution_text(item)
+                status = str(item.get("status") or "").casefold()
+                if payload_type == "item_completed":
+                    prefix = "执行命令" if status == "completed" else "命令失败"
+                else:
+                    prefix = "执行命令"
+                return Activity(
+                    "tool call",
+                    f"{prefix}: {command}" if command else prefix,
+                    timestamp,
+                )
+            if item_type == "reasoning":
+                return Activity("reasoning", "正在思考", timestamp)
+    if record_type == "response_item" and payload_type == "message":
+        if is_turn_aborted_message(payload):
+            return None
+        role = response_message_role(payload)
+        if role and role != "assistant":
+            return None
+        return Activity("assistant", compact_text(message_text(payload), 160), timestamp)
+    if record_type == "response_item" and payload_type == "reasoning":
+        return Activity("reasoning", "正在思考", timestamp)
+    if record_type == "event_msg" and payload_type == "task_started":
+        return Activity("reasoning", "正在思考", timestamp)
+    return None
+
+
 def response_message_role(payload: Mapping[str, Any]) -> str:
     """Return a normalized role for response_item message payloads."""
     return str(payload.get("role") or "").strip().lower()
@@ -360,6 +483,18 @@ class Activity:
 
 
 @dataclass
+class ActivityStep:
+    """One command/tool step in the current task's execution timeline."""
+
+    timestamp: datetime | None = None
+    title: str = "执行命令"
+    detail: str = ""
+    status: str = "running"
+    call_id: str = ""
+    line: int = 0
+
+
+@dataclass
 class WorkStatusItem:
     """One active Codex work item shown in the HUD activity stack."""
 
@@ -469,6 +604,7 @@ class TaskHistory:
     request: RequestTokens = field(default_factory=RequestTokens)
     request_history: list[RequestRound] = field(default_factory=list)
     activity: Activity = field(default_factory=Activity)
+    activity_steps: list[ActivityStep] = field(default_factory=list)
     last_output: Activity = field(default_factory=Activity)
     slow: SlowSummary = field(default_factory=SlowSummary)
     error: str = ""
@@ -507,6 +643,7 @@ class ParsedSession:
     session_request_history: list[RequestRound] = field(default_factory=list)
     activity_tasks: list[TaskHistory] = field(default_factory=list)
     activity: Activity = field(default_factory=Activity)
+    activity_steps: list[ActivityStep] = field(default_factory=list)
     last_output: Activity = field(default_factory=Activity)
     slow: SlowSummary = field(default_factory=SlowSummary)
     line_count: int = 0
@@ -912,6 +1049,7 @@ class JsonlSessionParser:
             records,
             task_started_index,
         )
+        parsed.activity_steps = self.activity_steps(records, task_started_index)
         parsed.task_completed_at = self.latest_task_completed_after(
             records,
             task_started_index,
@@ -1333,6 +1471,7 @@ class JsonlSessionParser:
                 rows = list(parsed.request_history)
                 request = parsed.request
                 activity = parsed.activity
+                activity_steps = list(parsed.activity_steps)
                 last_output = parsed.last_output
                 slow = parsed.slow
                 last_event_time = parsed.last_event_time
@@ -1346,6 +1485,7 @@ class JsonlSessionParser:
                     aborted_at,
                 )
                 activity = self.latest_activity(records[start:end])
+                activity_steps = self.activity_steps(records[start:end])
                 last_output = self.latest_output(records[start:end])
                 slow = self.slow_summary(
                     records[start:end],
@@ -1374,6 +1514,7 @@ class JsonlSessionParser:
                     request=request,
                     request_history=rows,
                     activity=activity,
+                    activity_steps=activity_steps,
                     last_output=last_output,
                     slow=slow,
                     error=parsed.error if is_latest else "",
@@ -1839,12 +1980,32 @@ class JsonlSessionParser:
             args = str(payload.get("arguments") or "").strip()
             text = f"{name} {args}".strip()
             return ("output", "工具调用", text) if text else None
+        if record_type == "response_item" and payload_type == "custom_tool_call":
+            text = tool_call_detail(payload)
+            return ("output", "工具调用", text) if text else None
         if record_type == "response_item" and payload_type == "function_call_output":
+            text = str(payload.get("output") or "").strip()
+            return ("input", "工具返回", text) if text else None
+        if (
+            record_type == "response_item"
+            and payload_type == "custom_tool_call_output"
+        ):
             text = str(payload.get("output") or "").strip()
             return ("input", "工具返回", text) if text else None
         if record_type == "response_item" and payload_type == "reasoning":
             text = reasoning_text(payload).strip()
             return ("output", "推理", text) if text else None
+        if record_type == "event_msg" and payload_type in {
+            "item_started",
+            "item_updated",
+            "item_completed",
+        }:
+            item = payload.get("item") or {}
+            if isinstance(item, Mapping):
+                item_type = str(item.get("type") or "").replace("_", "").casefold()
+                if item_type == "commandexecution":
+                    text = command_execution_text(item)
+                    return ("output", "命令", text) if text else None
         return None
 
     def round_activity_summary(
@@ -2014,7 +2175,7 @@ class JsonlSessionParser:
             round_activity_entries = []
         return rounds
 
-    def latest_activity(self, records: Sequence[Mapping[str, Any]]) -> Activity:
+    def _legacy_latest_activity(self, records: Sequence[Mapping[str, Any]]) -> Activity:
         latest_token_count: Activity | None = None
         for record in reversed(records):
             payload = record.get("payload") or {}
@@ -2114,6 +2275,195 @@ class JsonlSessionParser:
                     "confirmed", "received token_count", timestamp
                 )
         return latest_token_count or Activity("idle", "no activity", None)
+
+    def latest_activity(self, records: Sequence[Mapping[str, Any]]) -> Activity:
+        """Return the latest meaningful activity, skipping token bookkeeping."""
+        latest_token_count: Activity | None = None
+        for record in reversed(records):
+            activity = _activity_from_record(record)
+            if activity is not None:
+                return activity
+            payload = record.get("payload") or {}
+            if (
+                isinstance(payload, Mapping)
+                and record.get("type") == "event_msg"
+                and payload.get("type") == "token_count"
+            ):
+                # Token accounting is frequently appended after a command or
+                # streamed assistant message. Keep it only as a fallback.
+                latest_token_count = Activity(
+                    "confirmed",
+                    "received token_count",
+                    record.get("_dt"),
+                )
+        return latest_token_count or Activity("idle", "no activity", None)
+
+    def activity_steps(
+        self,
+        records: Sequence[Mapping[str, Any]],
+        task_started_index: int | None = None,
+    ) -> list[ActivityStep]:
+        """Return every command/tool step in chronological order.
+
+        Codex writes the custom tool call before its CommandExecution completion.
+        Keep the call as a running step and update that same step when a matching
+        completion/output arrives, so refreshes never lose intermediate commands.
+        """
+        start_index = 0 if task_started_index is None else task_started_index + 1
+        steps: list[ActivityStep] = []
+        open_indexes: list[int] = []
+
+        def add_open_step(
+            record: Mapping[str, Any],
+            *,
+            title: str,
+            detail: str,
+            call_id: str,
+        ) -> None:
+            steps.append(
+                ActivityStep(
+                    timestamp=record.get("_dt"),
+                    title=title,
+                    detail=detail,
+                    status="running",
+                    call_id=call_id,
+                    line=_as_int(record.get("_line")),
+                )
+            )
+            open_indexes.append(len(steps) - 1)
+
+        def find_open_step(
+            call_id: str,
+            command: str,
+            *,
+            allow_unique_command_fallback: bool = False,
+        ) -> int | None:
+            normalized_id = str(call_id or "").strip()
+            normalized_command = " ".join(str(command or "").split())
+            matching_commands: list[int] = []
+            for index in reversed(open_indexes):
+                step = steps[index]
+                if normalized_id and step.call_id == normalized_id:
+                    return index
+                if (
+                    normalized_command
+                    and " ".join(step.detail.split()) == normalized_command
+                ):
+                    matching_commands.append(index)
+            if len(matching_commands) == 1:
+                return matching_commands[0]
+            if matching_commands:
+                return None
+            if not allow_unique_command_fallback:
+                return None
+            command_indexes = [
+                index for index in open_indexes if steps[index].title == "执行命令"
+            ]
+            return command_indexes[-1] if len(command_indexes) == 1 else None
+
+        def close_open_step(index: int) -> None:
+            try:
+                open_indexes.remove(index)
+            except ValueError:
+                pass
+
+        for record in records[start_index:]:
+            payload = record.get("payload") or {}
+            if not isinstance(payload, Mapping):
+                continue
+            record_type = record.get("type")
+            payload_type = payload.get("type")
+            if record_type == "response_item" and payload_type in {
+                "function_call",
+                "custom_tool_call",
+            }:
+                name = str(payload.get("name") or "").strip().casefold()
+                title = (
+                    "执行命令"
+                    if name in {"exec", "shell", "shell_command"}
+                    else "调用工具"
+                )
+                add_open_step(
+                    record,
+                    title=title,
+                    detail=tool_command_text(payload) or tool_call_detail(payload),
+                    call_id=str(
+                        payload.get("call_id") or payload.get("id") or ""
+                    ).strip(),
+                )
+                continue
+            if record_type == "event_msg" and payload_type in {
+                "item_started",
+                "item_updated",
+                "item_completed",
+            }:
+                item = payload.get("item") or {}
+                if not isinstance(item, Mapping):
+                    continue
+                item_type = str(item.get("type") or "").replace("_", "").casefold()
+                if item_type != "commandexecution":
+                    continue
+                command = command_execution_text(item)
+                completed = payload_type == "item_completed"
+                failed = str(item.get("status") or "").casefold() in {
+                    "failed",
+                    "error",
+                }
+                index = find_open_step(
+                    str(item.get("id") or ""),
+                    command,
+                    allow_unique_command_fallback=True,
+                )
+                if index is None or not completed:
+                    if completed:
+                        steps.append(
+                            ActivityStep(
+                                timestamp=record.get("_dt"),
+                                title="命令失败" if failed else "命令完成",
+                                detail=command,
+                                status="failed" if failed else "completed",
+                                call_id=str(item.get("id") or "").strip(),
+                                line=_as_int(record.get("_line")),
+                            )
+                        )
+                    else:
+                        add_open_step(
+                            record,
+                            title="执行命令",
+                            detail=command,
+                            call_id=str(item.get("id") or "").strip(),
+                        )
+                    continue
+                step = steps[index]
+                step.timestamp = record.get("_dt") or step.timestamp
+                step.title = "命令失败" if failed else "命令完成"
+                step.detail = command or step.detail
+                step.status = "failed" if failed else "completed"
+                step.call_id = str(item.get("id") or step.call_id).strip()
+                step.line = _as_int(record.get("_line"), step.line)
+                close_open_step(index)
+                continue
+            if record_type == "response_item" and payload_type in {
+                "function_call_output",
+                "custom_tool_call_output",
+            }:
+                call_id = str(payload.get("call_id") or "").strip()
+                index = find_open_step(call_id, "")
+                if index is not None:
+                    steps[index].status = "completed"
+                    steps[index].timestamp = record.get("_dt") or steps[index].timestamp
+                    close_open_step(index)
+
+        if any(
+            record.get("type") == "event_msg"
+            and isinstance(record.get("payload"), Mapping)
+            and record["payload"].get("type") in {"task_complete", "turn_aborted"}
+            for record in records[start_index:]
+        ):
+            for index in open_indexes:
+                steps[index].status = "completed"
+            open_indexes.clear()
+        return steps[-128:]
 
     def latest_output(self, records: Sequence[Mapping[str, Any]]) -> Activity:
         """Return the latest assistant-visible text, ignoring bookkeeping events."""

@@ -633,23 +633,39 @@ TEXT = r"""
           }
           return false;
         };
-        const delays = [32, 120, 320, 800, 1600, 3200, 5600, 9000];
+        // Publish before Codex clears the composer or waits for its first API
+        // response. A short follow-up burst is retained only for a new/pending
+        // row whose canonical id is still being materialized.
+        let keepFollowup = false;
+        try {
+          keepFollowup = report();
+        } catch (_) {}
+        const delays = keepFollowup
+          ? [32, 120, 320, 800, 1600, 3200, 5600, 9000]
+          : [32, 120, 320];
         window[activeSessionSendFollowupTimersName] = delays.map((ms) => ctx.lifecycle.timeout("active_session", () => {
           try {
-            report();
+            if (!report()) clearActiveSessionSendFollowup();
           } catch (_) {}
         }, ms));
       }
 
       function activeSessionComposerSubmitButton(button) {
-        if (!(button instanceof HTMLElement) || button.hasAttribute("disabled")) return false;
+        if (
+          !(button instanceof HTMLElement)
+          || button.hasAttribute("disabled")
+          || button.getAttribute("aria-disabled") === "true"
+        ) return false;
         const label = cleanActiveSessionTitle(
           button.getAttribute("aria-label")
           || button.getAttribute("title")
+          || button.getAttribute("data-testid")
+          || button.getAttribute("data-action")
           || button.textContent
           || ""
         );
-        return /^(发送|提交|send|submit)$/i.test(label);
+        if (button.getAttribute("type")?.toLowerCase() === "submit") return true;
+        return /(?:send|submit|发送|提交)/i.test(label);
       }
 
       function refreshActiveSessionObserver() {

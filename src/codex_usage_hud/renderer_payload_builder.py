@@ -506,6 +506,9 @@ def _task_snapshot(snapshot: ParsedSession, task: TaskHistory) -> ParsedSession:
     projected.request = task.request
     projected.request_history = list(task.request_history)
     projected.activity = task.activity
+    projected.activity_steps = [
+        copy.copy(step) for step in getattr(task, "activity_steps", [])
+    ]
     projected.last_output = task.last_output
     projected.slow = task.slow
     projected.error = task.error

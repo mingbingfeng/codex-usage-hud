@@ -22,8 +22,7 @@ import json
 import logging
 import re
 import threading
-import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -146,7 +145,8 @@ def detect_reading_activity(snapshot: Any) -> ReadingActivity:
     if activity is None or getattr(activity, "kind", "") != "tool call":
         return ReadingActivity(active=False)
 
-    # activity.detail 形如 ``read_file {"path": "src/ScanClient.cs"}``
+    # activity.detail 形如 ``read_file {"path": "src/ScanClient.cs"}``;
+    # custom_tool_call uses the same normalized detail from the parser.
     detail = str(getattr(activity, "detail", "") or "")
     tool_name, _, arguments = detail.partition(" ")
     if not _is_read_tool(tool_name):
@@ -231,23 +231,30 @@ class CodexActivityMonitor:
         except OSError:
             return ReadingActivity(active=False)
 
-        # 从尾部向前找最后一个 function_call
+        # 从尾部向前找最后一个 function/custom_tool_call
         for line in reversed(chunk.splitlines()):
             line = line.strip()
-            if not line or '"function_call"' not in line:
+            if not line or (
+                '"function_call"' not in line
+                and '"custom_tool_call"' not in line
+            ):
                 continue
             try:
                 record = json.loads(line)
             except json.JSONDecodeError:
                 continue
             payload = record.get("payload") if isinstance(record, Mapping) else None
-            if not isinstance(payload, Mapping) or payload.get("type") != "function_call":
+            if not isinstance(payload, Mapping) or payload.get("type") not in {
+                "function_call",
+                "custom_tool_call",
+            }:
                 continue
             tool_name = str(payload.get("name") or "")
             if not _is_read_tool(tool_name):
                 return ReadingActivity(active=False)
             file_path, detail = _extract_file_from_arguments(
-                tool_name, payload.get("arguments")
+                tool_name,
+                payload.get("arguments") or payload.get("input"),
             )
             file_name = Path(file_path).name if file_path else ""
             return ReadingActivity(
