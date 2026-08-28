@@ -597,11 +597,11 @@ def run_renderer_hud_session(args: argparse.Namespace, *, lock_already_held: boo
                     return command_refresh_requested.wait(delay)
 
                 def _event_wait(delay: float) -> object:
-                    # Normal branch: clear before waiting so any stale set state
-                    # (e.g. from AutoUpdateManager on_state_change, file events,
-                    # runtime events) cannot busy-spin the event loop. A new set
-                    # during the wait still wakes early.
-                    command_refresh_requested.clear()
+                    # The sampler clears this shared latch at the beginning of
+                    # the next iteration. Clearing it here would lose a wake
+                    # that arrives between the current iteration and this
+                    # wait, leaving active-session/command updates asleep
+                    # until an unrelated deadline.
                     return command_refresh_requested.wait(delay)
 
                 event_loop = RendererEventLoop(loop_state, RendererLoopExecutorPorts(sample_inputs=tick_sampler.sample, apply_inputs=pre_refresh_executor.apply, exit_requested=loop_controls.exit_requested, restart_requested=loop_controls.restart_requested, restart_result=loop_controls.restart_result, daemon_tick=loop_controls.daemon_tick, compute_force_fast=lambda inputs: bool(loop_state.latest_snapshot is None or inputs.event_refresh_request.force_fast), apply_refresh=refresh_executor.apply, current_snapshot=lambda: loop_state.latest_snapshot, apply_domain_update=refresh_executor.apply_domains, keep_alive=loop_controls.keep_overlay_alive, after_iteration=loop_controls.after_iteration, compute_wait_delay=wait_planner.compute, wait=_event_wait, update_gate=lambda: getattr(client, 'update_gate_state', lambda: (True, '', 0.0))(), record_refresh_merge=lambda: getattr(client, 'record_renderer_metric', lambda *_args: None)('merged_refreshes'), quiesce_active=quiesce_event.is_set, quiesce_wait_delay=lambda: 5.0, quiesce_wait=_quiesce_wait))

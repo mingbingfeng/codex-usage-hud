@@ -1438,6 +1438,25 @@ def test_refresh_executor_builds_and_publishes_initial_snapshot() -> None:
     }
 
 
+def test_refresh_executor_refreshes_current_bubble_on_visible_first_session_update() -> None:
+    latest = ParsedSession(active_work_items=["old-work"])
+    fresh = ParsedSession(selection_seq=2)
+    refresh_current_work = MagicMock(return_value=["sending-work"])
+    ports = replace(
+        _refresh_ports(fresh=fresh),
+        refresh_current_work=refresh_current_work,
+    )
+    state = RendererLoopState(latest_snapshot=latest, latest_budget_signature=("budget",))
+    executor = RendererRefreshExecutor(state, ports)
+    inputs = _tick_inputs(plan=RefreshPlan(active_session=True))
+    inputs.active_session_wakeup = True
+
+    assert executor.apply(inputs, False) is fresh
+
+    refresh_current_work.assert_called_once_with(["old-work"], fresh)
+    assert fresh.active_work_items == ["sending-work"]
+
+
 def test_refresh_executor_passes_changed_jsonl_to_active_work() -> None:
     latest = ParsedSession(active_work_items=["existing"])
     fresh = ParsedSession(session_id="session-2")
@@ -1583,7 +1602,7 @@ def test_refresh_executor_visible_first_schedules_deferred_active_work() -> None
 
     push_light.assert_called_once_with(fresh)
     push_full.assert_not_called()
-    publish_overlay.assert_not_called()
+    publish_overlay.assert_called_once_with(fresh)
     assert fresh.active_work_items == ["existing"]
     assert state.active_work_refresh_pending
     assert state.active_work_refresh_not_before == 11.2

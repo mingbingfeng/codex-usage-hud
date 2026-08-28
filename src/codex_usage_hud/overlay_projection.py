@@ -64,6 +64,7 @@ def work_item_to_overlay_dict(item: WorkStatusItem) -> dict[str, object]:
         "updatedAt": _iso_or_empty(item.updated_at),
         "current": item.current,
         "pendingAccounting": item.pending_accounting,
+        "draftText": getattr(item, "draft_text", ""),
     }
 
 
@@ -242,6 +243,30 @@ def select_visible_items(
             runtime_started_at,
         ):
             seen_task_keys.add(task_key)
+    # The followed session is the primary user-facing item. A burst of newer
+    # background/CLI sessions must not evict it solely because the overlay has
+    # a small item limit.
+    current_item = next(
+        (
+            item
+            for item in items
+            if bool(item.current) and item.status != "recent"
+        ),
+        None,
+    )
+    if current_item is not None and all(
+        str(item.id or "") != str(current_item.id or "") for item in visible
+    ):
+        if len(visible) >= item_limit:
+            visible[-1] = current_item
+        else:
+            visible.append(current_item)
+        current_key = runtime_task_key(current_item)
+        if current_key and _item_started_after_runtime_start(
+            current_item,
+            runtime_started_at,
+        ):
+            seen_task_keys.add(current_key)
     return visible
 
 
@@ -302,7 +327,23 @@ def stabilize_published_items(
         ):
             continue
         merged[item_id] = replace(cached_item, current=False)
-    stable = sorted(merged.values(), key=item_sort_key, reverse=True)[:item_limit]
+    stable = sorted(merged.values(), key=item_sort_key, reverse=True)
+    current_item = next(
+        (
+            item
+            for item in stable
+            if bool(item.current) and item.status != "recent"
+        ),
+        None,
+    )
+    stable = stable[:item_limit]
+    if current_item is not None and all(
+        str(item.id or "") != str(current_item.id or "") for item in stable
+    ):
+        if stable:
+            stable[-1] = current_item
+        else:
+            stable = [current_item]
     cache.clear()
     cache.update(
         {

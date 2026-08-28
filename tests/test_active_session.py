@@ -865,6 +865,94 @@ class ActiveSessionTrackerTests(unittest.TestCase):
                 "renderer:Persisted Provisional Thread",
             )
 
+    def test_renderer_provisional_id_uses_current_state_db_title_when_index_is_stale(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            sessions_root = root / "sessions"
+            sessions_root.mkdir()
+            session_path = sessions_root / "rollout-019f-current.jsonl"
+            session_path.write_text("{}\n", encoding="utf-8")
+            state_db = root / "state_5.sqlite"
+            _write_thread_mapping(
+                state_db,
+                "019f-current",
+                session_path,
+                title="Current title after the latest user message",
+            )
+            # The index still has the title captured when the session was
+            # first created; state_5.sqlite is already current.
+            session_index = root / "session_index.jsonl"
+            session_index.write_text(
+                json.dumps(
+                    {"id": "019f-current", "thread_name": "Initial title"}
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            tracker = ActiveSessionTracker(
+                platform=FakePlatform(),
+                state_db=state_db,
+                sessions_root=sessions_root,
+                session_index_path=session_index,
+                poll_ms=250,
+                enabled=True,
+                start_background_watcher=False,
+            )
+
+            self.assertTrue(
+                tracker.observe_conversation_ref(
+                    "local:client-new-thread:pending-uuid",
+                    "Current title after the latest user message",
+                )
+            )
+
+            self.assertEqual(tracker.latest_session_id, "019f-current")
+            self.assertEqual(tracker.latest_path, session_path)
+            self.assertEqual(tracker.follow_state, "confirmed")
+            self.assertEqual(tracker.follow_reason, "confirmed")
+
+    def test_renderer_provisional_id_reconciles_from_index_before_state_db_row(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            sessions_root = root / "sessions"
+            sessions_root.mkdir()
+            canonical_id = "019f-index-first"
+            session_path = sessions_root / f"rollout-2026-08-27T20-30-48-{canonical_id}.jsonl"
+            session_path.write_text("{}\n", encoding="utf-8")
+            session_index = root / "session_index.jsonl"
+            session_index.write_text(
+                json.dumps(
+                    {"id": canonical_id, "thread_name": "Index First Thread"}
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            tracker = ActiveSessionTracker(
+                platform=FakePlatform(),
+                state_db=root / "state_5.sqlite",
+                sessions_root=sessions_root,
+                session_index_path=session_index,
+                poll_ms=250,
+                enabled=True,
+                start_background_watcher=False,
+            )
+
+            self.assertTrue(
+                tracker.observe_conversation_ref(
+                    "local:client-new-thread:pending-uuid",
+                    "Index First Thread",
+                )
+            )
+
+            self.assertEqual(tracker.latest_session_id, canonical_id)
+            self.assertEqual(tracker.latest_path, session_path)
+            self.assertEqual(tracker.follow_state, "confirmed")
+            self.assertEqual(tracker.follow_reason, "confirmed")
+
     def test_renderer_provisional_id_reconciles_after_mapping_event(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -1218,6 +1306,44 @@ class ActiveSessionTrackerTests(unittest.TestCase):
             self.assertEqual(tracker.latest_session_id, "")
             self.assertIsNone(tracker.latest_path)
             self.assertEqual(tracker.latest_source, "renderer-new-session")
+
+    def test_renderer_new_session_retains_draft_until_session_mapping(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            sessions_root = root / "sessions"
+            sessions_root.mkdir()
+            tracker = ActiveSessionTracker(
+                platform=FakePlatform(),
+                state_db=root / "state_5.sqlite",
+                sessions_root=sessions_root,
+                session_index_path=root / "session_index.jsonl",
+                poll_ms=250,
+                enabled=True,
+                start_background_watcher=False,
+            )
+
+            self.assertTrue(
+                tracker.observe_conversation_ref(
+                    source="renderer",
+                    new_session=True,
+                    selection_seq=1,
+                    draft_text="Draft text",
+                )
+            )
+            self.assertEqual(tracker.renderer_draft_text, "Draft text")
+            self.assertFalse(tracker.renderer_send_requested)
+
+            self.assertTrue(
+                tracker.observe_conversation_ref(
+                    source="renderer",
+                    new_session=True,
+                    selection_seq=1,
+                    draft_text="Draft text",
+                    send_requested=True,
+                )
+            )
+            self.assertEqual(tracker.renderer_draft_text, "Draft text")
+            self.assertTrue(tracker.renderer_send_requested)
 
     def test_active_session_change_callback_runs_for_background_event(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -514,7 +514,11 @@ class RendererRefreshExecutor:
             active_session_observation_key,
             update_ok,
         )
-        if not decision.lightweight_active_session:
+        if update_ok or not decision.lightweight_active_session:
+            # The visible-first path already projects the current work item in
+            # memory. Publish it immediately so a new/current conversation
+            # does not wait for the deferred background scan before its desktop
+            # bubble appears.
             self.ports.publish_overlay(fresh)
         self._log_slow_refresh(
             fresh,
@@ -582,11 +586,13 @@ class RendererRefreshExecutor:
     ) -> None:
         if latest is not None:
             fresh.active_work_items = list(latest.active_work_items)
-            if not decision.lightweight_active_session:
-                fresh.active_work_items = self.ports.refresh_current_work(
-                    list(fresh.active_work_items),
-                    fresh,
-                )
+            # A visible-first session update must still update the current
+            # bubble. This is a bounded in-memory projection, not the costly
+            # recent-session scan that lightweight refreshes intentionally skip.
+            fresh.active_work_items = self.ports.refresh_current_work(
+                list(fresh.active_work_items),
+                fresh,
+            )
         priority_paths = tuple(
             dict.fromkeys(
                 (*self.state.pending_active_work_paths, *decision.active_work_paths)

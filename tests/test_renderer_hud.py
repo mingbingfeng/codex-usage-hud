@@ -1796,7 +1796,8 @@ class RendererHudPayloadTests(unittest.TestCase):
         script = renderer_hud.RENDERER_HUD_SCRIPT
 
         self.assertIn(
-            "activeSessionFirstOutsideHud(activeSessionIdentitySelector)", script
+            "Array.from(document.querySelectorAll(activeSessionIdentitySelector))",
+            script,
         )
         self.assertIn(
             "titleNode?.closest?.(activeSessionRowSelector)",

@@ -357,10 +357,6 @@ class RendererPreRefreshExecutor:
             self.ports.reset_background_retry()
         self.state.settings_command_status = self.ports.execute_command(inputs.command)
         inputs.update_state = self.ports.update_status()
-        if action in self._ASYNC_UPDATE_ACTIONS:
-            # 异步更新命令的最终状态由 updateState 驱动，不保留中间态作为
-            # 粘性 settings_command_status，否则状态栏会卡在"正在检查更新..."。
-            self.state.settings_command_status = {}
         mode_switch = str(
             self.state.settings_command_status.get("switchMode") or ""
         ).strip()
@@ -376,6 +372,10 @@ class RendererPreRefreshExecutor:
             current_config,
         )
         if not self._can_replace_snapshot_with_domains(inputs, partial_domains):
+            if action in self._ASYNC_UPDATE_ACTIONS and self.state.latest_snapshot is None:
+                # There is no settings-domain refresh to carry this transient
+                # command response, so do not leave it in loop state.
+                self.state.settings_command_status = {}
             return
         if self.state.latest_snapshot is not None:
             self.ports.refresh_latest_snapshot(

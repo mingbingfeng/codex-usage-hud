@@ -118,6 +118,59 @@ def test_renderer_bridge_normalizes_active_session_aliases_and_sequence() -> Non
     ]
 
 
+def test_renderer_bridge_invalidates_mapping_on_composer_send_click() -> None:
+    tracker = SimpleNamespace(
+        selection_seq=0,
+        invalidate_mapping_cache=MagicMock(),
+        observe_conversation_ref=MagicMock(return_value=True),
+    )
+    callbacks = _callbacks(active_session_tracker=tracker)
+
+    callbacks.observe_active_session(
+        {
+            "reason": "composer-send-click",
+            "newSession": True,
+            "selectionSeq": 1,
+        }
+    )
+
+    tracker.invalidate_mapping_cache.assert_called_once_with()
+    tracker.observe_conversation_ref.assert_called_once_with(
+        session_id="",
+        title="",
+        source="renderer",
+        selection_seq=1,
+        new_session=True,
+    )
+
+
+def test_renderer_bridge_forwards_composer_draft_and_send_state() -> None:
+    tracker = SimpleNamespace(
+        selection_seq=1,
+        observe_conversation_ref=MagicMock(return_value=True),
+    )
+    callbacks = _callbacks(active_session_tracker=tracker)
+
+    callbacks.observe_active_session(
+        {
+            "newSession": True,
+            "selectionSeq": 1,
+            "draftText": "Draft before send",
+            "sendRequested": True,
+        }
+    )
+
+    tracker.observe_conversation_ref.assert_called_once_with(
+        session_id="",
+        title="",
+        source="renderer",
+        selection_seq=1,
+        new_session=True,
+        draft_text="Draft before send",
+        send_requested=True,
+    )
+
+
 def test_renderer_bridge_suppresses_identical_observation_after_successful_ack() -> None:
     tracker = SimpleNamespace(
         selection_seq=7,

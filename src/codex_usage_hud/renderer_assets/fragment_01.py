@@ -68,6 +68,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
   const activeSessionBootstrapObserverName = "__codexUsageHudActiveSessionBootstrapObserver";
   const activeSessionBootstrapTimerName = "__codexUsageHudActiveSessionBootstrapTimer";
   const activeSessionTimerName = "__codexUsageHudActiveSessionTimer";
+  const activeSessionDraftTimerName = "__codexUsageHudActiveSessionDraftTimer";
   const activeSessionSendFollowupTimersName = "__codexUsageHudActiveSessionSendTimers";
   const activeSessionComposerHandlerName = "__codexUsageHudActiveSessionComposerHandler";
   const activeSessionClickHandlerName = "__codexUsageHudActiveSessionClick";

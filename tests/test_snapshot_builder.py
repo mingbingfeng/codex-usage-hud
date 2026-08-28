@@ -125,7 +125,7 @@ def test_renderer_snapshot_defers_cold_budget_aggregation() -> None:
     assert snapshot.daily_limit_usd == 1.0
     assert snapshot.weekly_limit_usd == 2.0
     assert not summarize_calls
-    assert not active_work_calls
+    assert active_work_calls == [True]
 
 
 def test_once_snapshot_does_not_defer_cold_budget_aggregation() -> None:

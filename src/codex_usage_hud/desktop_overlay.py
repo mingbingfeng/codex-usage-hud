@@ -32,7 +32,6 @@ from .config import (
     write_json_object,
 )
 from .core import WorkStatusItem
-from .core.background_usage import BACKGROUND_USAGE_KIND
 from .platforms.codex_theme import CodexThemeProbe
 from .platforms.file_watcher import FileChangeWatcher, FileWatchSpec
 
@@ -51,6 +50,7 @@ WORK_OVERLAY_SYSTEM_NOTICE_ID = "renderer-recovery-notice"
 WORK_OVERLAY_SYSTEM_ACTION_READY_TIMEOUT_SECONDS = 2.0
 
 _LOGGER = logging.getLogger("codex_usage_hud.desktop_overlay")
+_SUBPROCESS_POPEN_TYPE = subprocess.Popen
 
 
 def _append_renderer_diagnostic(_stage: str, **_fields: object) -> None:
@@ -168,14 +168,11 @@ class DesktopWorkOverlay:
         self._system_action: dict[str, object] | None = None
         self._system_notice: dict[str, object] | None = None
         self._rest_reminder: dict[str, object] = {}
+        self._keepalive_stop = Event()
+        self._keepalive_thread: threading.Thread | None = None
         self._system_action_unavailable_reason = ""
         self._last_state_signature: str | None = None
         self._last_state_write_at = 0.0
-        # A HUD launch cannot have an in-progress task.  The first snapshot can
-        # still contain the last task read from Codex's persisted session files,
-        # so never publish that snapshot as a desktop bubble.  The next real
-        # update (session/file event) is allowed to create bubbles normally.
-        self._suppress_initial_items = True
         self._switch_completed_command: dict[str, object] | None = None
         self._switch_completed_until = 0.0
         self._theme_probe = CodexThemeProbe(
@@ -227,15 +224,13 @@ class DesktopWorkOverlay:
             self._report_unavailable_once(self._unavailable_reason)
             return
         self._ensure_helper_healthy(self._clock.monotonic())
-        if self._suppress_initial_items and self._last_payload_items is None:
-            self._suppress_initial_items = False
-            payload_items = [
-                overlay_projection.work_item_to_overlay_dict(item)
-                for item in items
-                if item.kind == BACKGROUND_USAGE_KIND
-            ]
-        else:
-            payload_items = [overlay_projection.work_item_to_overlay_dict(item) for item in items]
+        # Active items are already filtered for terminal and stale work before
+        # reaching the overlay. Retaining them on the first update keeps a HUD
+        # restart from hiding a still-running CLI conversation until its next
+        # filesystem event.
+        payload_items = [
+            overlay_projection.work_item_to_overlay_dict(item) for item in items
+        ]
         payload_items = self._apply_switch_completed_override(payload_items)
         theme_payload = self._theme_payload()
         if (
@@ -259,6 +254,7 @@ class DesktopWorkOverlay:
         self._last_theme_payload = dict(theme_payload)
         if self._process is None and self._clock.monotonic() >= self._restart_blocked_until:
             self._start()
+        self._ensure_keepalive_worker_if_runtime_started()
 
     def update_rest_reminder(self, payload: Mapping[str, object] | None) -> bool:
         """Publish one non-session rest bubble, independently of session limits."""
@@ -284,6 +280,7 @@ class DesktopWorkOverlay:
                 self._process = None
             if self._process is None and self._clock.monotonic() >= self._restart_blocked_until:
                 self._start()
+            self._ensure_keepalive_worker_if_runtime_started()
             return self._process is not None
         self._rest_reminder = next_payload
         if (
@@ -311,6 +308,7 @@ class DesktopWorkOverlay:
             self._process = None
         if self._process is None and self._clock.monotonic() >= self._restart_blocked_until:
             self._start()
+        self._ensure_keepalive_worker_if_runtime_started()
         return self._process is not None
 
     def show_system_notice(self, *, title: str, message: str) -> bool:
@@ -349,6 +347,7 @@ class DesktopWorkOverlay:
             )
             self._stop_runtime(permanent=False)
             return False
+        self._ensure_keepalive_worker_if_runtime_started()
         return True
 
     def clear_system_notice(self) -> bool:
@@ -374,6 +373,7 @@ class DesktopWorkOverlay:
         self._last_theme_payload = dict(theme_payload)
         if self._process is None and self._clock.monotonic() >= self._restart_blocked_until:
             self._start()
+        self._ensure_keepalive_worker_if_runtime_started()
         return self._process is not None
 
     def clear_system_action(self) -> bool:
@@ -399,6 +399,7 @@ class DesktopWorkOverlay:
         self._last_theme_payload = dict(theme_payload)
         if self._process is None and self._clock.monotonic() >= self._restart_blocked_until:
             self._start()
+        self._ensure_keepalive_worker_if_runtime_started()
         return self._process is not None
 
     def offer_codex_restart(self, *, title: str, message: str) -> bool:
@@ -439,6 +440,7 @@ class DesktopWorkOverlay:
             )
             self._system_action = None
             return False
+        self._ensure_keepalive_worker_if_runtime_started()
         ready = self._wait_for_system_action_command(
             {WORK_OVERLAY_SYSTEM_ACTION_READY},
             timeout_seconds=WORK_OVERLAY_SYSTEM_ACTION_READY_TIMEOUT_SECONDS,
@@ -571,6 +573,70 @@ class DesktopWorkOverlay:
         if self._process is None and now >= self._restart_blocked_until:
             self._start()
 
+    def _ensure_keepalive_worker(self) -> None:
+        """Keep visible bubbles alive even if the renderer loop is blocked.
+
+        The renderer normally schedules ``keep_alive`` as an event-loop
+        deadline.  A slow CDP call or a daemon handoff can temporarily prevent
+        that loop from reaching its deadline, while the desktop helper still
+        expires an unchanged state file after a short grace period.  Keep this
+        fallback limited to the lifetime of a published bubble; an idle HUD
+        does not acquire a timer thread.
+        """
+        if self._closed:
+            return
+        thread = self._keepalive_thread
+        if thread is not None and thread.is_alive():
+            return
+        self._keepalive_stop.clear()
+        thread = threading.Thread(
+            target=self._run_keepalive_worker,
+            name="codex-usage-hud-overlay-keepalive",
+            daemon=True,
+        )
+        self._keepalive_thread = thread
+        thread.start()
+
+    def _ensure_keepalive_worker_if_runtime_started(self) -> None:
+        if isinstance(self._process, _SUBPROCESS_POPEN_TYPE):
+            self._ensure_keepalive_worker()
+
+    def _run_keepalive_worker(self) -> None:
+        interval = max(1.0, min(5.0, WORK_OVERLAY_KEEPALIVE_SECONDS / 3.0))
+        try:
+            while not self._keepalive_stop.wait(interval):
+                if self._closed:
+                    return
+                if (
+                    (
+                        not self.enabled
+                        and self._system_action is None
+                        and self._system_notice is None
+                        and not self._rest_reminder
+                    )
+                    or (
+                        not self._last_payload_items
+                        and self._system_action is None
+                        and self._system_notice is None
+                        and not self._rest_reminder
+                    )
+                ):
+                    return
+                try:
+                    self.keep_alive()
+                except Exception:
+                    _LOGGER.exception("work_overlay_keepalive_failed")
+        finally:
+            if self._keepalive_thread is threading.current_thread():
+                self._keepalive_thread = None
+
+    def _stop_keepalive_worker(self) -> None:
+        self._keepalive_stop.set()
+        thread = self._keepalive_thread
+        self._keepalive_thread = None
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=0.2)
+
     def mark_switch_completed(self, command: Mapping[str, object]) -> bool:
         """Tell the helper that a clicked bubble has become the active session."""
         if self._closed or not self.enabled or not self._last_payload_items:
@@ -600,6 +666,7 @@ class DesktopWorkOverlay:
             theme=self._last_theme_payload,
             close=False,
         )
+        self._ensure_keepalive_worker_if_runtime_started()
         return True
 
     def _apply_switch_completed_override(
@@ -691,6 +758,7 @@ class DesktopWorkOverlay:
     def _stop_runtime(self, *, permanent: bool) -> None:
         if permanent:
             self._closed = True
+        self._stop_keepalive_worker()
         process = self._process
         self._process = None
         try:
@@ -763,7 +831,7 @@ class DesktopWorkOverlay:
             return False
         # Unit-test fakes and alternate embedders do not own the real helper
         # heartbeat.  The production path always stores a subprocess.Popen.
-        if not isinstance(process, subprocess.Popen):
+        if not isinstance(process, _SUBPROCESS_POPEN_TYPE):
             return True
         heartbeat_path = overlay_ipc.heartbeat_path(self._state_path)
         deadline = (

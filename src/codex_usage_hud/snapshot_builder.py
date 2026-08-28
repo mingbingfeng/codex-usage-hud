@@ -169,6 +169,23 @@ def _enrich_tracker(
     snapshot.renderer_session_id = str(getattr(tracker, "renderer_session_id", "") or "")
     snapshot.selection_seq = selection_seq
     snapshot.selection_observed_at_ms = selection_observed_at_ms
+    snapshot.composer_draft = str(
+        getattr(tracker, "renderer_draft_text", "") or ""
+    )
+    snapshot.composer_draft_updated_at_ms = int(
+        getattr(tracker, "renderer_draft_updated_at_ms", 0) or 0
+    )
+    snapshot.composer_send_requested = bool(
+        getattr(tracker, "renderer_send_requested", False)
+    )
+    # The page can briefly lose its header/sidebar nodes while a blank chat is
+    # being mounted. Reassert the tracker's sticky provisional state so that a
+    # transient renderer-waiting source cannot remove the draft bubble.
+    if session_path is None:
+        if bool(getattr(tracker, "renderer_new_session", False)):
+            snapshot.selection_source = "renderer-new-session"
+        elif bool(getattr(tracker, "renderer_pending_session", False)):
+            snapshot.selection_source = "renderer-pending-session"
     snapshot.follow_state = str(getattr(tracker, "follow_state", "") or "")
     snapshot.follow_reason = str(getattr(tracker, "follow_reason", "") or "")
     candidates = getattr(tracker, "match_candidates", [])
@@ -443,7 +460,10 @@ def build_snapshot(
             refresh_current_session_usage=refresh_current_session_usage,
         )
     usage_summarized_at_ms = now_ms()
-    if refresh_active_work_items and budget_ready:
+    # Active-work discovery has a small bounded candidate set and must not be
+    # coupled to the cold budget scan. Otherwise a HUD restart leaves every
+    # already-running CLI conversation without a bubble until budgets warm.
+    if refresh_active_work_items:
         snapshot.active_work_items = ports.active_work_items(
             context, snapshot, session_path
         )

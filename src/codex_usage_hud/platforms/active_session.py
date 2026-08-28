@@ -22,6 +22,7 @@ _LOGGER.addHandler(logging.NullHandler())
 _THREAD_PATH_NEGATIVE_CACHE_SECONDS = 2.0
 _TITLE_PREFIX_MATCH_MIN_CHARS = 8
 _PROVISIONAL_RENDERER_THREAD_PREFIX = "client-new-thread:"
+_RENDERER_DRAFT_MAX_CHARS = 8000
 
 
 def _session_search_roots(sessions_root: Path) -> tuple[Path, ...]:
@@ -422,6 +423,9 @@ class ActiveSessionTracker:
         self._renderer_path: Path | None = None
         self._renderer_new_session = False
         self._renderer_pending_session = False
+        self._renderer_draft_text = ""
+        self._renderer_draft_updated_at_ms = 0
+        self._renderer_send_requested = False
         self._renderer_match_candidates: list[dict[str, object]] = []
         self._renderer_manual_candidate_id = ""
         self._selection_seq = 0
@@ -493,6 +497,28 @@ class ActiveSessionTracker:
             return bool(self._renderer_new_session)
 
     @property
+    def renderer_pending_session(self) -> bool:
+        with self._lock:
+            return bool(self._renderer_pending_session)
+
+    @property
+    def renderer_draft_text(self) -> str:
+        """Return the unsent Renderer composer text, if any."""
+        with self._lock:
+            return self._renderer_draft_text
+
+    @property
+    def renderer_draft_updated_at_ms(self) -> int:
+        with self._lock:
+            return int(self._renderer_draft_updated_at_ms or 0)
+
+    @property
+    def renderer_send_requested(self) -> bool:
+        """Whether the latest Renderer composer event requested a send."""
+        with self._lock:
+            return bool(self._renderer_send_requested)
+
+    @property
     def match_candidates(self) -> list[dict[str, object]]:
         """Return safe, unarchived candidates for a pending renderer match."""
         with self._lock:
@@ -509,6 +535,10 @@ class ActiveSessionTracker:
                 "sessionId": self._renderer_session_id,
                 "rendererSessionId": self._renderer_raw_session_id,
                 "title": self._renderer_title,
+                # Do not include draft content in diagnostics; only expose the
+                # state needed to explain a pending send without leaking text.
+                "draftLength": len(self._renderer_draft_text),
+                "sendRequested": bool(self._renderer_send_requested),
                 "path": str(self._renderer_path) if self._renderer_path is not None else "",
                 "matchCandidates": [
                     dict(item) for item in self._renderer_match_candidates
@@ -757,6 +787,8 @@ class ActiveSessionTracker:
         renderer_session_id: str = "",
         selection_seq: int = 0,
         observed_at_ms: int = 0,
+        draft_text: str | None = None,
+        send_requested: bool = False,
     ) -> bool:
         """Accept an active conversation ref pushed by the renderer bridge."""
         if not self.enabled:
@@ -764,6 +796,12 @@ class ActiveSessionTracker:
         session_id = str(session_id or "").strip()
         renderer_session_id = str(renderer_session_id or session_id).strip()
         title = str(title or "").strip()
+        incoming_draft = None
+        if draft_text is not None:
+            incoming_draft = str(draft_text or "").replace("\x00", "")
+            if len(incoming_draft) > _RENDERER_DRAFT_MAX_CHARS:
+                incoming_draft = incoming_draft[:_RENDERER_DRAFT_MAX_CHARS]
+        incoming_send_requested = bool(send_requested)
         provisional_renderer_id = is_provisional_renderer_session_id(
             renderer_session_id
         )
@@ -926,6 +964,9 @@ class ActiveSessionTracker:
             previous_renderer_path = self._renderer_path
             previous_renderer_new_session = self._renderer_new_session
             previous_renderer_pending_session = self._renderer_pending_session
+            previous_renderer_draft = self._renderer_draft_text
+            previous_renderer_draft_updated_at_ms = self._renderer_draft_updated_at_ms
+            previous_renderer_send_requested = self._renderer_send_requested
             previous_match_candidates = [
                 dict(item) for item in self._renderer_match_candidates
             ]
@@ -1009,12 +1050,61 @@ class ActiveSessionTracker:
                     else incoming_received_at_ms
                 )
                 stuck_since_to_store = 0
+
+            selection_changed = (
+                renderer_session_id != previous_renderer_session_id
+                or display_title != previous_renderer_title
+                or new_session != previous_renderer_new_session
+                or pending_session != previous_renderer_pending_session
+            )
+            next_draft = (
+                incoming_draft
+                if incoming_draft is not None
+                else previous_renderer_draft
+            )
+            next_draft_updated_at_ms = previous_renderer_draft_updated_at_ms
+            if incoming_draft is not None and (
+                incoming_draft != previous_renderer_draft
+                or incoming_send_requested
+            ):
+                next_draft_updated_at_ms = (
+                    incoming_observed_at_ms
+                    or incoming_received_at_ms
+                )
+            provisional_selection = bool(
+                path is None and (new_session or pending_session)
+            )
+            if path is not None:
+                # Once the durable JSONL mapping exists, task_prompt/activity
+                # become authoritative and the browser draft must not shadow
+                # them on later refreshes.
+                next_draft = ""
+                next_draft_updated_at_ms = 0
+                next_send_requested = False
+            elif selection_changed and not provisional_selection:
+                # A switch to a different unresolved/ordinary selection cannot
+                # inherit the previous conversation's draft.
+                next_draft = ""
+                next_draft_updated_at_ms = 0
+                next_send_requested = False
+            else:
+                next_send_requested = (
+                    incoming_send_requested or previous_renderer_send_requested
+                )
+            if provisional_selection and next_draft_updated_at_ms <= 0:
+                next_draft_updated_at_ms = (
+                    incoming_observed_at_ms
+                    or incoming_received_at_ms
+                )
             self._renderer_session_id = session_id
             self._renderer_raw_session_id = renderer_session_id
             self._renderer_title = display_title
             self._renderer_path = path
             self._renderer_new_session = new_session
             self._renderer_pending_session = pending_session
+            self._renderer_draft_text = next_draft
+            self._renderer_draft_updated_at_ms = next_draft_updated_at_ms
+            self._renderer_send_requested = next_send_requested
             self._renderer_match_candidates = (
                 []
                 if new_session or path is not None or not provisional_renderer_id
@@ -1058,6 +1148,10 @@ class ActiveSessionTracker:
             or incoming_seq != previous_selection_seq
             or self._follow_state != previous_follow_state
             or follow_reason != previous_follow_reason
+            or self._renderer_draft_text != previous_renderer_draft
+            or self._renderer_draft_updated_at_ms
+            != previous_renderer_draft_updated_at_ms
+            or self._renderer_send_requested != previous_renderer_send_requested
         )
         if changed:
             _LOGGER.info(
@@ -1302,6 +1396,71 @@ class ActiveSessionTracker:
             "rolloutName": path.name,
         }
 
+    def _thread_ids_for_rollout_path(self, session_path: Path) -> list[str]:
+        """Return active thread ids that point at one exact rollout path.
+
+        The renderer can keep a provisional ``client-new-thread:*`` id after
+        the local session has already been persisted.  In that window the
+        session index may still contain the old title, while ``threads`` has
+        the current title and canonical id.  Resolve the id from the selected
+        path without falling back to latest-activity heuristics.
+        """
+        if not self.state_db.exists() or not self._threads_table_exists():
+            return []
+        raw_path = str(session_path)
+        prefixed_path = (
+            raw_path
+            if raw_path.startswith("\\\\?\\")
+            else f"\\\\?\\{raw_path}"
+        )
+        try:
+            con = sqlite3.connect(f"file:{self.state_db}?mode=ro", uri=True)
+            try:
+                con.row_factory = sqlite3.Row
+                columns = {
+                    str(row[1] or "").strip()
+                    for row in con.execute("pragma table_info(threads)")
+                }
+                if "id" not in columns or "rollout_path" not in columns:
+                    return []
+                selected = ["id"]
+                if "archived" in columns:
+                    selected.append("archived")
+                order_by = [
+                    column
+                    for column in ("archived", "updated_at_ms", "updated_at")
+                    if column in columns
+                ]
+                query = (
+                    f"select {', '.join(selected)} from threads "
+                    "where rollout_path in (?, ?)"
+                )
+                if order_by:
+                    query += " order by " + ", ".join(
+                        f"{column} asc" for column in order_by
+                    )
+                rows = con.execute(query, (raw_path, prefixed_path)).fetchall()
+            finally:
+                con.close()
+        except sqlite3.Error:
+            return []
+
+        result: list[str] = []
+        seen: set[str] = set()
+        path_archive = _path_archive_state(session_path, self.sessions_root)
+        for row in rows:
+            session_id = str(row["id"] or "").strip()
+            if not session_id or session_id in seen:
+                continue
+            archived = path_archive
+            if "archived" in row.keys() and row["archived"] is not None:
+                archived = _archive_flag(row["archived"])
+            if archived is not False:
+                continue
+            seen.add(session_id)
+            result.append(session_id)
+        return result
+
     def _resolve_provisional_renderer_ref_details(
         self,
         session_id: str,
@@ -1311,8 +1470,7 @@ class ActiveSessionTracker:
         if not is_provisional_renderer_session_id(session_id) or not title:
             return "", None, "awaiting-canonical-id", []
         candidates: dict[str, tuple[Path, dict[str, object]]] = {}
-        matched_candidate_ids = 0
-        resolved_records: list[dict[str, object]] = []
+        resolved_by_id: dict[str, tuple[Path, dict[str, object]]] = {}
         try:
             with self.session_index_path.open("r", encoding="utf-8") as handle:
                 for line in handle:
@@ -1320,20 +1478,52 @@ class ActiveSessionTracker:
                         item = json.loads(line)
                     except json.JSONDecodeError:
                         continue
-                    if str(item.get("thread_name") or "").strip() != title:
+                    if not _title_matches(
+                        str(item.get("thread_name") or "").strip(),
+                        title,
+                    ):
                         continue
                     candidate_id = str(item.get("id") or "").strip()
                     if not candidate_id or is_provisional_renderer_session_id(candidate_id):
                         continue
-                    matched_candidate_ids += 1
                     path = self.path_from_renderer_thread_id(candidate_id)
+                    if path is None:
+                        # The session index can be written before state_5.sqlite
+                        # receives its thread row.  The rollout filename is an
+                        # exact-id lookup, so it is safe for this controlled
+                        # provisional-session reconciliation.
+                        path = find_session_file(candidate_id, self.sessions_root)
                     if path is not None:
                         record = self._renderer_candidate_record(candidate_id, path, title)
-                        resolved_records.append(record)
+                        resolved_by_id.setdefault(candidate_id, (path, record))
                         if record.get("archived") is False:
                             candidates[candidate_id] = (path, record)
         except OSError:
-            return "", None, "awaiting-persistence", []
+            # The state DB can already contain the canonical row even while
+            # session_index.jsonl is being replaced or is temporarily absent.
+            pass
+
+        # A long-running Desktop process can update the current thread title in
+        # state_5.sqlite before session_index.jsonl catches up.  Use the same
+        # exact-title/prefix mapping as ordinary title resolution, then recover
+        # the canonical id from that exact rollout path.  The active-path set
+        # remains unique-only, so duplicate titles still fail closed.
+        title_path = self.path_for_title(title)
+        if title_path is not None:
+            for candidate_id in self._thread_ids_for_rollout_path(title_path):
+                if candidate_id in resolved_by_id:
+                    continue
+                record = self._renderer_candidate_record(
+                    candidate_id,
+                    title_path,
+                    title,
+                )
+                resolved_by_id[candidate_id] = (title_path, record)
+                if record.get("archived") is False:
+                    candidates[candidate_id] = (title_path, record)
+
+        matched_candidate_ids = len(resolved_by_id)
+        resolved_records = [record for _path, record in resolved_by_id.values()]
         if len(candidates) != 1:
             reason = (
                 "ambiguous-persisted-identity"

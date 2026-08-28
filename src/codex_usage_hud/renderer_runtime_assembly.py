@@ -195,6 +195,11 @@ def assemble_renderer_session(
     bridge_callbacks.connect_tracker()
     bridge_callbacks.install(client)
 
+    def request_renderer_restart() -> None:
+        """Request a renderer restart and wake the event loop immediately."""
+        restart_requested.set()
+        command_refresh_requested.set()
+
     background_usage_runtime = getattr(context, "background_usage_runtime", None)
     overlay_runtime_commands = overlay_commands.OverlayRuntimeCommandCallbacks(
         background_runtime=background_usage_runtime,
@@ -204,7 +209,7 @@ def assemble_renderer_session(
     )
     bridge = services.bridge_factory(
         context.settings_store,
-        restart_callback=restart_requested.set,
+        restart_callback=request_renderer_restart,
         command_callback=bridge_callbacks.enqueue_command,
         active_session_callback=bridge_callbacks.observe_active_session,
         attachments_callback=bridge_callbacks.observe_attachments,

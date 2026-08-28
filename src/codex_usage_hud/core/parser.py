@@ -394,6 +394,7 @@ class WorkStatusItem:
     updated_at: datetime | None = None
     current: bool = False
     pending_accounting: bool = False
+    draft_text: str = ""
     kind: str = "session"
     event_id: str = ""
 
@@ -518,6 +519,12 @@ class ParsedSession:
     renderer_session_id: str = ""
     selection_seq: int = 0
     selection_observed_at_ms: int = 0
+    # Renderer-only composer state.  It exists before a new-session JSONL file
+    # is persisted and is intentionally kept separate from task_prompt, which
+    # is sourced from durable session records.
+    composer_draft: str = ""
+    composer_draft_updated_at_ms: int = 0
+    composer_send_requested: bool = False
     follow_state: str = ""
     follow_reason: str = ""
     follow_timing: dict[str, int] = field(default_factory=dict)
@@ -2008,6 +2015,7 @@ class JsonlSessionParser:
         return rounds
 
     def latest_activity(self, records: Sequence[Mapping[str, Any]]) -> Activity:
+        latest_token_count: Activity | None = None
         for record in reversed(records):
             payload = record.get("payload") or {}
             if not isinstance(payload, Mapping):
@@ -2099,8 +2107,13 @@ class JsonlSessionParser:
             if record_type == "event_msg" and payload_type == "task_started":
                 return Activity("reasoning", "正在思考", timestamp)
             if record_type == "event_msg" and payload_type == "token_count":
-                return Activity("confirmed", "received token_count", timestamp)
-        return Activity("idle", "no activity", None)
+                # Token accounting is frequently appended after a command or
+                # streamed assistant message. Keep it as a fallback so it does
+                # not overwrite the user-visible work that preceded it.
+                latest_token_count = Activity(
+                    "confirmed", "received token_count", timestamp
+                )
+        return latest_token_count or Activity("idle", "no activity", None)
 
     def latest_output(self, records: Sequence[Mapping[str, Any]]) -> Activity:
         """Return the latest assistant-visible text, ignoring bookkeeping events."""

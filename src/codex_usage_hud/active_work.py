@@ -263,9 +263,18 @@ def _extract_tool_file_target(text: str) -> str:
 
 
 def _tool_status_text(detail: str) -> str:
-    name, args = _tool_invocation_parts(detail)
+    text = " ".join(str(detail or "").split())
+    if text.startswith("执行命令:"):
+        command = text.removeprefix("执行命令:").strip()
+        return f"已执行 {_compact_work_text(command, 52)}" if command else "已执行命令"
+    if text.startswith("命令失败:"):
+        command = text.removeprefix("命令失败:").strip()
+        return f"命令失败 {_compact_work_text(command, 52)}" if command else "命令失败"
+    name, args = _tool_invocation_parts(text)
     lower_name = name.lower()
     target = _extract_tool_file_target(args)
+    if lower_name in {"exec", "unified_exec", "functions.exec"}:
+        return "正在执行命令"
     if "apply_patch" in lower_name or "edit" in lower_name:
         return f"正在编辑 {target}" if target else "正在编辑文件"
     if "shell" in lower_name:
@@ -299,6 +308,8 @@ def _work_status_text(
     status_label: str,
 ) -> str:
     activity = snapshot.activity
+    if _is_renderer_provisional_selection(snapshot):
+        return "正在发送请求" if snapshot.composer_send_requested else "等待发送"
     if status_value == "recent":
         return "已完成"
     if status_value == "error":
@@ -320,6 +331,25 @@ def _work_status_text(
         model_name = _current_task_model_name(snapshot)
         return f"{model_name} 正在思考" if model_name else "正在思考"
     return status_label
+
+
+def _is_renderer_provisional_selection(snapshot: ParsedSession) -> bool:
+    source = str(snapshot.selection_source or "").strip().lower()
+    if source.startswith(("renderer-new-session", "renderer-pending")):
+        return True
+    return bool(
+        not _work_session_id(snapshot)
+        and snapshot.session_path is None
+        and (
+            str(getattr(snapshot, "composer_draft", "") or "").strip()
+            or bool(getattr(snapshot, "composer_send_requested", False))
+        )
+    )
+
+
+def _work_session_id(snapshot: ParsedSession) -> str:
+    value = str(snapshot.session_id or "").strip()
+    return "" if value.lower() in {"", "n/a"} else value
 
 
 def _elapsed_compact(
@@ -386,6 +416,12 @@ def _work_status_from_snapshot(
     request_status = snapshot.request.status
     if request_status == "error" or snapshot.request.error:
         return "error", "出错", False
+    if _is_renderer_provisional_selection(snapshot):
+        if snapshot.composer_send_requested:
+            # A composer send is an active task even before Codex has persisted
+            # the JSONL file or exposed its canonical thread id.
+            return "running", "发送中", False
+        return "draft", "待发送", False
     if snapshot.task_completed_at is not None:
         return "recent", "刚完成", False
     if snapshot.final_answer_at is not None and (
@@ -575,7 +611,24 @@ def _work_item_model_startup_timed_out(
         or snapshot.activity.kind != "user"
     ):
         return False
+    draft_text = str(getattr(snapshot, "composer_draft", "") or "").strip()
+    draft_updated_at_ms = int(
+        getattr(snapshot, "composer_draft_updated_at_ms", 0) or 0
+    )
+    draft_updated_at = None
+    if draft_updated_at_ms > 0:
+        try:
+            draft_updated_at = datetime.fromtimestamp(
+                draft_updated_at_ms / 1000.0,
+                tz=current_time.tzinfo,
+            )
+        except (OverflowError, OSError, ValueError):
+            draft_updated_at = None
     updated_at = (
+        draft_updated_at
+        if _is_renderer_provisional_selection(snapshot) and draft_updated_at is not None
+        else None
+    ) or (
         snapshot.request.updated_at
         or snapshot.activity.timestamp
         or snapshot.last_event_time
@@ -616,7 +669,24 @@ def _work_item_from_snapshot(
         # keep an active bubble (and its live elapsed clock) for four hours.
         return None
 
+    draft_text = str(getattr(snapshot, "composer_draft", "") or "").strip()
+    draft_updated_at_ms = int(
+        getattr(snapshot, "composer_draft_updated_at_ms", 0) or 0
+    )
+    draft_updated_at = None
+    if draft_updated_at_ms > 0:
+        try:
+            draft_updated_at = datetime.fromtimestamp(
+                draft_updated_at_ms / 1000.0,
+                tz=current_time.tzinfo,
+            )
+        except (OverflowError, OSError, ValueError):
+            draft_updated_at = None
     updated_at = (
+        draft_updated_at
+        if _is_renderer_provisional_selection(snapshot) and draft_updated_at is not None
+        else None
+    ) or (
         snapshot.request.updated_at
         or snapshot.activity.timestamp
         or snapshot.last_event_time
@@ -629,15 +699,20 @@ def _work_item_from_snapshot(
             else current_time.replace(tzinfo=None)
         )
         age_seconds = (current_for_age - updated_at).total_seconds()
-        if status_value != "recent" and age_seconds > ACTIVE_WORK_STALE_SECONDS:
+        if (
+            status_value != "recent"
+            and age_seconds > ACTIVE_WORK_STALE_SECONDS
+            and not _is_renderer_provisional_selection(snapshot)
+        ):
             return None
 
+    session_id = _work_session_id(snapshot)
     display_title = (
         title.strip()
         or snapshot.session_title.strip()
         or str(getattr(snapshot, "agent_nickname", "") or "").strip()
-        or str(snapshot.session_id or "").strip()
-        or "Codex 工作"
+        or session_id
+        or ("新会话" if _is_renderer_provisional_selection(snapshot) else "Codex 工作")
     )
     detail = (
         snapshot.request.error
@@ -645,12 +720,20 @@ def _work_item_from_snapshot(
         or snapshot.error
         or "等待更多活动日志"
     )
-    if snapshot.activity.kind:
+    if _is_renderer_provisional_selection(snapshot) and draft_text:
+        detail = draft_text
+    if snapshot.activity.kind and not (
+        _is_renderer_provisional_selection(snapshot) and draft_text
+    ):
         detail = f"{_work_activity_label(snapshot.activity.kind)}：{detail}"
     round_index = _current_task_round_index(snapshot)
     model_name = _current_task_model_name(snapshot)
     status_text = _work_status_text(snapshot, status_value, status_label)
-    last_text = snapshot.last_output.detail.strip()
+    last_text = (
+        draft_text
+        if _is_renderer_provisional_selection(snapshot) and draft_text
+        else snapshot.last_output.detail.strip()
+    )
     started_at = snapshot.task_started_at or snapshot.request.started_at
     elapsed_reference = (
         snapshot.task_completed_at
@@ -666,7 +749,6 @@ def _work_item_from_snapshot(
     if source or snapshot.selection_source:
         progress_parts.append(source or snapshot.selection_source)
     progress = " | ".join(progress_parts)
-    session_id = str(snapshot.session_id or "").strip()
     item_id = session_id or _session_path_key(snapshot.session_path) or display_title
     return WorkStatusItem(
         id=str(item_id),
@@ -703,6 +785,7 @@ def _work_item_from_snapshot(
         updated_at=updated_at,
         current=current,
         pending_accounting=pending_accounting,
+        draft_text=draft_text,
     )
 
 
@@ -721,9 +804,32 @@ def _refresh_visible_current_work_item(
     """Apply current-session state without waiting for the recent-work scan."""
     if _hide_from_work_overlay(snapshot):
         return list(items)
-    session_id = str(snapshot.session_id or "").strip()
+    session_id = _work_session_id(snapshot)
+    refreshed = _work_item_from_snapshot(
+        snapshot,
+        current=True,
+        title=snapshot.session_title,
+        source=snapshot.selection_source,
+        context=context,
+    )
     if not session_id:
-        return list(items)
+        if refreshed is None:
+            return list(items)
+        provisional_index = next(
+            (
+                index
+                for index, item in enumerate(items)
+                if not str(item.session_id or "").strip()
+                and str(item.source or "").strip()
+                == str(snapshot.selection_source or "").strip()
+            ),
+            None,
+        )
+        if provisional_index is None:
+            return [*items, refreshed]
+        updated = list(items)
+        updated[provisional_index] = refreshed
+        return updated
     existing_index = next(
         (
             index
@@ -731,13 +837,6 @@ def _refresh_visible_current_work_item(
             if str(item.session_id or item.id).strip() == session_id
         ),
         None,
-    )
-    refreshed = _work_item_from_snapshot(
-        snapshot,
-        current=True,
-        title=snapshot.session_title,
-        source=snapshot.selection_source,
-        context=context,
     )
     segment_released = bool(
         refreshed is not None
@@ -770,6 +869,21 @@ def _refresh_visible_current_work_item(
             return list(items)
         return [item for index, item in enumerate(items) if index != existing_index]
     if existing_index is None:
+        # Replace the immediate send bubble when Codex later provides the
+        # canonical session id instead of briefly showing both entries.
+        provisional_index = next(
+            (
+                index
+                for index, item in enumerate(items)
+                if not str(item.session_id or "").strip()
+                and str(item.source or "").lower().startswith("renderer-")
+            ),
+            None,
+        )
+        if provisional_index is not None and refreshed is not None:
+            updated = list(items)
+            updated[provisional_index] = refreshed
+            return updated
         if refreshed is not None and refreshed.status == "recent":
             # The inherited terminal may already have removed the current item.
             # Replace it directly when a later real completion arrives, rather
@@ -1035,7 +1149,13 @@ def active_work_items_for_snapshot(
     ordered = sorted(items.values(), key=_work_overlay_item_sort_key, reverse=True)
     provider_scope = _effective_notification_provider_scope(context, snapshot)
     if provider_scope is not None:
-        ordered = [item for item in ordered if item.model_provider in provider_scope]
+        # The selected current session remains visible even while its provider
+        # metadata is temporarily unavailable during a Renderer handoff.
+        ordered = [
+            item
+            for item in ordered
+            if item.current or item.model_provider in provider_scope
+        ]
     selected = _select_runtime_work_overlay_items(
         context,
         ordered,
@@ -1056,6 +1176,21 @@ def active_work_items_for_snapshot(
         for item in ordered
         if str(item.id or "").strip() in visible_ids
     ][:item_limit]
+    current_item = next(
+        (
+            item
+            for item in ordered
+            if bool(item.current) and item.status != "recent"
+        ),
+        None,
+    )
+    if current_item is not None and all(
+        str(item.id or "") != str(current_item.id or "") for item in selected
+    ):
+        if selected:
+            selected[-1] = current_item
+        else:
+            selected = [current_item]
     visible_item_cache.clear()
     visible_item_cache.update(
         {

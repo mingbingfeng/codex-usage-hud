@@ -635,7 +635,7 @@ class OverlayRenderingMixin:
             status_label.setShimmerEnabled(
                 not system_notice
                 and not rest_reminder
-                and status not in {"recent", "background_usage"}
+                and status not in {"recent", "background_usage", "draft"}
             )
             status_label.setVisible(True)
         else:

@@ -86,6 +86,32 @@ class TimestampAndFieldTests(unittest.TestCase):
 
 
 class JsonlSessionParserTests(unittest.TestCase):
+    def test_latest_activity_keeps_command_visible_after_token_count(self) -> None:
+        parser = JsonlSessionParser()
+        records = [
+            record(
+                "2026-05-28T00:00:00Z",
+                "event_msg",
+                {
+                    "type": "item_completed",
+                    "item": {
+                        "type": "CommandExecution",
+                        "command": ["pwsh.exe", "-Command", "git status"],
+                        "status": "completed",
+                    },
+                },
+            ),
+            token_count("2026-05-28T00:00:01Z", 1, 0, 1, 0, 2, 2),
+        ]
+        for index, item in enumerate(records, 1):
+            item["_line"] = index
+            item["_dt"] = parse_timestamp(item["timestamp"])
+
+        activity = parser.latest_activity(records)
+
+        self.assertEqual(activity.kind, "tool call")
+        self.assertEqual(activity.detail, "执行命令: git status")
+
     def test_session_meta_exposes_provider_and_cli_client_kind(self) -> None:
         parser = JsonlSessionParser()
         snapshot = parser.parse_records(
@@ -363,7 +389,8 @@ class JsonlSessionParserTests(unittest.TestCase):
 
         snapshot = parser.parse_records(records)
 
-        self.assertEqual(snapshot.activity.kind, "confirmed")
+        self.assertEqual(snapshot.activity.kind, "agent")
+        self.assertEqual(snapshot.activity.detail, "最后一轮输出会保留")
         self.assertEqual(snapshot.last_output.kind, "agent")
         self.assertEqual(snapshot.last_output.detail, "最后一轮输出会保留")
 

@@ -104,6 +104,28 @@ def _launch_environment(
     existing_names = {str(name).casefold() for name in environment}
     for name, value in _windows_registry_environment().items():
         normalized_name = str(name)
+        if normalized_name.casefold() == "path":
+            current_name = next(
+                (item for item in environment if str(item).casefold() == "path"),
+                "PATH",
+            )
+            current_value = str(environment.get(current_name) or "")
+            registry_value = str(value or "")
+            merged: list[str] = []
+            seen_path_entries: set[str] = set()
+            for entry in (*current_value.split(os.pathsep), *registry_value.split(os.pathsep)):
+                path_entry = entry.strip()
+                if not path_entry:
+                    continue
+                path_key = os.path.normcase(path_entry).rstrip("\\/")
+                if path_key in seen_path_entries:
+                    continue
+                seen_path_entries.add(path_key)
+                merged.append(path_entry)
+            if merged:
+                environment[current_name] = os.pathsep.join(merged)
+            existing_names.add(current_name.casefold())
+            continue
         if normalized_name.casefold() in existing_names:
             continue
         environment[normalized_name] = value

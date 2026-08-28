@@ -568,6 +568,19 @@ def test_active_session_container_prefers_thread_role_list() -> None:
     )
 
 
+def test_active_session_container_uses_selected_identity_row_list() -> None:
+    script = renderer_script._RENDERER_HUD_SCRIPT_TEMPLATE
+    container_start = script.index("function activeSessionContainer()")
+    container_end = script.index("function postActiveSession", container_start)
+    container = script[container_start:container_end]
+
+    assert "const selectedIdentityRow = identityRows.find(activeSessionRowSelected)" in container
+    selected_branch = container[container.index("if (selectedIdentityRow)") :]
+    assert selected_branch.index('row?.closest?.("[role=\'list\']")') < selected_branch.index(
+        'row?.closest?.("aside, nav'
+    )
+
+
 def test_active_session_guards_header_title_transition_after_canonical_id() -> None:
     script = renderer_script._RENDERER_HUD_SCRIPT_TEMPLATE
     guard_start = script.index("const headerTitleTransition = (")

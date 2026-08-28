@@ -188,6 +188,22 @@ TEXT = r"""
         });
       }
 
+      function activeSessionComposerDraftText() {
+        try {
+          const composer = composerElement();
+          const input = composer?.querySelector?.(
+            "textarea, [contenteditable='true'], [role='textbox'], .ProseMirror",
+          );
+          if (!input || !visible(input)) return "";
+          if (input.tagName === "TEXTAREA" || typeof input.value === "string") {
+            return String(input.value || "");
+          }
+          return String(input.innerText || input.textContent || "");
+        } catch (_) {
+          return "";
+        }
+      }
+
       function activeSessionHeaderLooksNewSession(rows) {
         const header = activeSessionHeaderElement();
         if (!visible(header)) return false;
@@ -300,6 +316,7 @@ TEXT = r"""
             url: location.href,
             newSession: true,
             matchedBy: "header-empty",
+            draftText: activeSessionComposerDraftText(),
           };
         }
         let row = rows.find(activeSessionRowSelected) || rows.find(activeSessionRowMatchesLocation) || null;
@@ -330,27 +347,42 @@ TEXT = r"""
           newSession,
           pendingSession,
           matchedBy: row ? "sidebar-row" : (title ? "header-title" : ""),
+          draftText: activeSessionComposerDraftText(),
         };
       }
 
       function activeSessionContainer() {
         const titleNode = activeSessionFirstOutsideHud(activeSessionTitleSelector);
-        const row = activeSessionFirstOutsideHud(activeSessionIdentitySelector)
+        const identityRows = Array.from(document.querySelectorAll(activeSessionIdentitySelector))
+          .filter((node) => !activeSessionNodeOwnedByHud(node));
+        const selectedIdentityRow = identityRows.find(activeSessionRowSelected) || null;
+        const row = selectedIdentityRow
+          || identityRows[0]
           || titleNode?.closest?.(activeSessionRowSelector)
           || activeSessionFirstOutsideHud(activeSessionRowSelector);
-        // Prefer the full sidebar nav/aside over the nearest role=list.
-        // Codex Desktop splits the sidebar into multiple role=list groups
-        // (pinned, recent, etc.); the first thread row's closest list may
-        // contain only pinned items, so the selected conversation in another
-        // group would never be found.  The nav/aside ancestor spans all groups.
+        // Prefer the role=list that owns the selected identity row. Codex
+        // Desktop can expose separate lists for pinned and recent threads;
+        // using the first row's list would hide the selected row in another
+        // group. Without an explicit selected row, use the broader nav/aside
+        // so all groups remain searchable.
         // Note: [class*='sidebar'] is intentionally last because row items
         // themselves may carry "sidebar" in their class (data-app-action-sidebar-*).
-        return row?.closest?.("nav, aside, [role='navigation']")
+        if (selectedIdentityRow) {
+          return row?.closest?.("[role='list']")
+            || row?.closest?.("aside, nav, [role='navigation']")
+            || row?.closest?.("[data-testid*='sidebar' i], [class*='sidebar' i]")
+            || row?.parentElement
+            || document.querySelector("[role='list']")
+            || document.querySelector("aside, nav, [role='navigation']")
+            || document.querySelector("[data-testid*='sidebar' i], [class*='sidebar' i]")
+            || null;
+        }
+        return row?.closest?.("aside, nav, [role='navigation']")
           || row?.closest?.("[role='list']")
           || row?.closest?.("[data-testid*='sidebar' i], [class*='sidebar' i]")
           || row?.parentElement
-          || document.querySelector("nav, aside, [role='navigation']")
           || document.querySelector("[role='list']")
+          || document.querySelector("aside, nav, [role='navigation']")
           || document.querySelector("[data-testid*='sidebar' i], [class*='sidebar' i]")
           || null;
       }
@@ -360,6 +392,12 @@ TEXT = r"""
         const ref = overrideRef || readActiveSessionRef();
         const newSession = !!ref.newSession || reason === "new-session";
         const pendingSession = !!ref.pendingSession;
+        const draftText = Object.prototype.hasOwnProperty.call(ref, "draftText")
+          ? String(ref.draftText || "")
+          : activeSessionComposerDraftText();
+        const sendRequested = /^(composer-send|composer-send-click|composer-enter|composer-submit)$/i.test(
+          String(reason || ""),
+        );
         if (!ref.sessionId && !ref.title && !newSession && !pendingSession) return;
         const rawRendererSessionId = normalize(
           ref.rendererSessionId || ref.rawSessionId || ref.sessionId || "",
@@ -422,6 +460,8 @@ TEXT = r"""
           ref.url || location.href,
           newSession,
           pendingSession,
+          draftText,
+          sendRequested,
         ]);
         if (window[activeSessionLastSignatureName] === signature && appliedSeq >= selectionSeq) return;
         const payload = {
@@ -433,6 +473,8 @@ TEXT = r"""
           reason: newSession ? "new-session" : (pendingSession ? "pending-session" : reason),
           newSession,
           pendingSession,
+          draftText,
+          sendRequested,
           matchedBy: ref.matchedBy || "",
           observedAt: Number(ref.observedAt || 0) || Date.now(),
         };
@@ -479,6 +521,18 @@ TEXT = r"""
           postActiveSession(reason);
           refreshActiveSessionObserver();
         }, 0);
+      }
+
+      function scheduleActiveSessionDraftReport() {
+        ctx.lifecycle.clearTimeout(window[activeSessionDraftTimerName] || 0);
+        window[activeSessionDraftTimerName] = ctx.lifecycle.timeout(
+          "active_session",
+          () => {
+            window[activeSessionDraftTimerName] = 0;
+            postActiveSession("composer-draft");
+          },
+          80,
+        );
       }
 
       function clearActiveSessionSendFollowup() {
@@ -706,6 +760,7 @@ TEXT = r"""
         delete window[activeSessionObserverName];
         delete window[activeSessionBootstrapObserverName];
         delete window[activeSessionTimerName];
+        delete window[activeSessionDraftTimerName];
         delete window[activeSessionSendFollowupTimersName];
         delete window[activeSessionComposerHandlerName];
         delete window[activeSessionClickHandlerName];
@@ -778,6 +833,11 @@ TEXT = r"""
               scheduleActiveSessionSendFollowup("composer-submit");
             }
           };
+          const input = (event) => {
+            if (activeSessionComposerTarget(event.target)) {
+              scheduleActiveSessionDraftReport();
+            }
+          };
           const keydown = (event) => {
             if (
               event.key === "Enter"
@@ -788,8 +848,9 @@ TEXT = r"""
               scheduleActiveSessionSendFollowup("composer-enter");
             }
           };
-          window[activeSessionComposerHandlerName] = { submit, keydown };
+          window[activeSessionComposerHandlerName] = { submit, input, keydown };
           activeSessionScope.listen(document, "submit", submit, true);
+          activeSessionScope.listen(document, "input", input, true);
           if (!composerBadgeEnabled) {
             activeSessionScope.listen(document, "keydown", keydown, true);
           }
@@ -812,6 +873,8 @@ TEXT = r"""
           sessionId: ref.sessionId || ref.rendererSessionId || "",
           rendererSessionId: ref.rendererSessionId || "",
           title: ref.title || "",
+          draftText: ref.draftText || "",
+          sendRequested: /^(composer-send|composer-send-click|composer-enter|composer-submit)$/i.test(reportReason),
           newSession: !!ref.newSession,
           pendingSession: !!ref.pendingSession,
           matchedBy: ref.matchedBy || "",

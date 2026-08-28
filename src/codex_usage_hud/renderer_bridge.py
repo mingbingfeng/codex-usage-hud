@@ -26,7 +26,7 @@ def _active_session_observation_key(payload: Mapping[str, object]) -> tuple[obje
         sequence = max(0, int(raw_sequence or 0))
     except (TypeError, ValueError):
         sequence = 0
-    return (
+    base = (
         sequence,
         str(payload.get("sessionId") or payload.get("session_id") or "").strip(),
         str(
@@ -38,6 +38,32 @@ def _active_session_observation_key(payload: Mapping[str, object]) -> tuple[obje
         bool(payload.get("newSession") or payload.get("new_session")),
         bool(payload.get("pendingSession") or payload.get("pending_session")),
     )
+    # Draft/send metadata was added after the original six-field observation
+    # key. Keep old payloads six fields wide for compatibility with external
+    # callback fakes, while making real composer changes refresh the snapshot.
+    if any(
+        key in payload
+        for key in (
+            "draftText",
+            "draft_text",
+            "composerDraft",
+            "composer_draft",
+            "sendRequested",
+            "send_requested",
+        )
+    ):
+        return (
+            *base,
+            str(
+                payload.get("draftText")
+                or payload.get("draft_text")
+                or payload.get("composerDraft")
+                or payload.get("composer_draft")
+                or ""
+            ),
+            bool(payload.get("sendRequested") or payload.get("send_requested")),
+        )
+    return base
 
 
 def _observation_key_sequence(observation_key: object | None) -> int:
@@ -51,6 +77,7 @@ def _observation_key_sequence(observation_key: object | None) -> int:
 
 _COMPOSER_SEND_REASONS = frozenset({
     "composer-send",
+    "composer-send-click",
     "composer-enter",
     "composer-submit",
 })
@@ -377,6 +404,26 @@ class RendererBridgeCallbacks:
             observer_kwargs["new_session"] = True
         if bool(payload.get("pendingSession") or payload.get("pending_session")):
             observer_kwargs["pending_session"] = True
+        if any(
+            key in payload
+            for key in (
+                "draftText",
+                "draft_text",
+                "composerDraft",
+                "composer_draft",
+            )
+        ):
+            observer_kwargs["draft_text"] = (
+                payload.get("draftText")
+                if "draftText" in payload
+                else payload.get("draft_text")
+                if "draft_text" in payload
+                else payload.get("composerDraft")
+                if "composerDraft" in payload
+                else payload.get("composer_draft")
+            )
+        if bool(payload.get("sendRequested") or payload.get("send_requested")):
+            observer_kwargs["send_requested"] = True
 
         observation_key = _active_session_observation_key(payload)
         try:

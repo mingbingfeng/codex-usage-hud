@@ -2884,7 +2884,9 @@ class BudgetHelperTests(unittest.TestCase):
             items = active_work_items_for_snapshot(context, snapshot, current)
 
         self.assertEqual(len(items), 2)
-        self.assertEqual([item.id for item in items], ["session-worker-b", "session-worker-a"])
+        self.assertEqual(
+            [item.id for item in items], ["session-worker-b", "session-current"]
+        )
 
     def test_work_overlay_hides_inherited_completion_from_copied_session(self) -> None:
         now = datetime.now().astimezone()
@@ -3502,6 +3504,40 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertEqual(refreshed[0].session_started_at, newer.session_started_at)
         self.assertEqual([item.id for item in after_terminal], [older.id])
 
+    def test_work_overlay_retains_current_item_when_item_limit_is_full(self) -> None:
+        now = datetime.now().astimezone()
+        current = WorkStatusItem(
+            id="current-session",
+            session_id="current-session",
+            title="Current session",
+            status="running",
+            status_label="运行中",
+            detail="current work",
+            model_provider="custom",
+            current=True,
+            updated_at=now - timedelta(minutes=5),
+        )
+        newer = WorkStatusItem(
+            id="newer-background",
+            title="Newer background work",
+            status="running",
+            status_label="运行中",
+            detail="other work",
+            model_provider="custom",
+            updated_at=now,
+        )
+        context = SimpleNamespace(
+            user_config=replace(UserConfig.defaults(), work_overlay_max_items=1),
+            app_provider="custom",
+        )
+
+        stabilized = overlay_projection._stabilize_published_work_overlay_items(
+            context,
+            [newer, current],
+        )
+
+        self.assertEqual([item.id for item in stabilized], ["current-session"])
+
     def test_current_completion_refresh_does_not_wait_for_recent_work_scan(self) -> None:
         now = datetime.now().astimezone()
         started_at = now - timedelta(minutes=2)
@@ -3985,6 +4021,86 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertEqual(items[0].model_name, "gpt-5.5")
         self.assertEqual(items[0].profile_name, "muyuan")
         self.assertEqual(items[0].status_text, "gpt-5.5 正在思考")
+
+    def test_renderer_new_session_creates_provisional_work_bubble(self) -> None:
+        snapshot = ParsedSession(
+            status="waiting",
+            selection_source="renderer-new-session",
+        )
+        context = SimpleNamespace(
+            sessions_root=Path(tempfile.gettempdir()) / "missing-codex-work-root",
+            parser=JsonlSessionParser(),
+            active_session_tracker=None,
+        )
+
+        items = active_work_items_for_snapshot(context, snapshot, None)
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].title, "新会话")
+        self.assertEqual(items[0].status, "draft")
+        self.assertEqual(items[0].status_text, "等待发送")
+
+    def test_renderer_new_session_draft_stays_visible_until_send(self) -> None:
+        snapshot = ParsedSession(
+            status="waiting",
+            selection_source="renderer-new-session",
+            composer_draft="Keep this text visible until I send it.",
+            composer_draft_updated_at_ms=int(time.time() * 1000),
+        )
+        context = SimpleNamespace(
+            sessions_root=Path(tempfile.gettempdir()) / "missing-codex-work-root",
+            parser=JsonlSessionParser(),
+            active_session_tracker=None,
+        )
+
+        draft_items = active_work_items_for_snapshot(context, snapshot, None)
+        snapshot.composer_send_requested = True
+        sending_items = active_work_items_for_snapshot(context, snapshot, None)
+
+        self.assertEqual(len(draft_items), 1)
+        self.assertEqual(draft_items[0].status, "draft")
+        self.assertEqual(draft_items[0].last_text, snapshot.composer_draft)
+        self.assertEqual(len(sending_items), 1)
+        self.assertEqual(sending_items[0].status, "running")
+        self.assertEqual(sending_items[0].status_text, "正在发送请求")
+
+    def test_work_overlay_formats_completed_command_activity(self) -> None:
+        self.assertEqual(
+            active_work._tool_status_text("执行命令: git status --short"),
+            "已执行 git status --short",
+        )
+        self.assertEqual(active_work._tool_status_text("exec"), "正在执行命令")
+
+    def test_current_work_replaces_provisional_bubble_after_mapping(self) -> None:
+        context = SimpleNamespace()
+        provisional = ParsedSession(
+            status="waiting",
+            selection_source="renderer-new-session",
+        )
+        provisional_item = active_work._work_item_from_snapshot(
+            provisional,
+            current=True,
+            source=provisional.selection_source,
+            context=context,
+        )
+        now = datetime.now().astimezone()
+        mapped = ParsedSession(
+            session_id="thread-1",
+            session_title="Mapped task",
+            selection_source="renderer:Mapped task",
+            request=RequestTokens(status="running", updated_at=now, started_at=now),
+            activity=Activity(kind="agent", detail="streaming", timestamp=now),
+        )
+
+        items = active_work._refresh_visible_current_work_item(
+            context,
+            [provisional_item],
+            mapped,
+        )
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].session_id, "thread-1")
+        self.assertEqual(items[0].title, "Mapped task")
 
     def test_rest_reminder_card_copy_covers_prompt_postpone_and_resting_actions(self) -> None:
         base = {
@@ -4902,6 +5018,29 @@ class BudgetHelperTests(unittest.TestCase):
 
         write_json.assert_called_once()
 
+    def test_desktop_work_overlay_publishes_active_items_on_first_update(self) -> None:
+        item = WorkStatusItem(
+            id="thread-1",
+            title="Running CLI task",
+            session_id="thread-1",
+            status="running",
+            status_label="运行中",
+            detail="正在执行",
+        )
+        overlay = DesktopWorkOverlay(item_limit=2)
+
+        with (
+            patch.object(overlay, "_runtime_available", return_value=True),
+            patch.object(overlay, "_theme_payload", return_value={}),
+            patch.object(overlay, "_start"),
+            patch("codex_usage_hud.desktop_overlay.write_json_object") as write_json,
+        ):
+            overlay.update([item])
+
+        written_items = write_json.call_args.args[1]["items"]
+        self.assertEqual(len(written_items), 1)
+        self.assertEqual(written_items[0]["sessionId"], "thread-1")
+
     def test_work_overlay_helper_uses_qfilesystemwatcher_for_state_updates(self) -> None:
         source = (
             PROJECT_ROOT
@@ -5654,11 +5793,11 @@ with tempfile.TemporaryDirectory() as temp_dir:
                 patch("codex_usage_hud.desktop_overlay.importlib.util.find_spec", return_value=object()),
                 patch("codex_usage_hud.desktop_overlay.subprocess.Popen", return_value=fake_process) as popen,
             ):
-                # The first HUD snapshot is historical persisted state and
-                # must not open a bubble; the following event may publish it.
+                # A running persisted session is valid on the first HUD
+                # snapshot and should publish immediately.
                 overlay.update([item])
-                popen.assert_not_called()
-                self.assertFalse(overlay._state_path.exists())
+                popen.assert_called_once()
+                self.assertTrue(overlay._state_path.exists())
                 overlay.update([item])
 
             popen.assert_called_once()
@@ -5730,7 +5869,7 @@ with tempfile.TemporaryDirectory() as temp_dir:
             ),
         )
 
-    def test_desktop_work_overlay_suppresses_first_snapshot_items(self) -> None:
+    def test_desktop_work_overlay_publishes_first_snapshot_items(self) -> None:
         item = WorkStatusItem(
             id="thread-startup",
             title="Historical task",
@@ -5748,11 +5887,13 @@ with tempfile.TemporaryDirectory() as temp_dir:
             patch("codex_usage_hud.desktop_overlay.write_json_object") as write_json,
         ):
             overlay.update([item])
-            write_json.assert_not_called()
+            write_json.assert_called_once()
+            self.assertEqual(
+                write_json.call_args.args[1]["items"][0]["id"], "thread-startup"
+            )
             overlay.update([item])
 
-        write_json.assert_called_once()
-        self.assertEqual(write_json.call_args.args[1]["items"][0]["id"], "thread-startup")
+        self.assertEqual(write_json.call_count, 1)
 
     def test_desktop_work_overlay_keeps_today_background_item_on_first_snapshot(
         self,
@@ -5786,8 +5927,10 @@ with tempfile.TemporaryDirectory() as temp_dir:
 
         write_json.assert_called_once()
         items = write_json.call_args.args[1]["items"]
-        self.assertEqual([item["kind"] for item in items], ["background_usage"])
-        self.assertEqual(items[0]["eventId"], background_item.event_id)
+        self.assertEqual(
+            [item["kind"] for item in items], ["session", "background_usage"]
+        )
+        self.assertEqual(items[1]["eventId"], background_item.event_id)
 
     def test_desktop_work_overlay_keep_alive_refreshes_cached_state(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -19,12 +19,26 @@ def _services(
     context: object,
     overlay_factory,
     calls: list[str] | None = None,
+    bridge_callbacks: dict[str, object] | None = None,
 ) -> RuntimeServices:
     calls = calls if calls is not None else []
 
     def mark(name: str, value: object):
         calls.append(name)
         return value
+
+    def bridge_factory(*args: object, **kwargs: object) -> object:
+        del args
+        if bridge_callbacks is not None:
+            bridge_callbacks.update(kwargs)
+        return mark(
+            "bridge",
+            SimpleNamespace(
+                start=lambda: "http://127.0.0.1:8765",
+                background_usage_url="",
+                close=MagicMock(),
+            ),
+        )
 
     return RuntimeServices(
         clock=SimpleNamespace(),
@@ -36,14 +50,7 @@ def _services(
         update_manager_factory=lambda: mark(
             "updates", SimpleNamespace(close=MagicMock())
         ),
-        bridge_factory=lambda *_args, **_kwargs: mark(
-            "bridge",
-            SimpleNamespace(
-                start=lambda: "http://127.0.0.1:8765",
-                background_usage_url="",
-                close=MagicMock(),
-            ),
-        ),
+        bridge_factory=bridge_factory,
         snapshot_builder=lambda _context: None,
     )
 
@@ -66,6 +73,7 @@ def test_base_closes_context_when_overlay_construction_fails() -> None:
 
 def test_assembly_registers_resources_and_runtime_adapters_in_order() -> None:
     calls: list[str] = []
+    bridge_callbacks: dict[str, object] = {}
     unsubscribe = MagicMock()
     tracker = SimpleNamespace(set_change_callback=MagicMock())
     event_bus = SimpleNamespace(
@@ -86,6 +94,7 @@ def test_assembly_registers_resources_and_runtime_adapters_in_order() -> None:
         context=context,
         overlay_factory=lambda _context: calls.append("overlay") or overlay,
         calls=calls,
+        bridge_callbacks=bridge_callbacks,
     )
     base = create_renderer_session_base(SimpleNamespace(), services=services)
 
@@ -126,6 +135,14 @@ def test_assembly_registers_resources_and_runtime_adapters_in_order() -> None:
     assert tracker.set_change_callback.call_count == 1
     assert client.set_active_session_callback.call_count == 1
     assert client.set_theme_callback.call_count == 1
+
+    assembly.restart_requested.clear()
+    assembly.command_refresh_requested.clear()
+    restart_callback = bridge_callbacks["restart_callback"]
+    assert callable(restart_callback)
+    restart_callback()
+    assert assembly.restart_requested.is_set()
+    assert assembly.command_refresh_requested.is_set()
 
     assembly.resources.close()
     unsubscribe.assert_called_once_with()

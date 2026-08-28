@@ -375,6 +375,23 @@ def test_launch_codex_cli_refreshes_missing_windows_environment(
     assert environment["HUD_EXISTING_ENV"] == "process-value"
 
 
+def test_launch_environment_merges_fresh_windows_path_entries(monkeypatch) -> None:
+    monkeypatch.setenv("PATH", r"C:\old-node;C:\shared")
+    monkeypatch.setattr(
+        launcher,
+        "_windows_registry_environment",
+        lambda: {"Path": r"C:\shared;C:\new-node"},
+    )
+
+    environment = launcher._launch_environment(platform_name="windows")
+
+    assert environment["PATH"].split(";")[:3] == [
+        r"C:\old-node",
+        r"C:\shared",
+        r"C:\new-node",
+    ]
+
+
 def test_launch_codex_cli_uses_new_windows_terminal_tab_when_host_is_open(
     tmp_path: Path, monkeypatch
 ) -> None:
