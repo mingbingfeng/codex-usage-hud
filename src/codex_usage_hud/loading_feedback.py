@@ -16,6 +16,7 @@ from threading import Event
 from . import overlay_ipc
 from .config import write_json_object
 from .platforms.file_watcher import FileChangeWatcher, FileWatchSpec
+from .process_environment import internal_process_environment
 
 LOADING_FEEDBACK_STALE_SECONDS = 20.0
 WORK_OVERLAY_COMMAND_FALLBACK_POLL_SECONDS = 5.0
@@ -84,6 +85,9 @@ class HudLoadingFeedback:
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                # This is the same frozen executable, so its PyInstaller
+                # parent/child environment must remain intact.
+                env=internal_process_environment(),
             )
         except Exception:
             self._process = None

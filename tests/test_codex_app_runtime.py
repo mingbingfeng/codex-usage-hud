@@ -166,6 +166,33 @@ def test_windows_debug_launch_prefers_verified_executable(
     assert remembered == [61234]
 
 
+def test_windows_executable_launch_filters_pyinstaller_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable = tmp_path / "Codex.exe"
+    executable.write_bytes(b"placeholder")
+    launched: list[dict[str, object]] = []
+
+    def fake_popen(_command: list[str], **kwargs: object) -> object:
+        launched.append(kwargs)
+        return object()
+
+    monkeypatch.setattr(app.sys, "platform", "win32")
+    monkeypatch.setattr(app, "codex_app_executable_candidates", lambda: [executable])
+    monkeypatch.setenv("_PYI_ARCHIVE_FILE", "C:/hud.exe")
+    monkeypatch.setenv("_PYI_PARENT_PROCESS_LEVEL", "1")
+    monkeypatch.setattr(app.subprocess, "Popen", fake_popen)
+
+    assert app.launch_codex_app(debugger=False)
+
+    assert launched
+    assert not any(
+        str(name).casefold().startswith("_pyi_")
+        for name in launched[0]["env"]
+    )
+
+
 def test_windows_launch_inherits_registry_env_for_shell_children(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

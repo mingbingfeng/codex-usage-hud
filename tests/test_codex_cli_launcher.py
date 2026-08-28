@@ -265,6 +265,8 @@ def test_launch_codex_cli_uses_selected_terminal_and_workdir(tmp_path: Path, mon
         ],
     )
     monkeypatch.setattr(launcher.subprocess, "Popen", fake_popen)
+    monkeypatch.setenv("_PYI_ARCHIVE_FILE", "C:/hud.exe")
+    monkeypatch.setenv("_PYI_PARENT_PROCESS_LEVEL", "1")
     codex_home = tmp_path / "codex-home"
     codex_home.mkdir()
 
@@ -289,6 +291,22 @@ def test_launch_codex_cli_uses_selected_terminal_and_workdir(tmp_path: Path, mon
     assert "stdout" not in process_calls[0]
     assert "stderr" not in process_calls[0]
     assert process_calls[0]["env"]["CODEX_HOME"] == str(codex_home)
+    assert not any(
+        str(name).casefold().startswith("_pyi_")
+        for name in process_calls[0]["env"]
+    )
+
+
+def test_external_launch_environment_drops_pyinstaller_bootloader_variables(monkeypatch) -> None:
+    monkeypatch.setenv("_PYI_ARCHIVE_FILE", "C:/hud.exe")
+    monkeypatch.setenv("_pyi_parent_process_level", "1")
+    monkeypatch.setenv("HUD_KEEP_ENV", "yes")
+
+    environment = launcher._launch_environment(platform_name="windows")
+
+    assert "_PYI_ARCHIVE_FILE" not in environment
+    assert "_pyi_parent_process_level" not in environment
+    assert environment["HUD_KEEP_ENV"] == "yes"
 
 
 def test_launch_codex_cli_cancel_gate_prevents_popen(tmp_path: Path, monkeypatch) -> None:
@@ -345,6 +363,7 @@ def test_launch_codex_cli_refreshes_missing_windows_environment(
         lambda: {
             "HUD_EXISTING_ENV": "registry-value",
             "HUD_FRESH_ENV": "fresh-value",
+            "_PYI_ARCHIVE_FILE": "registry-hud.exe",
         },
     )
     monkeypatch.setattr(
@@ -373,6 +392,7 @@ def test_launch_codex_cli_refreshes_missing_windows_environment(
     environment = process_calls[0]["env"]
     assert environment["HUD_FRESH_ENV"] == "fresh-value"
     assert environment["HUD_EXISTING_ENV"] == "process-value"
+    assert "_PYI_ARCHIVE_FILE" not in environment
 
 
 def test_launch_codex_cli_uses_new_windows_terminal_tab_when_host_is_open(

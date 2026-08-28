@@ -18,6 +18,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from ..process_environment import external_process_environment
+
 # Keep defaults local to avoid circular import with config -> core package init.
 DEFAULT_REST_REMINDER_ENABLED = False
 DEFAULT_REST_REMINDER_INTERVAL_MINUTES = 45
@@ -1426,6 +1428,7 @@ def _show_system_notification(message: str) -> dict[str, object]:
                 ["powershell", "-NoProfile", "-Command", script],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                env=external_process_environment(),
                 creationflags=creationflags,
             )
             return {"status": "sent", "channel": "windows-notifyicon", "error": "", "lastSentAtMs": sent_at}
@@ -1433,12 +1436,12 @@ def _show_system_notification(message: str) -> dict[str, object]:
             return {"status": "failed", "channel": "windows-notifyicon", "error": str(exc), "lastSentAtMs": sent_at}
     if sys.platform == "darwin":
         try:
-            subprocess.run(["osascript", "-e", f'display notification "{body.replace(chr(34), chr(39))}" with title "{title}"'], check=True, timeout=5)
+            subprocess.run(["osascript", "-e", f'display notification "{body.replace(chr(34), chr(39))}" with title "{title}"'], check=True, timeout=5, env=external_process_environment())
             return {"status": "sent", "channel": "osascript", "error": "", "lastSentAtMs": sent_at}
         except Exception as exc:
             return {"status": "failed", "channel": "osascript", "error": str(exc), "lastSentAtMs": sent_at}
     try:
-        subprocess.run(["notify-send", title, body], check=True, timeout=5)
+        subprocess.run(["notify-send", title, body], check=True, timeout=5, env=external_process_environment())
         return {"status": "sent", "channel": "notify-send", "error": "", "lastSentAtMs": sent_at}
     except Exception as exc:
         return {"status": "failed", "channel": "notify-send", "error": str(exc), "lastSentAtMs": sent_at}
