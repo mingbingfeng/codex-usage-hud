@@ -7,6 +7,7 @@ import os
 import sqlite3
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -816,6 +817,47 @@ class ActiveSessionTrackerTests(unittest.TestCase):
             self.assertEqual(resolver.resolve(), (None, "renderer-pending-session"))
             self.assertEqual(platform.detect_calls, 0)
             self.assertEqual(tracker.latest_title, "Pending Renderer Thread")
+
+    def test_filesystem_heal_returns_for_confirmed_renderer_selection(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            sessions_root = root / "sessions"
+            sessions_root.mkdir()
+            session_path = sessions_root / "rollout-2026-08-28T12-00-00-confirmed-id.jsonl"
+            session_path.write_text("{}\n", encoding="utf-8")
+            state_db = root / "state_5.sqlite"
+            _write_thread_mapping(
+                state_db,
+                "confirmed-id",
+                session_path,
+                title="Confirmed renderer thread",
+            )
+            tracker = ActiveSessionTracker(
+                platform=FakePlatform(),
+                state_db=state_db,
+                sessions_root=sessions_root,
+                session_index_path=root / "session_index.jsonl",
+                poll_ms=250,
+                enabled=True,
+                start_background_watcher=False,
+            )
+            self.assertTrue(
+                tracker.observe_conversation_ref(
+                    "confirmed-id",
+                    "Confirmed renderer thread",
+                )
+            )
+            result: list[bool] = []
+            worker = threading.Thread(
+                target=lambda: result.append(tracker.heal_pending_from_filesystem()),
+                daemon=True,
+            )
+
+            worker.start()
+            worker.join(timeout=0.5)
+
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(result, [False])
 
     def test_renderer_provisional_id_resolves_unique_persisted_title(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

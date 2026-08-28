@@ -116,6 +116,49 @@ def test_renderer_bridge_normalizes_active_session_aliases_and_sequence() -> Non
             True,
         )
     ]
+    callbacks.request_active_session_refresh.assert_called_once_with()
+
+
+def test_renderer_bridge_wakes_visible_session_before_a_slow_event_publish() -> None:
+    tracker = SimpleNamespace(
+        selection_seq=1,
+        observe_conversation_ref=MagicMock(return_value=True),
+    )
+    entered_publish = threading.Event()
+    release_publish = threading.Event()
+    visible_wake = MagicMock()
+
+    class _BlockingSignals(_Signals):
+        def publish_or_wake(
+            self,
+            publish: object,
+            event_type: str,
+            *,
+            source: str,
+            context: dict[str, object],
+            active_session: bool = False,
+        ) -> None:
+            del publish, event_type, source, context, active_session
+            entered_publish.set()
+            assert release_publish.wait(timeout=2)
+
+    callbacks = _callbacks(
+        signals=_BlockingSignals(),
+        active_session_tracker=tracker,
+        request_active_session_refresh=visible_wake,
+    )
+    worker = threading.Thread(
+        target=callbacks.observe_active_session,
+        args=({"sessionId": "session-1", "selectionSeq": 1},),
+    )
+
+    worker.start()
+
+    assert entered_publish.wait(timeout=2)
+    visible_wake.assert_called_once_with()
+    release_publish.set()
+    worker.join(timeout=2)
+    assert not worker.is_alive()
 
 
 def test_renderer_bridge_invalidates_mapping_on_composer_send_click() -> None:
@@ -536,7 +579,7 @@ def test_renderer_bridge_routes_attachment_layout_theme_and_tracker_wake() -> No
     callbacks.disconnect_tracker()
 
     estimator.set_attachments.assert_called_once_with({"count": 2})
-    request_active.assert_called_once_with()
+    assert request_active.call_count == 2
     assert tracker.set_change_callback.call_args_list[-1].args == (None,)
     assert signals.events == [
         (

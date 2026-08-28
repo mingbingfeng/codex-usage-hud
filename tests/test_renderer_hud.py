@@ -61,6 +61,21 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertNotIn("今日 1,200/$0", payload["topLine"])
         self.assertNotIn("本周 4,200/$0", payload["topLine"])
 
+    def test_payload_uses_the_followed_session_provider(self) -> None:
+        snapshot = ParsedSession(
+            session_id="custom-session",
+            model_provider="custom",
+            selection_source="renderer:Custom session",
+        )
+
+        payload = payload_from_snapshot(snapshot).to_json()
+
+        self.assertEqual(payload["activeSessionProvider"], "custom")
+        self.assertEqual(
+            payload["payloadDomains"]["sessionSwitch"]["activeSessionProvider"],
+            "custom",
+        )
+
     def test_renderer_theme_payload_accepts_persisted_source(self) -> None:
         snapshot = CodexThemeSnapshot.from_probe_result(
             {

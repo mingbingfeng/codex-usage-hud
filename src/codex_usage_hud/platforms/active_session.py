@@ -1896,7 +1896,12 @@ class ActiveSessionTracker:
             follow_state = self._follow_state
             renderer_session_id = self._renderer_session_id
             renderer_path = self._renderer_path
-            stuck_ms = self.follow_stuck_elapsed_ms
+            stuck_since_ms = int(self._follow_stuck_since_ms or 0)
+        stuck_ms = (
+            max(0, int(time.time() * 1000) - stuck_since_ms)
+            if stuck_since_ms > 0
+            else 0
+        )
         if follow_state not in ("new-session", "pending"):
             return False
         if renderer_session_id and renderer_path is not None:

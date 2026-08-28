@@ -336,6 +336,12 @@ class RendererBridgeCallbacks:
             setter(None)
 
     def publish_active_session_changed(self, reason: str) -> None:
+        # The renderer binding and the localhost bridge invoke this callback
+        # from their own delivery threads. Wake the visible-session fast path
+        # before publishing the diagnostic/runtime event so a slow subscriber
+        # cannot hold a newly selected thread (or its provider label) behind
+        # the previous payload.
+        self.request_active_session_refresh()
         self.signals.publish_or_wake(
             self.publish_event,
             "active_session_changed",
