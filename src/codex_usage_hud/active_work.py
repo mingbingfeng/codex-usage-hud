@@ -20,6 +20,7 @@ from .overlay_projection import (
     _work_overlay_item_sort_key,
     _work_overlay_runtime_task_key,
     _work_overlay_seen_task_keys,
+    _merge_stable_item_metadata,
     _work_overlay_terminal_item_tasks,
     _work_overlay_visible_item_cache,
 )
@@ -347,6 +348,36 @@ def _work_status_text(
         model_name = _current_task_model_name(snapshot)
         return f"{model_name} 正在思考" if model_name else "正在思考"
     return status_label
+
+
+def _activity_step_payloads(
+    snapshot: ParsedSession,
+    *,
+    limit: int = 32,
+) -> tuple[Mapping[str, object], ...]:
+    """Carry the current task's real tool timeline into the desktop bubble."""
+    payloads: list[Mapping[str, object]] = []
+    for step in list(getattr(snapshot, "activity_steps", []) or [])[-max(1, limit) :]:
+        title = str(getattr(step, "title", "") or "").strip()
+        detail = _compact_work_text(getattr(step, "detail", ""), 220)
+        output = _compact_work_text(getattr(step, "output", ""), 220)
+        if not title and not detail and not output:
+            continue
+        timestamp = getattr(step, "timestamp", None)
+        payloads.append(
+            {
+                "timestamp": _iso_or_empty(timestamp),
+                "title": title or "执行命令",
+                "detail": detail,
+                "status": str(getattr(step, "status", "") or "running").strip()
+                or "running",
+                "callId": str(getattr(step, "call_id", "") or "").strip(),
+                "line": int(getattr(step, "line", 0) or 0),
+                "toolName": str(getattr(step, "tool_name", "") or "").strip(),
+                "output": output,
+            }
+        )
+    return tuple(payloads)
 
 
 def _is_renderer_provisional_selection(snapshot: ParsedSession) -> bool:
@@ -749,7 +780,11 @@ def _work_item_from_snapshot(
         if _is_renderer_provisional_selection(snapshot) and draft_text
         else snapshot.last_output.detail.strip()
     )
-    started_at = snapshot.task_started_at or snapshot.request.started_at
+    started_at = (
+        snapshot.task_started_at
+        or snapshot.request.started_at
+        or snapshot.session_started_at
+    )
     elapsed_reference = (
         snapshot.task_completed_at
         if status_value == "recent" and snapshot.task_completed_at is not None
@@ -771,6 +806,7 @@ def _work_item_from_snapshot(
         session_id=session_id,
         target_title=display_title.strip(),
         round_index=round_index,
+        task_index=max(0, int(getattr(snapshot, "task_index", 0) or 0)),
         model_name=model_name,
         status=status_value,
         status_label=status_label,
@@ -801,6 +837,7 @@ def _work_item_from_snapshot(
         current=current,
         pending_accounting=pending_accounting,
         draft_text=draft_text,
+        activity_steps=_activity_step_payloads(snapshot),
     )
 
 
@@ -940,6 +977,7 @@ def _refresh_visible_current_work_item(
         # reuses the inherited task_started marker after a user steer.
         _work_overlay_terminal_item_tasks(context).pop(session_id, None)
         _terminal_completion_prompts(context).pop(session_id, None)
+    refreshed = _merge_stable_item_metadata(items[existing_index], refreshed)
     updated = list(items)
     updated[existing_index] = refreshed
     return updated
@@ -1016,6 +1054,12 @@ def active_work_items_for_snapshot(
             released=current_segment_released,
         )
         if current_item is not None:
+            cached_current = visible_item_cache.get(str(current_item.id))
+            if cached_current is not None:
+                current_item = _merge_stable_item_metadata(
+                    cached_current,
+                    current_item,
+                )
             if current_item.status == "recent" and not _completion_was_seen_active(
                 context,
                 current_item,
@@ -1095,6 +1139,9 @@ def active_work_items_for_snapshot(
             released=parsed_segment_released,
         )
         if item is not None:
+            cached_item = visible_item_cache.get(str(item.id))
+            if cached_item is not None:
+                item = _merge_stable_item_metadata(cached_item, item)
             if item.status == "recent" and not _completion_was_seen_active(
                 context,
                 item,

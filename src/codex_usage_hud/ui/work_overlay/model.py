@@ -424,6 +424,57 @@ def _workdir_footer_display_name(
     remaining = max(8, limit - len(profile_label) - 1)
     return f"{profile_label} {_compact_workdir_text(workdir, remaining)}"
 
+
+def _overlay_activity_steps(item: Mapping[str, object]) -> list[Mapping[str, object]]:
+    value = item.get("activitySteps") or item.get("activity_steps") or ()
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return []
+    return [step for step in value if isinstance(step, Mapping)]
+
+
+def _overlay_activity_step_prefix(step: Mapping[str, object]) -> str:
+    title = str(step.get("title") or "").strip()
+    status = str(step.get("status") or "").strip().lower()
+    tool_name = str(step.get("toolName") or step.get("tool_name") or "").strip().lower()
+    normalized_name = tool_name.replace(".", "_").replace("-", "_")
+    if status in {"failed", "error"} or title == "命令失败":
+        return "命令失败"
+    if (
+        title in {"执行命令", "命令完成"}
+        or normalized_name.endswith(("exec", "shell", "shell_command"))
+        or normalized_name in {"functions_exec", "unified_exec"}
+    ):
+        return "运行了命令"
+    if any(token in normalized_name for token in ("read", "open", "cat", "view_file")):
+        return "已读取文件" if status in {"completed", "success", "done"} else "读取文件"
+    if any(token in normalized_name for token in ("edit", "write", "patch", "apply")):
+        return "已修改文件" if status in {"completed", "success", "done"} else "修改文件"
+    if "request_user_input" in normalized_name:
+        return "等待确认"
+    return title or "调用工具"
+
+
+def _overlay_activity_step_text(step: Mapping[str, object]) -> str:
+    prefix = _overlay_activity_step_prefix(step)
+    detail = " ".join(str(step.get("detail") or "").split())
+    output = " ".join(str(step.get("output") or "").split())
+    if output and output != detail:
+        detail = f"{detail} · {output}" if detail else output
+    return f"{prefix}：{detail}" if detail else prefix
+
+
+def _overlay_activity_step_texts(item: Mapping[str, object]) -> list[str]:
+    return [
+        text
+        for text in (_overlay_activity_step_text(step) for step in _overlay_activity_steps(item))
+        if text
+    ]
+
+
+def _overlay_activity_tooltip(item: Mapping[str, object]) -> str:
+    return "\n".join(_overlay_activity_step_texts(item))
+
+
 def _workdir_clickable_for_item(item: Mapping[str, object]) -> bool:
     if _item_is_cli(item):
         return False
@@ -603,6 +654,9 @@ __all__ = [
     "_item_is_cli",
     "_profile_display_name",
     "_workdir_footer_display_name",
+    "_overlay_activity_steps",
+    "_overlay_activity_step_texts",
+    "_overlay_activity_tooltip",
     "_workdir_clickable_for_item",
     "_workdir_link_hover_visible_for_item",
     "_workdir_external_link_for_item",

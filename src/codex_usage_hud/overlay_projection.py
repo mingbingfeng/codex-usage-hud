@@ -33,6 +33,7 @@ def _iso_or_empty(value: datetime | None) -> str:
 
 
 def work_item_to_overlay_dict(item: WorkStatusItem) -> dict[str, object]:
+    activity_steps = getattr(item, "activity_steps", ())
     return {
         "kind": item.kind,
         "eventId": item.event_id,
@@ -41,6 +42,7 @@ def work_item_to_overlay_dict(item: WorkStatusItem) -> dict[str, object]:
         "sessionId": item.session_id,
         "targetTitle": item.target_title,
         "roundIndex": item.round_index,
+        "taskIndex": getattr(item, "task_index", 0),
         "modelName": item.model_name,
         "status": item.status,
         "statusLabel": item.status_label,
@@ -65,6 +67,11 @@ def work_item_to_overlay_dict(item: WorkStatusItem) -> dict[str, object]:
         "current": item.current,
         "pendingAccounting": item.pending_accounting,
         "draftText": getattr(item, "draft_text", ""),
+        "activitySteps": [
+            dict(step)
+            for step in activity_steps
+            if isinstance(step, Mapping)
+        ],
     }
 
 
@@ -192,6 +199,126 @@ def item_updated_seconds(item: WorkStatusItem) -> float:
     return updated_at.timestamp() if updated_at is not None else 0.0
 
 
+def _activity_step_key(step: Mapping[str, object]) -> tuple[str, ...]:
+    call_id = str(step.get("callId") or step.get("call_id") or "").strip()
+    if call_id:
+        return ("call", call_id)
+    line = str(step.get("line") or "").strip()
+    if line and line != "0":
+        return ("line", line)
+    return (
+        "text",
+        " ".join(str(step.get("title") or "").split()),
+        " ".join(str(step.get("detail") or "").split()),
+        str(step.get("timestamp") or "").strip(),
+    )
+
+
+def _merge_activity_steps(
+    cached: object,
+    current: object,
+) -> tuple[dict[str, object], ...]:
+    old_steps = [dict(step) for step in cached or () if isinstance(step, Mapping)]
+    new_steps = [dict(step) for step in current or () if isinstance(step, Mapping)]
+    if not old_steps:
+        return tuple(new_steps[-64:])
+    if not new_steps:
+        return tuple(old_steps[-64:])
+    merged = old_steps
+    for new_step in new_steps:
+        key = _activity_step_key(new_step)
+        match_index = next(
+            (
+                index
+                for index in range(len(merged) - 1, -1, -1)
+                if _activity_step_key(merged[index]) == key
+            ),
+            None,
+        )
+        if match_index is None:
+            merged.append(new_step)
+            continue
+        previous = merged[match_index]
+        merged_fields = {
+            field: value
+            for field, value in new_step.items()
+            if value not in (None, "", [])
+        }
+        # A fresh partial snapshot may replay a finished step as "running";
+        # never regress a terminal status back to running.
+        if (
+            str(previous.get("status") or "").strip().lower()
+            in {"completed", "failed", "error"}
+            and str(merged_fields.get("status") or "").strip().lower()
+            == "running"
+        ):
+            merged_fields.pop("status", None)
+        merged[match_index] = {**previous, **merged_fields}
+    return tuple(merged[-64:])
+
+
+def _merge_stable_item_metadata(
+    cached: WorkStatusItem,
+    current: WorkStatusItem,
+) -> WorkStatusItem:
+    """Keep durable session metadata through partial/fast refresh snapshots."""
+    updates: dict[str, object] = {}
+    for field in (
+        "title",
+        "target_title",
+        "model_name",
+        "workdir",
+        "workdir_name",
+        "profile_name",
+        "session_started_at",
+        "updated_at",
+    ):
+        current_value = getattr(current, field, None)
+        cached_value = getattr(cached, field, None)
+        if current_value in (None, "") and cached_value not in (None, ""):
+            updates[field] = cached_value
+    if (
+        str(getattr(current, "model_provider", "") or "").strip().lower()
+        in {"", "unknown", "n/a"}
+        and str(getattr(cached, "model_provider", "") or "").strip()
+    ):
+        updates["model_provider"] = cached.model_provider
+    if (
+        str(getattr(current, "client_kind", "") or "").strip().lower()
+        in {"", "unknown", "n/a"}
+        and str(getattr(cached, "client_kind", "") or "").strip()
+    ):
+        updates["client_kind"] = cached.client_kind
+
+    cached_task = getattr(cached, "task_started_at", None)
+    current_task = getattr(current, "task_started_at", None)
+    cached_task_index = int(getattr(cached, "task_index", 0) or 0)
+    current_task_index = int(getattr(current, "task_index", 0) or 0)
+    same_task = (
+        not cached_task_index
+        or not current_task_index
+        or cached_task_index == current_task_index
+    ) and (cached_task is None or current_task is None or cached_task == current_task)
+    if same_task:
+        updates["round_index"] = max(
+            0,
+            int(getattr(cached, "round_index", 0) or 0),
+            int(getattr(current, "round_index", 0) or 0),
+        )
+        for field in ("task_started_at", "started_at", "elapsed_text"):
+            current_value = getattr(current, field, None)
+            cached_value = getattr(cached, field, None)
+            if current_value in (None, "") and cached_value not in (None, ""):
+                updates[field] = cached_value
+        updates["activity_steps"] = _merge_activity_steps(
+            getattr(cached, "activity_steps", ()),
+            getattr(current, "activity_steps", ()),
+        )
+    if not updates:
+        return current
+    return replace(current, **updates)
+
+
 def _item_started_at(item: WorkStatusItem) -> datetime | None:
     return item.task_started_at or item.started_at or item.session_started_at
 
@@ -286,8 +413,10 @@ def stabilize_published_items(
     merged = {str(item.id): item for item in items if str(item.id or "").strip()}
     for item_id, item in list(merged.items()):
         cached_item = cache.get(item_id)
-        if cached_item is not None and item_updated_seconds(item) < item_updated_seconds(cached_item):
-            item = replace(cached_item, current=item.current)
+        if cached_item is not None:
+            item = _merge_stable_item_metadata(cached_item, item)
+            if item_updated_seconds(item) < item_updated_seconds(cached_item):
+                item = replace(cached_item, current=item.current)
             merged[item_id] = item
         if cached_item is not None and cached_item.session_started_at is not None:
             stable_start = cached_item.session_started_at

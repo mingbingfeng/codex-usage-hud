@@ -88,6 +88,7 @@ class ShimmerTextLabel(QWidget):
         self._cached_text_path_key: tuple[int, str, str] | None = None
         self._cached_text_width = 0.0
         self._cached_text_width_key: tuple[int, str, str] | None = None
+        self._single_line = False
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._advance_shimmer)
         self.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
@@ -105,6 +106,15 @@ class ShimmerTextLabel(QWidget):
         self._text = next_text
         self._invalidate_text_cache()
         self._phase_x = -self._band_width_px
+        self.updateGeometry()
+        self.update()
+
+    def setSingleLine(self, enabled: bool = True) -> None:
+        next_value = bool(enabled)
+        if next_value == self._single_line:
+            return
+        self._single_line = next_value
+        self._invalidate_text_cache()
         self.updateGeometry()
         self.update()
 
@@ -211,6 +221,8 @@ class ShimmerTextLabel(QWidget):
         return self._cached_text_width
 
     def _layout_height(self, width: int) -> int:
+        if self._single_line:
+            return max(1, int(self.fontMetrics().height() + 3))
         lines = self._layout_lines(width)
         if not lines:
             return max(1, int(self.fontMetrics().height() + 2))
@@ -221,6 +233,12 @@ class ShimmerTextLabel(QWidget):
         text = self._text
         if not text:
             return []
+        if self._single_line:
+            text = QFontMetrics(self.font()).elidedText(
+                text,
+                Qt.TextElideMode.ElideRight,
+                max(1, int(width)),
+            )
         option = QTextOption()
         option.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
         layout = QTextLayout(text, self.font())
@@ -234,20 +252,27 @@ class ShimmerTextLabel(QWidget):
                 if not line.isValid():
                     break
                 line.setLineWidth(max(1, width))
-                line.setPosition(QPointF(0.0, y))
+                line_y = (
+                    max(0.0, (float(self.height()) - float(line.height())) / 2.0)
+                    if self._single_line
+                    else y
+                )
+                line.setPosition(QPointF(0.0, line_y))
                 start = line.textStart()
                 length = line.textLength()
                 segment = text[start : start + length]
                 lines.append(
                     (
-                        y,
+                        line_y,
                         segment,
                         float(line.ascent()),
                         float(line.height()),
                         float(line.naturalTextWidth()),
                     )
                 )
-                y += float(line.height())
+                y = line_y + float(line.height())
+                if self._single_line:
+                    break
         finally:
             layout.endLayout()
         return lines

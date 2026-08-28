@@ -14,7 +14,7 @@ from PySide6.QtCore import (
     Qt,
     QTimer,
 )
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QFont, QFontMetrics
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -29,6 +29,7 @@ from .constants import (
     WORK_OVERLAY_CARD_X_PADDING,
     WORK_OVERLAY_CARD_Y_PADDING,
     WORK_OVERLAY_CLOSE_SIZE,
+    WORK_OVERLAY_ACTIVITY_STEP_DISPLAY_SECONDS,
     WORK_OVERLAY_COMPLETED_BADGE_ROW_HEIGHT,
     WORK_OVERLAY_COMPLETED_BADGE_SIZE,
     WORK_OVERLAY_EMPTY_GRACE_SECONDS,
@@ -37,6 +38,7 @@ from .constants import (
     WORK_OVERLAY_TEXT_WRAP_WIDTH,
     WORK_OVERLAY_TRANSITION_CARD_HEIGHT,
     WORK_OVERLAY_WIDTH,
+    WORK_OVERLAY_WORKDIR_FOOTER_WIDTH,
 )
 from .geometry import (
     OverlayRect,
@@ -61,6 +63,8 @@ from .model import (
     _item_is_system_action,
     _item_is_system_notice,
     _matched_overlay_item_records,
+    _overlay_activity_step_texts,
+    _overlay_activity_tooltip,
     _normalized_rest_reminder,
     _normalized_system_action,
     _normalized_system_notice,
@@ -135,13 +139,70 @@ class OverlayRenderingMixin:
         self,
         items: Sequence[Mapping[str, object]],
     ) -> None:
-        if any(_work_overlay_live_elapsed_text(item) is not None for item in items):
+        if any(
+            _work_overlay_live_elapsed_text(item) is not None
+            or len(_overlay_activity_step_texts(item)) > 1
+            for item in items
+        ):
             if not self._elapsed_text_timer.isActive():
                 self._elapsed_text_timer.start()
             return
         self._elapsed_text_timer.stop()
 
+    def _activity_step_display_text(
+        self,
+        record: dict[str, Any],
+        item: Mapping[str, object],
+        *,
+        now: float | None = None,
+    ) -> tuple[str, str]:
+        texts = _overlay_activity_step_texts(item)
+        if not texts:
+            record["activity_step_signature"] = ""
+            record["activity_step_index"] = -1
+            record["activity_step_last_at"] = 0.0
+            return "", ""
+        signature = json.dumps(texts, ensure_ascii=False)
+        if signature != record.get("activity_step_signature"):
+            record["activity_step_signature"] = signature
+            record["activity_step_index"] = len(texts) - 1
+            record["activity_step_last_at"] = time.monotonic() if now is None else now
+        current_now = time.monotonic() if now is None else now
+        last_at = float(record.get("activity_step_last_at") or 0.0)
+        if len(texts) > 1 and current_now - last_at >= WORK_OVERLAY_ACTIVITY_STEP_DISPLAY_SECONDS:
+            record["activity_step_index"] = (
+                int(record.get("activity_step_index") or 0) + 1
+            ) % len(texts)
+            record["activity_step_last_at"] = current_now
+        index = max(0, min(len(texts) - 1, int(record.get("activity_step_index") or 0)))
+        return texts[index], _overlay_activity_tooltip(item)
+
+    def _refresh_activity_step_label(
+        self,
+        record: dict[str, Any],
+        item: Mapping[str, object],
+        *,
+        now: float | None = None,
+    ) -> None:
+        label = record.get("status_label")
+        if not isinstance(label, ShimmerTextLabel):
+            return
+        if (
+            _item_is_system_action(item)
+            or _item_is_system_notice(item)
+            or _item_is_background_usage(item)
+            or _item_is_rest_reminder(item)
+            or str(item.get("status") or "").strip() == "draft"
+        ):
+            return
+        text, tooltip = self._activity_step_display_text(record, item, now=now)
+        if not text:
+            return
+        label.setText(text)
+        label.setToolTip(tooltip or text)
+
     def _refresh_live_elapsed_text(self) -> None:
+        now = time.monotonic()
         for record in self._item_widgets:
             if record.get("kind") != "card":
                 continue
@@ -150,19 +211,20 @@ class OverlayRenderingMixin:
                 continue
             updated_item = _work_overlay_item_with_live_elapsed_text(item)
             elapsed_text = str(updated_item.get("elapsedText") or "")
-            if elapsed_text == str(item.get("elapsedText") or ""):
-                continue
-            record["item"] = updated_item
-            header = record.get("header")
-            if isinstance(header, QLabel):
-                header.setText(
-                    _work_overlay_header_text(
-                        str(item.get("startedAt") or ""),
-                        elapsed_text,
-                        str(item.get("title") or "Codex 工作"),
-                        title_limit=self._header_title_limit,
+            if elapsed_text != str(item.get("elapsedText") or ""):
+                record["item"] = updated_item
+                header = record.get("header")
+                if isinstance(header, QLabel):
+                    header.setText(
+                        _work_overlay_header_text(
+                            str(item.get("startedAt") or ""),
+                            elapsed_text,
+                            str(item.get("title") or "Codex 工作"),
+                            title_limit=self._header_title_limit,
+                        )
                     )
-                )
+                item = updated_item
+            self._refresh_activity_step_label(record, item, now=now)
 
     def _build_item_widget(self, item: Mapping[str, object]) -> None:
         self._build_item_card(item)
@@ -320,10 +382,10 @@ class OverlayRenderingMixin:
         status_label = ShimmerTextLabel("", footer_container, base_color="#8492A6")
         status_label.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
         status_label.setFont(QFont("Microsoft YaHei UI", 8, QFont.Weight.Bold))
+        status_label.setSingleLine(True)
         status_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         status_label.setMinimumWidth(1)
-        status_label.setFixedHeight(status_label.fontMetrics().height() + 4)
-        footer_layout.addWidget(status_label, 1)
+        footer_layout.addWidget(status_label, 1, alignment.AlignVCenter)
 
         rest_actions_row = QWidget(card)
         rest_actions_row.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
@@ -378,8 +440,7 @@ class OverlayRenderingMixin:
         workdir_label.setAlignment(alignment.AlignVCenter | alignment.AlignRight)
         workdir_label.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         workdir_label.setFont(QFont("Microsoft YaHei UI", 7))
-        workdir_label.setMaximumWidth(170)
-        workdir_label.setFixedHeight(workdir_label.fontMetrics().height() + 4)
+        workdir_label.setFixedWidth(WORK_OVERLAY_WORKDIR_FOOTER_WIDTH)
         workdir_label.setStyleSheet(
             "QLabel {"
             "color: #5E6A78;"
@@ -387,8 +448,16 @@ class OverlayRenderingMixin:
             "background: transparent;"
             "}"
         )
-        footer_layout.addWidget(workdir_label, 0)
-        footer_layout.addWidget(round_badge, 0)
+        footer_height = max(
+            18,
+            status_label.fontMetrics().height() + 4,
+            workdir_label.fontMetrics().height() + 4,
+        )
+        footer_container.setFixedHeight(footer_height)
+        status_label.setFixedHeight(footer_height)
+        workdir_label.setFixedHeight(footer_height)
+        footer_layout.addWidget(workdir_label, 0, alignment.AlignVCenter)
+        footer_layout.addWidget(round_badge, 0, alignment.AlignVCenter)
 
         card_layout.addWidget(footer_container)
         card_layout.addWidget(rest_actions_row)
@@ -597,7 +666,7 @@ class OverlayRenderingMixin:
         rest_hint.setVisible(bool(rest_hint_text))
 
         workdir_text = _workdir_display_name(item)
-        workdir_footer_text = _workdir_footer_display_name(item)
+        workdir_footer_text = _workdir_footer_display_name(item, limit=96)
         full_workdir = str(item.get("workdir") or "").strip()
         workdir_clickable = _workdir_clickable_for_item(item)
         status_text = (
@@ -616,6 +685,15 @@ class OverlayRenderingMixin:
             if background_usage
             else str(item.get("statusText") or item.get("statusLabel") or "").strip()
         )
+        activity_text, activity_tooltip = self._activity_step_display_text(record, item)
+        if activity_text and not (
+            system_action
+            or system_notice
+            or background_usage
+            or rest_reminder
+            or status == "draft"
+        ):
+            status_text = activity_text
         footer_container = record["footer_container"]
         footer_container.setVisible(bool(status_text or workdir_footer_text or rest_reminder))
 
@@ -626,11 +704,9 @@ class OverlayRenderingMixin:
                 if status in {"recent", "error", "background_usage"}
                 else theme["muted"]
             )
-            footer_status_text = _compact_work_text(
-                status_text,
-                48 if workdir_footer_text else 80,
-            )
+            footer_status_text = _compact_work_text(status_text, 240)
             status_label.setText(footer_status_text)
+            status_label.setToolTip(activity_tooltip or status_text)
             status_label.setBaseColor(status_text_color)
             status_label.setShimmerEnabled(
                 not system_notice
@@ -640,6 +716,7 @@ class OverlayRenderingMixin:
             status_label.setVisible(True)
         else:
             status_label.setText("")
+            status_label.setToolTip("")
             status_label.setShimmerEnabled(False)
             status_label.setVisible(False)
 
@@ -698,7 +775,13 @@ class OverlayRenderingMixin:
 
         workdir_label = record["workdir_label"]
         if workdir_footer_text and not rest_reminder:
-            workdir_label.setText(workdir_footer_text)
+            workdir_label.setText(
+                QFontMetrics(workdir_label.font()).elidedText(
+                    workdir_footer_text,
+                    Qt.TextElideMode.ElideLeft,
+                    max(1, WORK_OVERLAY_WORKDIR_FOOTER_WIDTH - 4),
+                )
+            )
             workdir_label.setToolTip((full_workdir or workdir_text) if workdir_clickable else "")
             workdir_label.setStyleSheet(
                 "QLabel {"
@@ -818,10 +901,10 @@ class OverlayRenderingMixin:
         status_label = ShimmerTextLabel("", footer_container, base_color="#8492A6")
         status_label.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
         status_label.setFont(QFont("Microsoft YaHei UI", 8, QFont.Weight.Bold))
+        status_label.setSingleLine(True)
         status_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         status_label.setMinimumWidth(1)
-        status_label.setFixedHeight(status_label.fontMetrics().height() + 4)
-        footer_layout.addWidget(status_label, 1)
+        footer_layout.addWidget(status_label, 1, alignment.AlignVCenter)
 
         round_badge = QLabel("", footer_container)
         round_badge.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
@@ -839,8 +922,7 @@ class OverlayRenderingMixin:
         workdir_label.setAlignment(alignment.AlignVCenter | alignment.AlignRight)
         workdir_label.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         workdir_label.setFont(QFont("Microsoft YaHei UI", 7))
-        workdir_label.setMaximumWidth(170)
-        workdir_label.setFixedHeight(workdir_label.fontMetrics().height() + 4)
+        workdir_label.setFixedWidth(WORK_OVERLAY_WORKDIR_FOOTER_WIDTH)
         workdir_label.setStyleSheet(
             "QLabel {"
             "color: #5E6A78;"
@@ -848,8 +930,16 @@ class OverlayRenderingMixin:
             "background: transparent;"
             "}"
         )
-        footer_layout.addWidget(workdir_label, 0)
-        footer_layout.addWidget(round_badge, 0)
+        footer_height = max(
+            18,
+            status_label.fontMetrics().height() + 4,
+            workdir_label.fontMetrics().height() + 4,
+        )
+        footer_container.setFixedHeight(footer_height)
+        status_label.setFixedHeight(footer_height)
+        workdir_label.setFixedHeight(footer_height)
+        footer_layout.addWidget(workdir_label, 0, alignment.AlignVCenter)
+        footer_layout.addWidget(round_badge, 0, alignment.AlignVCenter)
         card_layout.addWidget(footer_container)
 
         record = {

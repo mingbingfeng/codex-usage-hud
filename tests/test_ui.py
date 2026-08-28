@@ -170,6 +170,8 @@ from codex_usage_hud.ui.work_overlay_qt import (
     _mark_item_dismissed,
     _multiline_elided_text,
     _overlay_payload_signature,
+    _overlay_activity_step_texts,
+    _overlay_activity_tooltip,
     _overlay_hover_hit_test,
     _ordered_overlay_items,
     _overlay_items_required_height,
@@ -7937,6 +7939,64 @@ with tempfile.TemporaryDirectory() as temp_dir:
             )
         )
 
+    def test_work_overlay_activity_steps_keep_desktop_style_command_content(self) -> None:
+        item = {
+            "activitySteps": [
+                {
+                    "title": "调用工具",
+                    "toolName": "read_file",
+                    "detail": "{\"path\":\"src/main.py\"}",
+                    "status": "completed",
+                },
+                {
+                    "title": "命令完成",
+                    "detail": "git status --short",
+                    "status": "completed",
+                },
+            ]
+        }
+
+        texts = _overlay_activity_step_texts(item)
+
+        self.assertEqual(texts[0], '已读取文件：{"path":"src/main.py"}')
+        self.assertEqual(texts[1], "运行了命令：git status --short")
+        self.assertIn("已读取文件", _overlay_activity_tooltip(item))
+        self.assertIn("运行了命令", _overlay_activity_tooltip(item))
+
+    def test_active_work_payload_keeps_steps_and_falls_back_to_session_start(self) -> None:
+        started_at = datetime(2026, 6, 15, 9, 8, 7).astimezone()
+        snapshot = ParsedSession(
+            session_id="session-1",
+            cwd=r"E:\Project\app",
+            session_started_at=started_at,
+            activity_steps=[
+                SimpleNamespace(
+                    timestamp=started_at,
+                    title="命令完成",
+                    detail="git status",
+                    status="completed",
+                    call_id="call-1",
+                    line=2,
+                    tool_name="exec",
+                    output="clean",
+                )
+            ],
+        )
+        snapshot.request.status = "running"
+
+        item = active_work._work_item_from_snapshot(
+            snapshot,
+            current=True,
+            now=started_at + timedelta(seconds=2),
+        )
+
+        self.assertIsNotNone(item)
+        assert item is not None
+        self.assertEqual(item.started_at, started_at)
+        payload = work_item_to_overlay_dict(item)
+        self.assertEqual(payload["activitySteps"][0]["detail"], "git status")
+        self.assertEqual(payload["activitySteps"][0]["output"], "clean")
+
     def test_work_overlay_multiline_elided_text_limits_body_to_three_lines(self) -> None:
         try:
             import PySide6  # noqa: F401
@@ -8351,6 +8411,50 @@ class WorkOverlayTransitionTests(unittest.TestCase):
         item = {"id": "a", "status": "tool", "workdirName": r"Alpha\app"}
 
         self.assertEqual(_workdir_display_name(item), "app")
+
+    def test_overlay_refresh_keeps_metadata_and_high_water_round_count(self) -> None:
+        cached = WorkStatusItem(
+            id="session-1",
+            title="Session",
+            status="tool",
+            status_label="运行中",
+            detail="工具",
+            workdir=r"E:\Project\app",
+            workdir_name="app",
+            round_index=4,
+            task_index=2,
+            started_at=datetime(2026, 6, 15, 9, 8, 7).astimezone(),
+            task_started_at=datetime(2026, 6, 15, 9, 8, 7).astimezone(),
+            activity_steps=(
+                {"title": "执行命令", "detail": "git status", "callId": "1"},
+            ),
+        )
+        refreshed = WorkStatusItem(
+            id="session-1",
+            title="Session",
+            status="recent",
+            status_label="刚完成",
+            detail="完成",
+            round_index=2,
+            task_index=2,
+        )
+
+        merged = overlay_projection._merge_stable_item_metadata(cached, refreshed)
+
+        self.assertEqual(merged.workdir, cached.workdir)
+        self.assertEqual(merged.started_at, cached.started_at)
+        self.assertEqual(merged.round_index, 4)
+        self.assertEqual(len(merged.activity_steps), 1)
+
+        next_task = replace(refreshed, task_index=3, round_index=1)
+
+        self.assertEqual(
+            overlay_projection._merge_stable_item_metadata(
+                cached,
+                next_task,
+            ).round_index,
+            1,
+        )
 
     def test_cli_profile_prefix_is_hidden_for_desktop_bubbles(self) -> None:
         cli_item = {

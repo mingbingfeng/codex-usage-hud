@@ -141,17 +141,74 @@ def tool_call_detail(payload: Mapping[str, Any]) -> str:
     return f"{name} {compact_text(argument_text, 140)}".strip()
 
 
+def _tool_call_name(payload: Mapping[str, Any]) -> str:
+    return str(payload.get("name") or payload.get("tool_name") or "").strip()
+
+
+def _command_parts(value: Any) -> list[str]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return []
+    return [str(part) for part in value if part]
+
+
+_SHELL_LAUNCHERS = frozenset(
+    {
+        "pwsh",
+        "powershell",
+        "bash",
+        "sh",
+        "zsh",
+        "dash",
+        "fish",
+        "cmd",
+        "nu",
+    }
+)
+
+
+def _shell_launcher(value: str) -> bool:
+    name = str(value or "").strip().casefold()
+    if name.endswith(".exe"):
+        name = name[: -len(".exe")]
+    return name in _SHELL_LAUNCHERS
+
+
+def _normalise_command_parts(parts: Sequence[str]) -> str:
+    values = [str(part) for part in parts if part]
+    if not values:
+        return ""
+    command_flags = {
+        "-command",
+        "--command",
+        "-c",
+        "/c",
+        "/k",
+        "-lc",
+    }
+    # Only strip a shell launcher wrapper (pwsh -Command ...) when the first
+    # token is a known shell and the flag appears near the front. A bare
+    # command array like `curl -c cookies.txt` or `git log -c key=val` must
+    # never lose its leading executable.
+    if _shell_launcher(values[0]):
+        flag_index = next(
+            (
+                index
+                for index, value in enumerate(values[:4])
+                if value.casefold() in command_flags
+            ),
+            None,
+        )
+        if flag_index is not None and flag_index + 1 < len(values):
+            values = values[flag_index + 1 :]
+    return " ".join(values)
+
+
 def command_execution_text(item: Mapping[str, Any]) -> str:
     """Extract a readable command from a CommandExecution item."""
     value = item.get("command") or item.get("cmd") or ""
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        parts = [str(part) for part in value if part]
-        if (
-            len(parts) >= 3
-            and parts[1].casefold() in {"-command", "-c", "--command"}
-        ):
-            parts = parts[2:]
-        value = " ".join(parts)
+    parts = _command_parts(value)
+    if parts:
+        value = _normalise_command_parts(parts)
     return compact_text(value, 140)
 
 
@@ -492,6 +549,8 @@ class ActivityStep:
     status: str = "running"
     call_id: str = ""
     line: int = 0
+    tool_name: str = ""
+    output: str = ""
 
 
 @dataclass
@@ -506,6 +565,7 @@ class WorkStatusItem:
     session_id: str = ""
     target_title: str = ""
     round_index: int = 0
+    task_index: int = 0
     model_name: str = ""
     status_text: str = ""
     last_text: str = ""
@@ -530,6 +590,7 @@ class WorkStatusItem:
     current: bool = False
     pending_accounting: bool = False
     draft_text: str = ""
+    activity_steps: tuple[Mapping[str, object], ...] = ()
     kind: str = "session"
     event_id: str = ""
 
@@ -2319,6 +2380,7 @@ class JsonlSessionParser:
             title: str,
             detail: str,
             call_id: str,
+            tool_name: str = "",
         ) -> None:
             steps.append(
                 ActivityStep(
@@ -2328,6 +2390,7 @@ class JsonlSessionParser:
                     status="running",
                     call_id=call_id,
                     line=_as_int(record.get("_line")),
+                    tool_name=tool_name,
                 )
             )
             open_indexes.append(len(steps) - 1)
@@ -2367,6 +2430,19 @@ class JsonlSessionParser:
             except ValueError:
                 pass
 
+        def find_step_by_call_id(call_id: str) -> int | None:
+            normalized_id = str(call_id or "").strip()
+            if not normalized_id:
+                return None
+            return next(
+                (
+                    index
+                    for index in range(len(steps) - 1, -1, -1)
+                    if steps[index].call_id == normalized_id
+                ),
+                None,
+            )
+
         for record in records[start_index:]:
             payload = record.get("payload") or {}
             if not isinstance(payload, Mapping):
@@ -2377,7 +2453,26 @@ class JsonlSessionParser:
                 "function_call",
                 "custom_tool_call",
             }:
-                name = str(payload.get("name") or "").strip().casefold()
+                raw_name = _tool_call_name(payload)
+                name = raw_name.casefold()
+                command = tool_command_text(payload)
+                tool_call_id = str(
+                    payload.get("call_id") or payload.get("id") or ""
+                ).strip()
+                existing_index = find_open_step(
+                    tool_call_id,
+                    # Match by call id only when one exists; fall back to the
+                    # command text only for id-less calls so two concurrent
+                    # calls with identical text are never merged.
+                    command if not tool_call_id else "",
+                )
+                if existing_index is not None:
+                    step = steps[existing_index]
+                    if raw_name and not step.tool_name:
+                        step.tool_name = raw_name
+                    if command and not step.detail:
+                        step.detail = command
+                    continue
                 title = (
                     "执行命令"
                     if name in {"exec", "shell", "shell_command"}
@@ -2386,10 +2481,11 @@ class JsonlSessionParser:
                 add_open_step(
                     record,
                     title=title,
-                    detail=tool_command_text(payload) or tool_call_detail(payload),
+                    detail=command or tool_call_detail(payload),
                     call_id=str(
                         payload.get("call_id") or payload.get("id") or ""
                     ).strip(),
+                    tool_name=raw_name,
                 )
                 continue
             if record_type == "event_msg" and payload_type in {
@@ -2414,6 +2510,13 @@ class JsonlSessionParser:
                     command,
                     allow_unique_command_fallback=True,
                 )
+                if index is not None and not completed:
+                    step = steps[index]
+                    step.timestamp = record.get("_dt") or step.timestamp
+                    step.detail = command or step.detail
+                    step.status = "running"
+                    step.line = _as_int(record.get("_line"), step.line)
+                    continue
                 if index is None or not completed:
                     if completed:
                         steps.append(
@@ -2424,6 +2527,12 @@ class JsonlSessionParser:
                                 status="failed" if failed else "completed",
                                 call_id=str(item.get("id") or "").strip(),
                                 line=_as_int(record.get("_line")),
+                                output=compact_text(
+                                    item.get("aggregated_output")
+                                    or item.get("output")
+                                    or "",
+                                    220,
+                                ),
                             )
                         )
                     else:
@@ -2439,8 +2548,13 @@ class JsonlSessionParser:
                 step.title = "命令失败" if failed else "命令完成"
                 step.detail = command or step.detail
                 step.status = "failed" if failed else "completed"
-                step.call_id = str(item.get("id") or step.call_id).strip()
+                if not step.call_id:
+                    step.call_id = str(item.get("id") or "").strip()
                 step.line = _as_int(record.get("_line"), step.line)
+                step.output = compact_text(
+                    item.get("aggregated_output") or item.get("output") or "",
+                    220,
+                )
                 close_open_step(index)
                 continue
             if record_type == "response_item" and payload_type in {
@@ -2448,10 +2562,17 @@ class JsonlSessionParser:
                 "custom_tool_call_output",
             }:
                 call_id = str(payload.get("call_id") or "").strip()
-                index = find_open_step(call_id, "")
+                index = find_step_by_call_id(call_id)
+                if index is None and not call_id and len(open_indexes) == 1:
+                    index = open_indexes[0]
                 if index is not None:
-                    steps[index].status = "completed"
+                    if steps[index].status not in {"failed", "completed"}:
+                        steps[index].status = "completed"
                     steps[index].timestamp = record.get("_dt") or steps[index].timestamp
+                    steps[index].output = compact_text(
+                        payload.get("output") or payload.get("result") or "",
+                        220,
+                    )
                     close_open_step(index)
 
         if any(

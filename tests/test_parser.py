@@ -23,6 +23,7 @@ from codex_usage_hud.core.parser import (
     JsonlTailState,
     RequestTokens,
     SseRequestStateMachine,
+    command_execution_text,
     extract_log_field,
     extract_session_thread_identity,
     parse_timestamp,
@@ -176,6 +177,130 @@ class JsonlSessionParserTests(unittest.TestCase):
         self.assertEqual(steps[1].title, "命令失败")
         self.assertEqual(steps[1].status, "failed")
         self.assertIn("git status --short", steps[1].detail)
+
+    def test_activity_steps_normalize_shell_launcher_and_keep_tool_output(self) -> None:
+        parser = JsonlSessionParser()
+        records = [
+            record("2026-05-28T00:00:00Z", "event_msg", {"type": "task_started"}),
+            record(
+                "2026-05-28T00:00:01Z",
+                "response_item",
+                {
+                    "type": "custom_tool_call",
+                    "name": "exec",
+                    "call_id": "exec-call",
+                    "input": json.dumps({"cmd": "git status --short"}),
+                },
+            ),
+            record(
+                "2026-05-28T00:00:02Z",
+                "event_msg",
+                {
+                    "type": "item_started",
+                    "item": {
+                        "id": "desktop-command-id",
+                        "type": "CommandExecution",
+                        "command": [
+                            "pwsh.exe",
+                            "-NoProfile",
+                            "-Command",
+                            "git status --short",
+                        ],
+                        "status": "in_progress",
+                    },
+                },
+            ),
+            record(
+                "2026-05-28T00:00:03Z",
+                "event_msg",
+                {
+                    "type": "item_completed",
+                    "item": {
+                        "id": "desktop-command-id",
+                        "type": "CommandExecution",
+                        "command": [
+                            "pwsh.exe",
+                            "-NoProfile",
+                            "-Command",
+                            "git status --short",
+                        ],
+                        "status": "completed",
+                        "aggregated_output": "working tree clean",
+                    },
+                },
+            ),
+            record(
+                "2026-05-28T00:00:04Z",
+                "response_item",
+                {
+                    "type": "custom_tool_call_output",
+                    "call_id": "exec-call",
+                    "output": "working tree clean",
+                },
+            ),
+        ]
+        for index, item in enumerate(records, 1):
+            item["_line"] = index
+            item["_dt"] = parse_timestamp(item["timestamp"])
+
+        steps = parser.activity_steps(records, task_started_index=0)
+
+        self.assertEqual(len(steps), 1)
+        self.assertEqual(steps[0].tool_name, "exec")
+        self.assertEqual(steps[0].status, "completed")
+        self.assertEqual(steps[0].detail, "git status --short")
+        self.assertEqual(steps[0].output, "working tree clean")
+
+    def test_command_execution_text_only_strips_shell_launcher_wrapper(self) -> None:
+        # A real shell wrapper is normalised to the inner command.
+        self.assertEqual(
+            command_execution_text(
+                {
+                    "type": "CommandExecution",
+                    "command": [
+                        "pwsh.exe",
+                        "-NoProfile",
+                        "-Command",
+                        "git status --short",
+                    ],
+                }
+            ),
+            "git status --short",
+        )
+        # A bare command whose own arguments contain a flag word must be
+        # preserved verbatim - never stripped.
+        self.assertEqual(
+            command_execution_text(
+                {
+                    "type": "CommandExecution",
+                    "command": [
+                        "curl",
+                        "-c",
+                        "cookies.txt",
+                        "https://example.com",
+                    ],
+                }
+            ),
+            "curl -c cookies.txt https://example.com",
+        )
+        self.assertEqual(
+            command_execution_text(
+                {
+                    "type": "CommandExecution",
+                    "command": ["git", "log", "-c", "user.name=alice", "--oneline"],
+                }
+            ),
+            "git log -c user.name=alice --oneline",
+        )
+        self.assertEqual(
+            command_execution_text(
+                {
+                    "type": "CommandExecution",
+                    "command": ["bash", "-lc", "npm test"],
+                }
+            ),
+            "npm test",
+        )
 
     def test_session_meta_exposes_provider_and_cli_client_kind(self) -> None:
         parser = JsonlSessionParser()
