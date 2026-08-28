@@ -18,6 +18,9 @@ from urllib.request import Request, urlopen
 PROVIDER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 ENVIRONMENT_KEY_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 CODEX_AUTH_API_KEY = "OPENAI_API_KEY"
+# Codex 内置保留 Provider ID：不允许在 [model_providers.<id>] 中自定义覆盖。
+# 参考 Codex 报错："model_providers contains reserved built-in provider IDs"。
+RESERVED_BUILTIN_PROVIDER_IDS = frozenset({"openai", "ollama", "lmstudio"})
 OFFICIAL_ACCOUNT_TOKEN_KEYS = frozenset(
     {"access_token", "refresh_token", "id_token", "account_id"}
 )
@@ -592,6 +595,11 @@ def _validate_request(
         is_new and provider_id.casefold() == "custom"
     ):
         raise ValueError("Provider ID 只能使用字母、数字、连字符或下划线，且不能是 custom。")
+    if provider_id.casefold() in RESERVED_BUILTIN_PROVIDER_IDS:
+        raise ValueError(
+            "Provider ID 与 Codex 内置 Provider 重名（openai / ollama / lmstudio），"
+            "内置 Provider 无法覆盖，请改用其它 ID（例如 ollama-local）。"
+        )
     if not base_url or "\r" in base_url or "\n" in base_url:
         raise ValueError("base_url 不能为空且必须是单行文本。")
     if env_key and not ENVIRONMENT_KEY_PATTERN.fullmatch(env_key):
@@ -1340,6 +1348,7 @@ def send_cli_chat_probe(
 __all__ = [
     "CODEX_AUTH_API_KEY",
     "OFFICIAL_ACCOUNT_TOKEN_KEYS",
+    "RESERVED_BUILTIN_PROVIDER_IDS",
     "CodexProviderDefinition",
     "default_codex_auth_path",
     "default_codex_config_path",

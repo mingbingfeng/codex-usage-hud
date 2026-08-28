@@ -2958,6 +2958,10 @@ _TEXT_PREFIX = r"""
           setProviderConfigDialogError("Provider ID 只能使用字母、数字、连字符或下划线，且不能是 custom。");
           return false;
         }
+        if (["openai", "ollama", "lmstudio"].includes(String(provider).toLowerCase())) {
+          setProviderConfigDialogError("Provider ID 与 Codex 内置 Provider 重名（openai / ollama / lmstudio），内置 Provider 无法覆盖，请改用其它 ID（例如 ollama-local）。");
+          return false;
+        }
         if (!baseUrl || /[\r\n]/.test(baseUrl)) {
           setProviderConfigDialogError("Base URL 不能为空且必须是单行文本。");
           return false;

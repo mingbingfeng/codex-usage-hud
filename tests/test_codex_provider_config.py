@@ -92,6 +92,113 @@ class CodexProviderConfigTests(unittest.TestCase):
         self.assertIn("[features]\nmemories = true", updated)
         self.assertFalse(profile.exists())
 
+    @patch("codex_usage_hud.codex_provider_config._delete_user_environment_value")
+    def test_reserved_builtin_provider_ids_rejected_on_add_and_edit(
+        self, mock_delete_env: MagicMock
+    ) -> None:
+        """Codex 内置保留 ID（openai/ollama/lmstudio）不能作为自定义供应商新增或编辑。"""
+        config_text = (
+            'model_provider = "custom"\n\n'
+            "[model_providers]\n"
+            "[model_providers.custom]\n"
+            'name = "OpenAI"\n'
+            'base_url = "https://example/v1"\n'
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            path = root / "config.toml"
+            # 模拟用户 config.toml 中已存在非法的 ollama 段（例如旧版 HUD 写入）。
+            path.write_text(
+                config_text
+                + "\n[model_providers.ollama]\n"
+                + 'name = "ollama"\n'
+                + 'base_url = "https://ollama.com/v1"\n'
+                + 'env_key = "OLLAMA_API_KEY"\n'
+                + 'wire_api = "responses"\n',
+                encoding="utf-8",
+            )
+
+            for reserved_id in ("openai", "ollama", "lmstudio", "Ollama"):
+                with self.subTest(reserved=reserved_id):
+                    with self.assertRaisesRegex(ValueError, "内置 Provider 重名"):
+                        save_provider_configs(
+                            [
+                                {
+                                    "provider_id": reserved_id,
+                                    "base_url": "https://new.example/v1",
+                                    "env_key": "NEW_API_KEY",
+                                    "api_key": "secret",
+                                    "is_new": True,
+                                }
+                            ],
+                            config_path=path,
+                        )
+                    # 编辑已有 ollama 段同样拦截，避免把保留 ID 配置写回。
+                    if reserved_id.casefold() == "ollama":
+                        with self.assertRaisesRegex(ValueError, "内置 Provider 重名"):
+                            save_provider_configs(
+                                [
+                                    {
+                                        "provider_id": "ollama",
+                                        "base_url": "https://new.example/v1",
+                                        "env_key": "OLLAMA_API_KEY",
+                                        "api_key": "secret",
+                                        "is_new": False,
+                                    }
+                                ],
+                                config_path=path,
+                            )
+            # 删除保留 ID 段是允许的（恢复 config 合法性的唯一途径）。
+            result = delete_provider_config("ollama", config_path=path)
+            self.assertTrue(result["changed"])
+            updated = path.read_text(encoding="utf-8")
+            self.assertNotIn("[model_providers.ollama]", updated)
+        mock_delete_env.assert_called_once_with("OLLAMA_API_KEY")
+
+    def test_similar_but_not_reserved_provider_id_is_allowed(self) -> None:
+        """形似保留 ID 的自定义 ID（如 ollama-local）仍可正常新增。"""
+        config_text = (
+            'model_provider = "custom"\n\n'
+            "[model_providers]\n"
+            "[model_providers.custom]\n"
+            'name = "OpenAI"\n'
+            'base_url = "https://example/v1"\n'
+        )
+        env_values: dict[str, str] = {}
+
+        def fake_get_env(key: str) -> str:
+            return env_values.get(str(key), "")
+
+        def fake_set_env(key: str, value: str) -> None:
+            env_values[str(key)] = str(value)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "config.toml"
+            path.write_text(config_text, encoding="utf-8")
+            with patch(
+                "codex_usage_hud.codex_provider_config._user_environment_value",
+                side_effect=fake_get_env,
+            ), patch(
+                "codex_usage_hud.codex_provider_config._set_user_environment_value",
+                side_effect=fake_set_env,
+            ):
+                result = save_provider_configs(
+                    [
+                        {
+                            "provider_id": "ollama-local",
+                            "base_url": "http://localhost:11434/v1",
+                            "env_key": "OLLAMA_API_KEY",
+                            "api_key": "secret",
+                            "is_new": True,
+                        }
+                    ],
+                    config_path=path,
+                )
+                updated = path.read_text(encoding="utf-8")
+        self.assertTrue(result["changed"])
+        self.assertIn("[model_providers.ollama-local]", updated)
+        self.assertEqual(env_values.get("OLLAMA_API_KEY"), "secret")
+
     def test_default_custom_provider_updates_config_and_auth_without_profile(self) -> None:
         config_text = (
             'model_provider = "custom"\n\n'
