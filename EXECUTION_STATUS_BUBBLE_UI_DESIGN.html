@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>会话气泡「执行状态」UI/交互方案 · codex-usage-hud</title>
+<style>
+  :root{
+    --bg:#0A0F14; --card:#10161D; --line:#263241; --line2:#1B2634;
+    --text:#D7E1EE; --text2:#A9B6C6; --text3:#8492A6; --text4:#5B6B7F;
+    --acc-run:#F3D27A; --acc-runbg:#1C190F;
+    --acc-wait:#FFB86B; --acc-waitbg:#1D1610;
+    --acc-tool:#9CCBFF; --acc-toolbg:#0D1722;
+    --acc-fail:#FF7B72; --acc-failbg:#2A1412;
+    --acc-ok:#49E07D; --acc-okbg:#0D2416;
+    --mono:"Consolas","Cascadia Code","SF Mono",monospace;
+    --sans:"Microsoft YaHei UI","Segoe UI","PingFang SC",sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--text);font-family:var(--sans);font-size:14px;line-height:1.6;padding:28px 20px 80px}
+  .wrap{max-width:1180px;margin:0 auto}
+  header{margin-bottom:26px}
+  h1{font-size:22px;font-weight:700;letter-spacing:.3px}
+  h1 .tag{display:inline-block;font-size:11px;font-weight:600;color:#0A0F14;background:var(--acc-tool);border-radius:4px;padding:1px 8px;vertical-align:3px;margin-left:10px}
+  .sub{color:var(--text2);margin-top:6px;font-size:13px}
+  h2{font-size:16px;font-weight:700;margin:34px 0 12px;padding-left:10px;border-left:3px solid var(--acc-tool)}
+  h2 .en{color:var(--text4);font-weight:400;font-size:12px;margin-left:8px}
+  h3{font-size:14px;font-weight:600;margin:16px 0 8px;color:var(--text)}
+  .grid{display:grid;gap:14px}
+  .g2{grid-template-columns:1fr 1fr}
+  @media(max-width:900px){.g2{grid-template-columns:1fr}}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px}
+  .card h4{margin-bottom:8px;font-size:13px;color:var(--text2)}
+  ul,ol{margin:6px 0 6px 20px}
+  li{margin:4px 0}
+  .dim{color:var(--text3)}
+  .hl{color:var(--acc-tool);font-family:var(--mono);font-size:12.5px;background:#0d1722;padding:0 4px;border-radius:3px}
+  .mono{font-family:var(--mono);font-size:12.5px}
+
+  /* hard constraint banner */
+  .constraint{display:flex;gap:12px;align-items:flex-start;background:#1A120B;border:1px solid #7A5B26;border-left:3px solid var(--acc-run);border-radius:10px;padding:12px 16px;margin-top:12px}
+  .constraint .badge{flex:0 0 auto;background:var(--acc-run);color:#0A0F14;font-weight:700;font-size:12px;border-radius:6px;padding:2px 9px}
+  .constraint .txt{color:var(--text)}
+  .constraint .txt b{color:var(--acc-run)}
+  .constraint .txt ul{margin-top:4px}
+
+  /* facts */
+  .facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:12px;margin-top:6px}
+  .fact{background:var(--card);border:1px solid var(--line);border-left:3px solid var(--acc-tool);border-radius:8px;padding:10px 12px}
+  .fact .t{font-size:12px;font-weight:600;color:var(--acc-tool);margin-bottom:3px}
+  .fact .d{font-size:12.5px;color:var(--text2)}
+  .fact.hard{border-left-color:var(--acc-fail)}
+  .fact.hard .t{color:var(--acc-fail)}
+
+  /* stage */
+  .stage{display:flex;gap:26px;align-items:flex-start;flex-wrap:wrap}
+  .stage-left{flex:1 1 470px;min-width:330px}
+  .stage-right{flex:1 1 360px;min-width:300px;max-width:520px}
+  .controls{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}
+  .btn{background:#10161D;border:1px solid var(--line);color:var(--text2);border-radius:7px;padding:5px 13px;font-size:12.5px;cursor:pointer;font-family:var(--sans);transition:.12s}
+  .btn:hover{border-color:#3A4A5E;color:var(--text)}
+  .btn.on{background:#1B2B40;border-color:var(--acc-tool);color:var(--acc-tool)}
+  .btn.small{padding:2px 8px;font-size:11px}
+  .hint{font-size:12px;color:var(--text4);margin-top:8px;line-height:1.7}
+  .hint b{color:var(--text3);font-weight:600}
+  .cap{font-size:12px;color:var(--text3);margin:4px 0 0;font-weight:600}
+
+  /* bubble base — 宽高与现有气泡一致，不新增/不动动画 */
+  .bubble{width:430px;max-width:100%;background:var(--card);border:1px solid var(--line);border-radius:16px;overflow:hidden;box-shadow:0 10px 30px rgba(0,0,0,.45)}
+  .bubble.done{border-color:#1FA85A}
+  .bubble.fail{border-color:#B33A33}
+  .b-title{display:flex;align-items:center;gap:8px;padding:8px 12px 6px;border-bottom:1px solid var(--line2)}
+  .b-title .elapsed{font-size:9px;font-weight:700;color:var(--text2);letter-spacing:.3px}
+  .b-title .spacer{flex:1}
+  .b-title .close{font-size:11px;font-weight:700;color:var(--text2);cursor:pointer;padding:0 3px}
+  .b-body{padding:10px 12px 8px;min-height:64px;position:relative}
+  .b-body .body-line{font-size:11px;color:#B8C6D8;line-height:1.55;white-space:pre-wrap;word-break:break-all}
+  .b-status{display:flex;align-items:center;gap:8px;padding:5px 12px 8px;font-size:11px;flex-wrap:wrap}
+  .pill{display:inline-flex;align-items:center;gap:6px;padding:1px 8px;border-radius:10px;font-size:10px;font-weight:600;white-space:nowrap}
+  .pill.run{color:var(--acc-run);background:var(--acc-runbg)}
+  .pill.tool{color:var(--acc-tool);background:var(--acc-toolbg)}
+  .pill.wait{color:var(--acc-wait);background:var(--acc-waitbg)}
+  .pill.fail{color:var(--acc-fail);background:var(--acc-failbg)}
+  .pill.ok{color:var(--acc-ok);background:var(--acc-okbg)}
+  .b-footer{display:flex;align-items:center;gap:6px;padding:6px 12px 9px;border-top:1px solid var(--line2);font-size:10.5px;color:var(--text3);flex-wrap:nowrap}
+  .b-footer .step{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text2);font-weight:600}
+  .b-footer .step .dot{display:inline-block;width:6px;height:6px;border-radius:50%;margin-right:5px;vertical-align:1px}
+  .b-footer .workdir{flex:0 1 auto;max-width:170px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text4)}
+  .b-footer .round{flex:0 0 auto;background:#1B2634;border-radius:9px;padding:0 6px;font-size:9.5px;color:var(--text3)}
+  .b-footer .tk{flex:0 0 auto;color:var(--text4);font-family:var(--mono);font-size:10px}
+
+  /* scheme A execution panel —— 始终 3 行，不改变气泡高度；静态指示符，无新增动画 */
+  .exec-panel{border:1px solid var(--line);border-radius:9px;background:#0C1218;overflow:hidden}
+  .exec-l1{display:flex;gap:6px;align-items:baseline;padding:7px 9px 5px;border-bottom:1px dashed var(--line2)}
+  .exec-l1 .ic{color:var(--acc-tool);font-size:11px}
+  .exec-l1 .cmd{font-family:var(--mono);font-size:10.5px;color:#D7E1EE;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1}
+  .exec-l2{display:flex;gap:6px;align-items:center;padding:6px 9px;border-bottom:1px dashed var(--line2)}
+  .exec-l2 .ic{color:var(--acc-tool);font-size:10px}
+  .exec-l2 .st{font-size:10.5px;color:var(--acc-tool)}
+  .exec-l2 .el{font-size:10px;color:var(--text3);font-family:var(--mono)}
+  .exec-l2 .spacer{flex:1}
+  .exec-l2 .back{font-size:10.5px;color:var(--acc-tool);border:1px solid #2A4A6E;border-radius:5px;padding:0 6px;cursor:pointer;background:transparent;font-family:var(--sans)}
+  .exec-l3{padding:6px 9px;font-size:10.5px;color:var(--text3);font-family:var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .exec-l3.err{color:var(--acc-fail)}
+  .exec-l3.ok{color:var(--acc-ok)}
+  .exec-panel.result .exec-l2 .st{color:var(--acc-ok)}
+  .exec-panel.result.fail .exec-l2 .st{color:var(--acc-fail)}
+
+  /* scheme B —— 状态条嵌入正文第 1 行（3 行预算不变），浮层为覆盖式（不占高度） */
+  .sb-line{display:flex;align-items:center;gap:7px;margin-bottom:6px;padding:3px 8px;border-radius:7px;border:1px solid var(--line);background:#0C1218;font-size:11px;cursor:pointer;user-select:none}
+  .sb-line .ic{color:var(--acc-tool);font-size:10px}
+  .sb-line .sb-title{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text2);font-weight:600}
+  .sb-line .sb-state{color:var(--acc-tool);white-space:nowrap}
+  .sb-line.ok{border-color:#1FA85A}
+  .sb-line.ok .sb-state{color:var(--acc-ok)}
+  .sb-line.fail{border-color:#B33A33}
+  .sb-line.fail .sb-state{color:var(--acc-fail)}
+  .float-panel{position:absolute;left:6px;right:6px;top:4px;background:rgba(16,22,29,.97);border:1px solid #33507A;border-radius:9px;padding:9px;box-shadow:0 12px 34px rgba(0,0,0,.6);z-index:5}
+  .float-panel .fp-l{font-family:var(--mono);font-size:10.5px;color:#D7E1EE;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:5px}
+  .float-panel .fp-l .ic{color:var(--acc-tool)}
+  .float-panel .fp-out{font-family:var(--mono);font-size:10.5px;color:#B8C6D8;white-space:pre-wrap;word-break:break-all;max-height:44px;overflow:hidden;margin-bottom:5px}
+  .float-panel .fp-st{font-size:10.5px}
+  .float-panel .fp-st.ok{color:var(--acc-ok)} .float-panel .fp-st.err{color:var(--acc-fail)} .float-panel .fp-st.run{color:var(--acc-tool)}
+  .float-panel .fp-close{position:absolute;top:5px;right:7px;font-size:11px;color:var(--text3);cursor:pointer}
+
+  table{border-collapse:collapse;width:100%;font-size:12.5px;margin-top:6px}
+  th,td{border:1px solid var(--line);padding:7px 10px;text-align:left;vertical-align:top}
+  th{background:#0E141B;color:var(--text2);font-weight:600;white-space:nowrap}
+  td{color:var(--text2)}
+  td .mono{font-size:11.5px;color:var(--text)}
+  .rec{display:flex;gap:12px;align-items:flex-start;background:linear-gradient(180deg,#0E1B2A,#0C141D);border:1px solid #2A4A6E;border-radius:10px;padding:14px 16px;margin-top:10px}
+  .rec .badge{flex:0 0 auto;background:var(--acc-tool);color:#0A0F14;font-weight:700;font-size:12px;border-radius:6px;padding:2px 9px}
+  .rec .txt{color:var(--text)}
+  .rec .txt b{color:var(--acc-tool)}
+  .foot{margin-top:40px;padding-top:14px;border-top:1px solid var(--line);color:var(--text4);font-size:12px}
+  .note{font-size:11.5px;color:var(--text4);background:#0C1218;border:1px dashed var(--line);border-radius:7px;padding:7px 10px;margin-top:8px}
+  .stepcount{font-size:11px;color:var(--text4)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>会话气泡「执行状态」UI / 交互方案<span class="tag">设计 · 不改代码</span></h1>
+  <div class="sub">codex-usage-hud · Work Activity Bubble（430px 桌面气泡）· 基于 codex 0.150.1 Desktop + CLI 真实会话实测数据</div>
+</header>
+
+<h2>0 · 硬性约束与实测结论<span class="en">Constraints & evidence</span></h2>
+<div class="constraint">
+  <div class="badge">硬约束</div>
+  <div class="txt">
+    <b>不改变现有会话气泡的宽与高，不改变所有既有动画特效。</b>具体落实：
+    <ul>
+      <li>卡片宽仍 <b>430px</b>；正文 3 行高度预算不变（执行状态内容 <b>只能在这 3 行内置换</b>，不得新增行、不得让卡片变高变宽）</li>
+      <li>既有动画全部保留：完成态 <b>520ms 圆形化变形</b>、悬停透明度、状态 shimmer —— 一律不动</li>
+      <li>新增的执行指示仅用<b>静态符号（▶ / ✓ / ✗）</b>与既有 shimmer，<b>不新增旋转/闪烁等新动画</b>，不替换既有动画</li>
+    </ul>
+  </div>
+</div>
+<div class="facts">
+  <div class="fact"><div class="t">折叠标题 = Reasoning.summary_text</div><div class="d">Desktop 界面上"执行指令折叠标题"对应 rollout 的 <span class="mono">Reasoning.summary_text</span>（如 <span class="mono">"Preparing patch to add hud-observe.txt"</span>），位于每步工具调用之前。</div></div>
+  <div class="fact hard"><div class="t">硬约束：执行中零流式事件</div><div class="d">24s 长命令从 <span class="mono">custom_tool_call</span> 到 <span class="mono">item_completed</span> 之间 rollout <b>无任何中间事件</b>。Desktop 与 CLI 完全一致 → "最新活跃 3 行"无法实时流式刷新，只能展示命令 + 状态 + 上一步输出。</div></div>
+  <div class="fact"><div class="t">完成时数据完整</div><div class="d"><span class="mono">CommandExecution</span> 含完整 command / cwd / stdout / stderr / exit_code；<span class="mono">FileChange.changes</span> 含每文件 diff。退出码 1 可判定失败。</div></div>
+  <div class="fact"><div class="t">时序（已确认）</div><div class="d">task_started → reasoning(标题) → custom_tool_call(命令) → [执行空窗] → item_completed(CommandExecution) → custom_tool_call_output → token_count → agent_message → task_complete</div></div>
+</div>
+<div class="note">真实样例（Desktop 会话 01a04b41）：命令 <span class="mono">1..4 | ForEach-Object { Write-Output ("hud-live-" + $_) ; Start-Sleep -Seconds 6 }</span> 运行约 24s，输出 <span class="mono">hud-live-1..4</span>；失败命令 <span class="mono">hud-no-such-cmd-xyz</span> 退出码 1；apply_patch 生成 FileChange（新增 tmp/hud-observe.txt）。</div>
+
+<h2>1 · 基线（现状）<span class="en">Baseline</span></h2>
+<div class="stage">
+  <div class="stage-left">
+    <div class="bubble" style="margin:4px 0">
+      <div class="b-title"><span class="elapsed">● 00:24</span><span class="spacer"></span><span class="close">✕</span></div>
+      <div class="b-body">
+        <div class="body-line">已按顺序完成：\n1. 第1步完整运行约24秒，输出 hud-live-1 至 hud-live-4。\n2. 已读取根目录 AGENTS.md 前 8 行…</div>
+      </div>
+      <div class="b-status"><span class="pill ok">✓ 已完成</span></div>
+      <div class="b-footer">
+        <span class="step"><span class="dot" style="background:#49E07D"></span>命令完成</span>
+        <span class="workdir">codex-usage-hud</span>
+        <span class="round">轮次#2</span>
+        <span class="tk">144.7k</span>
+      </div>
+    </div>
+    <p class="cap">当前气泡（来自 WORK_ACTIVITY_OVERLAY_DESIGN.md）· 宽 430px · 正文 3 行 · 既有动画保留</p>
+    <p class="hint"><b>现状短板：</b>① 左下角步骤条只显示最后一条 step 的短前缀（命令/读文件/编辑/失败/等确认），有效宽度受限看不到完整信息；② 主区只展示最近一轮 agent 输出（3 行截断），执行过程完全不可见；③ 执行细节（命令全文、输出、错误）在气泡内无入口。本方案在不改变宽高与动画的前提下补齐这些。</p>
+  </div>
+  <div class="stage-right">
+    <div class="card">
+      <h4>画布规格（两种方案共用，均不改变）</h4>
+      <ul>
+        <li>卡片宽 <span class="hl">430px</span>，内边距 10/8，正文换行宽 ~402px</li>
+        <li>主区：8px <span class="hl">#B8C6D8</span>，<b>最多 3 行</b>（QTextLayout 省略号截断）——高度预算不可变</li>
+        <li>状态色：工具执行 <span class="hl">#9CCBFF</span> / 运行 <span class="hl">#F3D27A</span> / 等用户 <span class="hl">#FFB86B</span> / 失败 <span class="hl">#FF7B72</span> / 完成 <span class="hl">#49E07D</span></li>
+        <li>左下角步骤条：状态前缀 + workdir(≤170px) + 轮次徽标 + tokens（<b>同一行</b>，仅替换前缀文本）</li>
+        <li>数据源：<span class="hl">ParsedSession / ActivityStep</span> 快照（Qt 气泡与 renderer 共用）</li>
+        <li>动画：完成态 520ms 圆形化、悬停透明度、状态 shimmer —— <b>全部保留不动</b></li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<h2>2 · 方案 A「执行面板 · 切换式」<span class="en">Scheme A — Switch / Takeover（3 行内置换）</span></h2>
+<div class="stage">
+  <div class="stage-left">
+    <div class="controls" id="ctrA">
+      <button class="btn" data-st="idle">空闲·输出</button>
+      <button class="btn on" data-st="run">执行中</button>
+      <button class="btn" data-st="ok">成功</button>
+      <button class="btn" data-st="fail">失败</button>
+    </div>
+    <div id="bubbleA" class="bubble" style="margin:4px 0"></div>
+    <p class="hint"><b>核心思路：</b>执行时把正文 <b>3 行预算整体置换</b>为"执行面板"（命令 / 状态+回输出 / 最近输出），<b>不新增行、卡片宽高不变</b>；左下角同一位显示折叠标题。输出不永久丢失：完成后自动切回、L2 行内「回输出」随时手动切回。<b>指示符全部静态（▶/✓/✗），不动既有动画。</b></p>
+  </div>
+  <div class="stage-right">
+    <div class="card">
+      <h4>执行面板（正文 3 行置换，高度不变）</h4>
+      <ul>
+        <li><b>L1 命令</b>：工具图标 + 完整命令（等宽、单行省略，hover 见全文）</li>
+        <li><b>L2 状态</b>：静态 ▶ + 折叠标题 + 已运行时长（本地计时），行尾内嵌「回输出」</li>
+        <li><b>L3 最近输出</b>：上一步命令输出尾部（灰字）——无则显示等待提示</li>
+        <li><b>左下角</b>：折叠标题（短版）+ workdir + 轮次（同一行替换前缀）</li>
+      </ul>
+      <h4>交互（均不改宽高/动画）</h4>
+      <ul>
+        <li>hover L1 → 完整命令 tooltip；点击 L1 → 复制命令</li>
+        <li>L2 行内「回输出」→ 切回输出（不弹新行）</li>
+        <li>完成：L2 → ✓ 完成·退出码 0·24s，1.5s 后自动切回输出；完成态圆形化动画不变</li>
+        <li>失败：L2 → ✗ 失败·退出码 1（红），L3 显示 stderr 尾部，保持到 agent 新输出</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<h2>3 · 方案 B「状态条 · 并置式」<span class="en">Scheme B — Coexist / Strip（占第 1 行 + 覆盖式浮层）</span></h2>
+<div class="stage">
+  <div class="stage-left">
+    <div class="controls" id="ctrB">
+      <button class="btn" data-st="idle">空闲·输出</button>
+      <button class="btn on" data-st="run">执行中</button>
+      <button class="btn" data-st="expand">展开浮层</button>
+      <button class="btn" data-st="ok">成功</button>
+      <button class="btn" data-st="fail">失败</button>
+    </div>
+    <div id="bubbleB" class="bubble" style="margin:4px 0"></div>
+    <p class="hint"><b>核心思路：</b>主区以输出为主。执行时正文 <b>第 1 行替换为一行"状态条"</b>（静态 ▶ + 折叠标题 + 时长），输出占剩余 2 行——<b>3 行预算不变、高度不变、不遮盖输出</b>；点击状态条展开<b>覆盖式浮层</b>看最新活跃 3 行（命令/输出/状态，浮层不占高度、可关闭）。无执行时恢复纯输出 3 行。可点「展开浮层」试玩。</p>
+  </div>
+  <div class="stage-right">
+    <div class="card">
+      <h4>状态条（占正文第 1 行）+ 浮层</h4>
+      <ul>
+        <li><b>状态条</b>：[▶] 折叠标题 · 24s，替换正文第 1 行；输出在第 2-3 行</li>
+        <li><b>浮层</b>（点开）：命令全文 / 输出或错误 3 行 / 状态+退出码；<b>绝对定位覆盖、不改变气泡高度</b>，可关闭</li>
+        <li><b>左下角</b>：折叠标题（短版）+ workdir + 轮次（同一行）</li>
+      </ul>
+      <h4>交互（均不改宽高/动画）</h4>
+      <ul>
+        <li>状态条 hover → 完整命令 tooltip；点击 → 展开/收起浮层</li>
+        <li>完成：状态条 → ✓ 完成·24s，2s 后淡出（输出恢复 3 行）；完成态圆形化动画不变</li>
+        <li>失败：状态条 → ✗ 失败·退出码 1（红，常驻），点击看错误 3 行</li>
+        <li>浮层点外 / ✕ 收起；不阻塞点按输出区</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<h2>4 · 数据映射（每个 UI 元素 ← 真实事件字段）<span class="en">Data mapping</span></h2>
+<table>
+  <tr><th>UI 元素</th><th>数据来源（真实事件）</th><th>解析现状</th></tr>
+  <tr><td>折叠标题（左下角/状态条）</td><td class="mono">event_msg item_completed(item.type=Reasoning).summary_text[] 或 response_item reasoning.summary[].text（去 markdown）</td><td>已有 <span class="mono">reasoning_text()</span> 可提取，但未接入 ActivityStep（当前仅显示"正在思考"）→ 需接线</td></tr>
+  <tr><td>命令（L1）</td><td class="mono">response_item custom_tool_call.input（cmd/shell/workdir）或 item_completed CommandExecution.command[]</td><td>已有 step.detail（command_execution_text，compact 140）→ 可放宽长度</td></tr>
+  <tr><td>执行状态 / 时长</td><td class="mono">custom_tool_call.timestamp → item_completed.timestamp 本地计时；rollout 无执行中事件（硬约束）</td><td>需新增（现有 elapsed 计时可复用）</td></tr>
+  <tr><td>最近输出 3 行（L3）</td><td class="mono">item_completed CommandExecution.stdout/stderr；完成前可用上一步输出占位</td><td>已有 aggregated_output（compact 220）→ 可放宽/尾部截取</td></tr>
+  <tr><td>失败 / 退出码</td><td class="mono">item_completed CommandExecution.status=failed / exit_code</td><td>已有"命令失败"前缀 → 需带出 exit_code 与错误行</td></tr>
+  <tr><td>文件编辑（apply_patch）</td><td class="mono">item_completed item.type=FileChange.changes{path:{type,content/diff}}</td><td>未解析（parser 跳过非 CommandExecution item）→ 可新增</td></tr>
+</table>
+
+<h2>5 · 对比与推荐 <span class="en">Comparison & recommendation</span></h2>
+<div class="g2 grid">
+  <div class="card"><h4>方案 A · 切换式（3 行置换）</h4>
+    <ul>
+      <li><b>执行细节可见性</b>：默认可见（3 行全给执行细节）</li>
+      <li><b>输出优先</b>：执行时临时让位，L2「回输出」+ 完成自动回归兜底</li>
+      <li><b>宽高/动画</b>：3 行内置换，不变；静态指示符，不动既有动画</li>
+      <li><b>实现改动</b>：主区 3 行换渲染 + footer 同一位换文本；中等</li>
+      <li><b>风险</b>：执行时输出暂不可见（有回切兜底）</li>
+    </ul>
+  </div>
+  <div class="card"><h4>方案 B · 并置式（占第 1 行）</h4>
+    <ul>
+      <li><b>执行细节可见性</b>：标题行常驻，3 行细节需展开浮层</li>
+      <li><b>输出优先</b>：输出占 2 行、不被遮盖，符合"输出为主"</li>
+      <li><b>宽高/动画</b>：3 行预算内换第 1 行 + 覆盖式浮层，不变；静态指示符，不动既有动画</li>
+      <li><b>实现改动</b>：新增状态行 + 浮层，输出 3→2 行适配；较小</li>
+      <li><b>风险</b>：执行细节多一步点击；输出从 3 行减为 2 行</li>
+    </ul>
+  </div>
+</div>
+<div class="rec">
+  <div class="badge">推荐</div>
+  <div class="txt">默认采用 <b>方案 B（并置式）</b>：主区保持"输出"为主且不被遮盖，最贴合你的产品主张；且 3 行预算内换第 1 行、浮层覆盖不占高度，<b>宽高与动画完全不变</b>。折叠标题在左下角 + 状态条始终可见，点开即得 3 行细节。<b>方案 A（切换式）</b>作为"专注执行"的可选模式保留（设置里切换），同样 3 行内置换、不动宽高与动画。建议落地下一步：解析 <span class="mono">reasoning.summary_text</span> 与 <span class="mono">CommandExecution.exit_code/stdout/stderr</span> 进 ActivityStep → 双端（气泡 + renderer）按本方案渲染。</div>
+</div>
+
+<div class="foot">
+  数据来源：ZCode 会话 sess_a0a6d314-6aa9-4c9f-aa70-5cd6017e8f16 实测 —— codex Desktop 会话 01a04b41 与 CLI 慢命令会话（rollout JSONL）。本页为 UI 方案示意，未修改任何代码；两方案均不改变现有气泡宽高与动画特效。
+</div>
+
+</div>
+
+<script>
+(function(){
+  function el(id){return document.getElementById(id)}
+
+  // ---- shared ----
+  const FOLD = "准备补丁添加 hud-observe.txt";
+  const FOLD2 = "规划精确命令执行顺序";
+  const CMD = "1..4 | ForEach-Object { Write-Output (\"hud-live-\" + $_) ; Start-Sleep -Seconds 6 }";
+  const ERR = "hud-no-such-cmd-xyz: The term 'hud-no-such-cmd-xyz' is not recognized as a name of a cmdlet...";
+  const OUT = "hud-live-1 / hud-live-2 / hud-live-3 / hud-live-4";
+  const AGENT_OUT = "已按顺序完成：\n1. 第1步完整运行约24秒，输出 hud-live-1 至 hud-live-4。\n2. 已读取根目录 AGENTS.md 前 8 行…";
+
+  function footer(stepText, dotColor){
+    return '<div class="b-footer">' +
+      '<span class="step"><span class="dot" style="background:'+dotColor+'"></span>'+stepText+'</span>' +
+      '<span class="workdir">codex-usage-hud</span>' +
+      '<span class="round">轮次#2</span>' +
+      '<span class="tk">144.7k</span>' +
+      '</div>';
+  }
+  function statusPill(html){ return '<div class="b-status">'+html+'</div>'; }
+
+  // ---- Scheme A ----
+  function renderA(st){
+    const b = el('bubbleA');
+    b.className = 'bubble' + (st==='ok'?' done':st==='fail'?' fail':'');
+    let body='', pill='';
+    if(st==='idle'){
+      pill = '<span class="pill ok">✓ 已完成</span>';
+      b.innerHTML =
+        '<div class="b-title"><span class="elapsed">● 00:24</span><span class="spacer"></span><span class="close">✕</span></div>'+
+        '<div class="b-body"><div class="body-line">'+AGENT_OUT+'</div></div>'+
+        statusPill(pill)+footer('命令完成','#49E07D');
+    } else if(st==='run'){
+      body =
+        '<div class="exec-panel">'+
+          '<div class="exec-l1"><span class="ic">⚙</span><span class="cmd">'+CMD+'</span></div>'+
+          '<div class="exec-l2"><span class="ic">▶</span><span class="st">执行中</span><span class="el">· 已运行 24s</span><span class="spacer"></span><button class="back">回输出</button></div>'+
+          '<div class="exec-l3">'+OUT+' …</div>'+
+        '</div>';
+      pill = '<span class="pill tool">⚙ 执行命令</span>';
+      b.innerHTML =
+        '<div class="b-title"><span class="elapsed">● 00:24</span><span class="spacer"></span><span class="close">✕</span></div>'+
+        '<div class="b-body">'+body+'</div>'+statusPill(pill)+footer(FOLD,'#9CCBFF');
+    } else if(st==='ok'){
+      body =
+        '<div class="exec-panel result">'+
+          '<div class="exec-l1"><span class="ic">⚙</span><span class="cmd">'+CMD+'</span></div>'+
+          '<div class="exec-l2"><span class="ic">✓</span><span class="st">完成 · 退出码 0 · 24s</span><span class="spacer"></span><button class="back">回输出</button></div>'+
+          '<div class="exec-l3 ok">'+OUT+'</div>'+
+        '</div>'+
+        '<div class="note" style="margin-top:6px">1.5s 后自动切回输出 ↓</div>';
+      pill = '<span class="pill ok">✓ 已完成</span>';
+      b.innerHTML =
+        '<div class="b-title"><span class="elapsed">● 00:24</span><span class="spacer"></span><span class="close">✕</span></div>'+
+        '<div class="b-body">'+body+'</div>'+statusPill(pill)+footer(FOLD+' · ✓','#49E07D');
+    } else { // fail
+      body =
+        '<div class="exec-panel result fail">'+
+          '<div class="exec-l1"><span class="ic">⚙</span><span class="cmd">hud-no-such-cmd-xyz</span></div>'+
+          '<div class="exec-l2"><span class="ic">✗</span><span class="st">失败 · 退出码 1</span><span class="spacer"></span><button class="back">回输出</button></div>'+
+          '<div class="exec-l3 err">'+ERR+'</div>'+
+        '</div>';
+      pill = '<span class="pill fail">✗ 命令失败</span>';
+      b.innerHTML =
+        '<div class="b-title"><span class="elapsed">● 00:26</span><span class="spacer"></span><span class="close">✕</span></div>'+
+        '<div class="b-body">'+body+'</div>'+statusPill(pill)+footer('测试命令错误处理 · ✗','#FF7B72');
+    }
+  }
+
+  // ---- Scheme B ----
+  function renderB(st){
+    const b = el('bubbleB');
+    b.className = 'bubble' + (st==='ok'?' done':st==='fail'?' fail':'');
+    let body='', pill='';
+    const sbRun = '<div class="sb-line"><span class="ic">▶</span><span class="sb-state">执行中</span><span class="sb-title">'+FOLD2+'</span><span class="el mono" style="color:#8492A6">24s</span></div>';
+    const sbOk = '<div class="sb-line ok"><span class="ic">✓</span><span class="sb-state">完成</span><span class="sb-title">'+FOLD+'</span><span class="el mono" style="color:#8492A6">24s</span></div>';
+    const sbFail = '<div class="sb-line fail"><span class="ic">✗</span><span class="sb-state">失败</span><span class="sb-title">测试命令错误处理</span><span class="el mono" style="color:#8492A6">exit 1</span></div>';
+
+    if(st==='idle'){
+      pill = '<span class="pill ok">✓ 已完成</span>';
+      b.innerHTML =
+        '<div class="b-title"><span class="elapsed">● 00:24</span><span class="spacer"></span><span class="close">✕</span></div>'+
+        '<div class="b-body"><div class="body-line">'+AGENT_OUT+'</div></div>'+
+        statusPill(pill)+footer('命令完成','#49E07D');
+    } else if(st==='run'){
+      pill = '<span class="pill tool">⚙ 执行命令</span>';
+      b.innerHTML =
+        '<div class="b-title"><span class="elapsed">● 00:24</span><span class="spacer"></span><span class="close">✕</span></div>'+
+        '<div class="b-body">'+sbRun+'<div class="body-line" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+AGENT_OUT.replace(/\n/g,' / ')+'</div></div>'+
+        statusPill(pill)+footer(FOLD,'#9CCBFF');
+    } else if(st==='expand'){
+      const floatpanel =
+        '<div class="float-panel">'+
+          '<span class="fp-close" onclick="window.__sbClose&&window.__sbClose()">✕</span>'+
+          '<div class="fp-l"><span class="ic">⚙</span> '+CMD+'</div>'+
+          '<div class="fp-out">'+OUT+'</div>'+
+          '<div class="fp-st run">▶ 执行中 · 已运行 24s</div>'+
+        '</div>';
+      pill = '<span class="pill tool">⚙ 执行命令</span>';
+      b.innerHTML =
+        '<div class="b-title"><span class="elapsed">● 00:24</span><span class="spacer"></span><span class="close">✕</span></div>'+
+        '<div class="b-body" style="min-height:64px">'+sbRun+'<div class="body-line" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;opacity:.35">'+AGENT_OUT.replace(/\n/g,' / ')+'</div>'+floatpanel+'</div>'+
+        statusPill(pill)+footer(FOLD,'#9CCBFF');
+    } else if(st==='ok'){
+      pill = '<span class="pill ok">✓ 已完成</span>';
+      b.innerHTML =
+        '<div class="b-title"><span class="elapsed">● 00:24</span><span class="spacer"></span><span class="close">✕</span></div>'+
+        '<div class="b-body">'+sbOk+'<div class="body-line" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+AGENT_OUT.replace(/\n/g,' / ')+'</div></div>'+
+        statusPill(pill)+footer('命令完成','#49E07D');
+    } else { // fail
+      pill = '<span class="pill fail">✗ 命令失败</span>';
+      b.innerHTML =
+        '<div class="b-title"><span class="elapsed">● 00:26</span><span class="spacer"></span><span class="close">✕</span></div>'+
+        '<div class="b-body">'+sbFail+'<div class="body-line" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;opacity:.5">'+AGENT_OUT.replace(/\n/g,' / ')+'</div></div>'+
+        statusPill(pill)+footer('测试命令错误处理 · ✗','#FF7B72');
+    }
+  }
+
+  // controls
+  function bindCtr(id, fn){
+    const c = el(id);
+    c.addEventListener('click', function(e){
+      const btn = e.target.closest('.btn'); if(!btn) return;
+      c.querySelectorAll('.btn').forEach(x=>x.classList.remove('on'));
+      btn.classList.add('on');
+      fn(btn.dataset.st);
+    });
+  }
+  bindCtr('ctrA', renderA);
+  bindCtr('ctrB', renderB);
+
+  window.__sbClose = function(){ const c=el('ctrB'); c.querySelectorAll('.btn').forEach(x=>x.classList.remove('on')); const b=c.querySelector('[data-st="run"]'); b&&b.classList.add('on'); renderB('run'); };
+
+  renderA('run');
+  renderB('run');
+})();
+</script>
+</body>
+</html>
