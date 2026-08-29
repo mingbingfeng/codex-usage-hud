@@ -7958,10 +7958,197 @@ with tempfile.TemporaryDirectory() as temp_dir:
 
         texts = _overlay_activity_step_texts(item)
 
-        self.assertEqual(texts[0], '已读取文件：{"path":"src/main.py"}')
-        self.assertEqual(texts[1], "运行了命令：git status --short")
-        self.assertIn("已读取文件", _overlay_activity_tooltip(item))
-        self.assertIn("运行了命令", _overlay_activity_tooltip(item))
+        self.assertEqual(texts[0], '读文件：{"path":"src/main.py"}')
+        self.assertEqual(texts[1], "命令：git status --short")
+        self.assertIn("读文件", _overlay_activity_tooltip(item))
+        self.assertIn("命令", _overlay_activity_tooltip(item))
+
+    def test_work_overlay_activity_steps_show_newest_action_without_rotation(self) -> None:
+        item = {
+            "activitySteps": [
+                {"title": "命令完成", "detail": "git status", "status": "completed"},
+                {"title": "命令完成", "detail": "git diff --check", "status": "completed"},
+            ]
+        }
+
+        first = OverlayRenderingMixin._activity_step_display_text(
+            object(), {}, item, now=0.0
+        )
+        later = OverlayRenderingMixin._activity_step_display_text(
+            object(), {}, item, now=10.0
+        )
+
+        self.assertEqual(first[0], "命令：git diff --check")
+        self.assertEqual(later, first)
+
+    def test_work_overlay_footer_reserves_only_visible_workdir_width(self) -> None:
+        try:
+            from PySide6.QtGui import QFont
+            from PySide6.QtWidgets import QApplication, QLabel
+        except Exception as exc:
+            self.skipTest(f"PySide6 unavailable: {exc}")
+
+        previous_platform = os.environ.get("QT_QPA_PLATFORM")
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        try:
+            app = QApplication.instance() or QApplication(sys.argv[:1])
+            app.setQuitOnLastWindowClosed(False)
+            label = QLabel()
+            label.setFont(QFont("Microsoft YaHei UI", 7))
+
+            short_width = OverlayRenderingMixin._workdir_footer_width(
+                label,
+                "[custom] hud",
+            )
+            long_width = OverlayRenderingMixin._workdir_footer_width(
+                label,
+                "[custom] E:\\Project\\codex-usage-hud\\very-long-workdir",
+            )
+
+            self.assertLess(short_width, long_width)
+            self.assertEqual(long_width, 170)
+        finally:
+            if previous_platform is None:
+                os.environ.pop("QT_QPA_PLATFORM", None)
+            else:
+                os.environ["QT_QPA_PLATFORM"] = previous_platform
+
+    def test_work_overlay_footer_layout_refreshes_latest_action_and_uses_remaining_width(
+        self,
+    ) -> None:
+        try:
+            from PySide6.QtWidgets import QApplication, QLabel, QWidget
+            from codex_usage_hud.ui.work_overlay.qt_visuals import ShimmerTextLabel
+            from codex_usage_hud.ui.work_overlay.constants import (
+                DEFAULT_WORK_OVERLAY_THEME,
+            )
+        except Exception as exc:
+            self.skipTest(f"PySide6 unavailable: {exc}")
+
+        previous_platform = os.environ.get("QT_QPA_PLATFORM")
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        shell = None
+        try:
+            app = QApplication.instance() or QApplication(sys.argv[:1])
+            app.setQuitOnLastWindowClosed(False)
+            shell = QWidget()
+            shell.resize(430, 220)
+            rendering = object.__new__(OverlayRenderingMixin)
+            rendering._shell = shell
+            rendering._theme_tokens = dict(DEFAULT_WORK_OVERLAY_THEME)
+            rendering._header_title_limit = 28
+            rendering._multiline_elided_text = _multiline_elided_text
+            rendering._item_widgets = []
+            rendering._card_hover_anchors = []
+            rendering._system_action_anchors = []
+            rendering._rest_action_anchors = []
+            rendering._close_anchors = []
+            rendering._workdir_anchors = []
+            rendering._completed_check_anchors = []
+            rendering._switch_pending_active_for_item = lambda _item: False
+            rendering._switch_pending_completed_for_item = lambda _item: False
+            item = {
+                "id": "session-1",
+                "title": "Session",
+                "status": "tool",
+                "statusLabel": "运行中",
+                "current": True,
+                "clientKind": "cli",
+                "profileName": "custom",
+                "workdirName": "hud",
+                "roundIndex": 3,
+                "activitySteps": [
+                    {
+                        "title": "命令完成",
+                        "detail": "git status",
+                        "status": "completed",
+                        "toolName": "exec",
+                    },
+                ],
+            }
+
+            rendering._build_item_card(item)
+            shell.show()
+            app.processEvents()
+            record = rendering._item_widgets[-1]
+            status_label = record["status_label"]
+            workdir_label = record["workdir_label"]
+            footer = record["footer_container"]
+            footer_layout = footer.layout()
+            assert footer_layout is not None
+            footer_layout.activate()
+
+            self.assertEqual(status_label.text(), "命令：git status")
+            self.assertLess(workdir_label.width(), 170)
+            self.assertEqual(
+                status_label.width()
+                + workdir_label.width()
+                + record["round_badge"].width()
+                + footer_layout.spacing() * 2,
+                footer.width(),
+            )
+
+            refreshed = {
+                **item,
+                "workdirName": r"E:\Project\codex-usage-hud\long-workdir",
+                "activitySteps": [
+                    *item["activitySteps"],
+                    {
+                        "title": "命令完成",
+                        "detail": "git diff --check",
+                        "status": "completed",
+                        "toolName": "exec",
+                    },
+                ],
+            }
+            rendering._update_item_card(record, refreshed)
+            app.processEvents()
+            footer_layout.activate()
+
+            self.assertEqual(status_label.text(), "命令：git diff --check")
+            self.assertLess(status_label.width(), footer.width() - footer_layout.spacing())
+
+            transition_item = {
+                **refreshed,
+                "id": "transition",
+                "workdirName": "transition-dir",
+            }
+            transition_card = rendering._build_transition_card_widget(transition_item)
+            transition_card.show()
+            app.processEvents()
+            transition_status = transition_card.findChildren(ShimmerTextLabel)[0]
+            transition_footer = transition_status.parentWidget()
+            self.assertIsNotNone(transition_footer)
+            assert transition_footer is not None
+            transition_layout = transition_footer.layout()
+            self.assertIsNotNone(transition_layout)
+            assert transition_layout is not None
+            transition_layout.activate()
+            transition_workdir = next(
+                label
+                for label in transition_card.findChildren(QLabel)
+                if "transition-dir" in label.text()
+            )
+            transition_round = next(
+                label
+                for label in transition_card.findChildren(QLabel)
+                if label.text() == "3"
+            )
+            self.assertEqual(transition_status.text(), "命令：git diff --check")
+            self.assertEqual(
+                transition_status.width()
+                + transition_workdir.width()
+                + transition_round.width()
+                + transition_layout.spacing() * 2,
+                transition_footer.width(),
+            )
+        finally:
+            if shell is not None:
+                shell.deleteLater()
+            if previous_platform is None:
+                os.environ.pop("QT_QPA_PLATFORM", None)
+            else:
+                os.environ["QT_QPA_PLATFORM"] = previous_platform
 
     def test_active_work_payload_keeps_steps_and_falls_back_to_session_start(self) -> None:
         started_at = datetime(2026, 6, 15, 9, 8, 7).astimezone()

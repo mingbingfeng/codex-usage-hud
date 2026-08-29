@@ -29,7 +29,6 @@ from .constants import (
     WORK_OVERLAY_CARD_X_PADDING,
     WORK_OVERLAY_CARD_Y_PADDING,
     WORK_OVERLAY_CLOSE_SIZE,
-    WORK_OVERLAY_ACTIVITY_STEP_DISPLAY_SECONDS,
     WORK_OVERLAY_COMPLETED_BADGE_ROW_HEIGHT,
     WORK_OVERLAY_COMPLETED_BADGE_SIZE,
     WORK_OVERLAY_EMPTY_GRACE_SECONDS,
@@ -139,11 +138,7 @@ class OverlayRenderingMixin:
         self,
         items: Sequence[Mapping[str, object]],
     ) -> None:
-        if any(
-            _work_overlay_live_elapsed_text(item) is not None
-            or len(_overlay_activity_step_texts(item)) > 1
-            for item in items
-        ):
+        if any(_work_overlay_live_elapsed_text(item) is not None for item in items):
             if not self._elapsed_text_timer.isActive():
                 self._elapsed_text_timer.start()
             return
@@ -156,26 +151,24 @@ class OverlayRenderingMixin:
         *,
         now: float | None = None,
     ) -> tuple[str, str]:
+        """Show the newest parsed action as soon as the payload refreshes.
+
+        The activity-step list remains available in the tooltip, while the
+        footer represents the action Codex most recently emitted.  A timer-
+        driven 1.5-second rotation could show stale commands after Codex had
+        already moved on to the next tool action.
+        """
+        del record, now
         texts = _overlay_activity_step_texts(item)
         if not texts:
-            record["activity_step_signature"] = ""
-            record["activity_step_index"] = -1
-            record["activity_step_last_at"] = 0.0
             return "", ""
-        signature = json.dumps(texts, ensure_ascii=False)
-        if signature != record.get("activity_step_signature"):
-            record["activity_step_signature"] = signature
-            record["activity_step_index"] = len(texts) - 1
-            record["activity_step_last_at"] = time.monotonic() if now is None else now
-        current_now = time.monotonic() if now is None else now
-        last_at = float(record.get("activity_step_last_at") or 0.0)
-        if len(texts) > 1 and current_now - last_at >= WORK_OVERLAY_ACTIVITY_STEP_DISPLAY_SECONDS:
-            record["activity_step_index"] = (
-                int(record.get("activity_step_index") or 0) + 1
-            ) % len(texts)
-            record["activity_step_last_at"] = current_now
-        index = max(0, min(len(texts) - 1, int(record.get("activity_step_index") or 0)))
-        return texts[index], _overlay_activity_tooltip(item)
+        return texts[-1], _overlay_activity_tooltip(item)
+
+    @staticmethod
+    def _workdir_footer_width(label: QLabel, text: str) -> int:
+        """Reserve only the visible provider/workdir width, up to its cap."""
+        natural_width = QFontMetrics(label.font()).horizontalAdvance(text) + 4
+        return max(1, min(WORK_OVERLAY_WORKDIR_FOOTER_WIDTH, natural_width))
 
     def _refresh_activity_step_label(
         self,
@@ -439,8 +432,10 @@ class OverlayRenderingMixin:
         workdir_label.setTextFormat(text_format.PlainText)
         workdir_label.setAlignment(alignment.AlignVCenter | alignment.AlignRight)
         workdir_label.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+        workdir_label.setMinimumWidth(0)
+        workdir_label.setMaximumWidth(WORK_OVERLAY_WORKDIR_FOOTER_WIDTH)
         workdir_label.setFont(QFont("Microsoft YaHei UI", 7))
-        workdir_label.setFixedWidth(WORK_OVERLAY_WORKDIR_FOOTER_WIDTH)
+        workdir_label.setFixedWidth(1)
         workdir_label.setStyleSheet(
             "QLabel {"
             "color: #5E6A78;"
@@ -775,11 +770,16 @@ class OverlayRenderingMixin:
 
         workdir_label = record["workdir_label"]
         if workdir_footer_text and not rest_reminder:
+            footer_width = self._workdir_footer_width(
+                workdir_label,
+                workdir_footer_text,
+            )
+            workdir_label.setFixedWidth(footer_width)
             workdir_label.setText(
                 QFontMetrics(workdir_label.font()).elidedText(
                     workdir_footer_text,
                     Qt.TextElideMode.ElideLeft,
-                    max(1, WORK_OVERLAY_WORKDIR_FOOTER_WIDTH - 4),
+                    max(1, footer_width - 4),
                 )
             )
             workdir_label.setToolTip((full_workdir or workdir_text) if workdir_clickable else "")
@@ -794,6 +794,7 @@ class OverlayRenderingMixin:
         else:
             workdir_label.setText("")
             workdir_label.setToolTip("")
+            workdir_label.setFixedWidth(1)
             workdir_label.setVisible(False)
 
         if collect_anchors:
@@ -921,8 +922,10 @@ class OverlayRenderingMixin:
         workdir_label.setTextFormat(text_format.PlainText)
         workdir_label.setAlignment(alignment.AlignVCenter | alignment.AlignRight)
         workdir_label.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+        workdir_label.setMinimumWidth(0)
+        workdir_label.setMaximumWidth(WORK_OVERLAY_WORKDIR_FOOTER_WIDTH)
         workdir_label.setFont(QFont("Microsoft YaHei UI", 7))
-        workdir_label.setFixedWidth(WORK_OVERLAY_WORKDIR_FOOTER_WIDTH)
+        workdir_label.setFixedWidth(1)
         workdir_label.setStyleSheet(
             "QLabel {"
             "color: #5E6A78;"

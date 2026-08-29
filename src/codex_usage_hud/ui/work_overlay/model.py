@@ -438,19 +438,19 @@ def _overlay_activity_step_prefix(step: Mapping[str, object]) -> str:
     tool_name = str(step.get("toolName") or step.get("tool_name") or "").strip().lower()
     normalized_name = tool_name.replace(".", "_").replace("-", "_")
     if status in {"failed", "error"} or title == "命令失败":
-        return "命令失败"
+        return "失败"
     if (
         title in {"执行命令", "命令完成"}
         or normalized_name.endswith(("exec", "shell", "shell_command"))
         or normalized_name in {"functions_exec", "unified_exec"}
     ):
-        return "运行了命令"
+        return "命令"
     if any(token in normalized_name for token in ("read", "open", "cat", "view_file")):
-        return "已读取文件" if status in {"completed", "success", "done"} else "读取文件"
+        return "读文件"
     if any(token in normalized_name for token in ("edit", "write", "patch", "apply")):
-        return "已修改文件" if status in {"completed", "success", "done"} else "修改文件"
+        return "编辑"
     if "request_user_input" in normalized_name:
-        return "等待确认"
+        return "等确认"
     return title or "调用工具"
 
 

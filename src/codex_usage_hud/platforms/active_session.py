@@ -51,10 +51,29 @@ def compact_text(value: Any, limit: int = 28) -> str:
 
 
 def _title_prefix(value: Any) -> str:
-    text = " ".join(str(value or "").split()).strip()
+    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    # Codex's sidebar title is rendered from the first user message and may
+    # drop Markdown heading markers that are still present in the persisted
+    # title.  Normalize those presentation-only markers before comparing the
+    # renderer title with the local state database.
+    text = re.sub(r"(?m)^[ \t]*#+(?=\s)", "", text)
+    text = " ".join(text.split()).strip()
     while text.endswith("..."):
         text = text[:-3].rstrip()
     return text.rstrip("…").rstrip()
+
+
+def _title_search_hint(value: Any) -> str:
+    """Return a raw-text hint that survives heading/newline rendering loss."""
+    raw = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
+    for line in raw.split("\n"):
+        candidate = re.sub(r"^[ \t]*#+(?=\s)", "", line).strip()
+        if not candidate:
+            continue
+        token = candidate.split(None, 1)[0]
+        if token:
+            return token[: max(_TITLE_PREFIX_MATCH_MIN_CHARS, min(32, len(token)))]
+    return _title_prefix(value)[:_TITLE_PREFIX_MATCH_MIN_CHARS]
 
 
 def _title_matches(name: str, title: str) -> bool:
@@ -1175,11 +1194,9 @@ class ActiveSessionTracker:
 
     def path_for_title(self, title: str) -> Path | None:
         """Map a visible Codex conversation title to a session JSONL path."""
-        path = self.path_from_session_index(title)
-        if path is not None:
-            return path
+        indexed_path = self.path_from_session_index(title)
         if not self.state_db.exists():
-            return None
+            return indexed_path
         try:
             con = sqlite3.connect(f"file:{self.state_db}?mode=ro", uri=True)
             try:
@@ -1211,41 +1228,86 @@ class ActiveSessionTracker:
                     f"select rollout_path{archive_column} from threads where title = ?",
                     (title,),
                 )
-                if len(exact_paths) == 1:
-                    return exact_paths[0]
                 if len(exact_paths) > 1:
                     return None
 
                 title_prefix = _title_prefix(title)
                 prefix_paths: list[Path] = []
+                if indexed_path is not None:
+                    prefix_paths.append(indexed_path)
+                prefix_paths.extend(exact_paths)
+                prefix_paths = list(
+                    {
+                        self._path_key(candidate): candidate
+                        for candidate in prefix_paths
+                    }.values()
+                )
                 if len(title_prefix) >= _TITLE_PREFIX_MATCH_MIN_CHARS:
-                    prefix_paths.extend(
-                        active_paths(
-                            f"""
-                            select rollout_path{archive_column}
-                            from threads
-                            where length(title) >= ?
-                              and title like ? || '%'
-                            """,
-                            (_TITLE_PREFIX_MATCH_MIN_CHARS, title_prefix),
+                    if not prefix_paths:
+                        prefix_paths.extend(
+                            active_paths(
+                                f"""
+                                select rollout_path{archive_column}
+                                from threads
+                                where length(title) >= ?
+                                  and title like ? || '%'
+                                """,
+                                (_TITLE_PREFIX_MATCH_MIN_CHARS, title_prefix),
+                            )
                         )
-                    )
-                if not prefix_paths:
-                    prefix_paths.extend(
-                        active_paths(
-                            f"""
-                            select rollout_path{archive_column}
-                            from threads
-                            where length(title) >= ?
-                              and ? like title || '%'
-                            """,
-                            (_TITLE_PREFIX_MATCH_MIN_CHARS, title),
+                    if not prefix_paths:
+                        prefix_paths.extend(
+                            active_paths(
+                                f"""
+                                select rollout_path{archive_column}
+                                from threads
+                                where length(title) >= ?
+                                  and ? like title || '%'
+                                """,
+                                (_TITLE_PREFIX_MATCH_MIN_CHARS, title),
+                            )
                         )
-                    )
+
+                if (
+                    len(prefix_paths) <= 1
+                    and len(title_prefix) >= _TITLE_PREFIX_MATCH_MIN_CHARS
+                ):
+                    # The persisted title can contain newlines and Markdown
+                    # heading markers that the sidebar omits.  Use a small
+                    # content hint to bound the fallback query,
+                    # then apply the same normalized comparison in Python so
+                    # duplicate-title ambiguity still fails closed.
+                    search_hint = _title_search_hint(title)
+                    rows = con.execute(
+                        f"select rollout_path{archive_column}, title "
+                        "from threads "
+                        "where instr(lower(title), lower(?)) > 0",
+                        (search_hint,),
+                    ).fetchall()
+                    normalized_paths: dict[str, Path] = {}
+                    for item in rows:
+                        if not _title_matches(str(item["title"] or ""), title):
+                            continue
+                        candidate = self._normalize_rollout_path(
+                            str(item["rollout_path"] or "")
+                        )
+                        if candidate is None:
+                            continue
+                        archived = _path_archive_state(candidate, self.sessions_root)
+                        if "archived" in columns and item["archived"] is not None:
+                            archived = _archive_flag(item["archived"])
+                        if archived is not False:
+                            continue
+                        normalized_paths[self._path_key(candidate)] = candidate
+                    existing_paths = {
+                        self._path_key(candidate): candidate for candidate in prefix_paths
+                    }
+                    existing_paths.update(normalized_paths)
+                    prefix_paths = list(existing_paths.values())
             finally:
                 con.close()
         except sqlite3.Error:
-            return None
+            return indexed_path
         return prefix_paths[0] if len(prefix_paths) == 1 else None
 
     def title_for_session(

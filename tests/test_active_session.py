@@ -22,6 +22,8 @@ from codex_usage_hud.platforms.active_session import (
     ActiveSessionTracker,
     RealtimeSessionWatcher,
     SessionPathResolver,
+    _title_matches,
+    _title_prefix,
 )
 from codex_usage_hud.platforms.base import BasePlatform
 
@@ -361,6 +363,97 @@ class ActiveSessionTrackerTests(unittest.TestCase):
                 tracker.path_for_title("Visible Conversation"),
                 session_path,
             )
+
+    def test_path_for_title_keeps_markdown_variant_duplicates_ambiguous(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            sessions_root = root / "sessions"
+            sessions_root.mkdir()
+            paths = [sessions_root / f"rollout-{index}.jsonl" for index in (1, 2)]
+            for path in paths:
+                path.write_text("{}\n", encoding="utf-8")
+
+            state_db = root / "state_5.sqlite"
+            con = sqlite3.connect(state_db)
+            try:
+                con.execute(
+                    "create table threads ("
+                    "id text primary key, rollout_path text not null, "
+                    "title text not null, archived integer not null default 0, "
+                    "updated_at_ms integer, updated_at integer)"
+                )
+                con.executemany(
+                    "insert into threads (id, rollout_path, title, archived, updated_at_ms, updated_at) "
+                    "values (?, ?, ?, 0, 10, 10)",
+                    [
+                        ("thread-1", str(paths[0]), "Visible Conversation"),
+                        ("thread-2", str(paths[1]), "# Visible Conversation\n\n## detail"),
+                    ],
+                )
+                con.commit()
+            finally:
+                con.close()
+            (root / "session_index.jsonl").write_text(
+                json.dumps({"id": "thread-1", "thread_name": "Visible Conversation"})
+                + "\n",
+                encoding="utf-8",
+            )
+
+            tracker = ActiveSessionTracker(
+                platform=FakePlatform(),
+                state_db=state_db,
+                sessions_root=sessions_root,
+                session_index_path=root / "session_index.jsonl",
+                poll_ms=500,
+                enabled=False,
+            )
+
+            self.assertIsNone(tracker.path_for_title("Visible Conversation"))
+
+    def test_path_for_title_matches_heading_variant_after_line_break(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            sessions_root = root / "sessions"
+            sessions_root.mkdir()
+            session_path = sessions_root / "rollout-heading-variant.jsonl"
+            session_path.write_text("{}\n", encoding="utf-8")
+            state_db = root / "state_5.sqlite"
+            con = sqlite3.connect(state_db)
+            try:
+                con.execute(
+                    "create table threads ("
+                    "id text primary key, rollout_path text not null, "
+                    "title text not null, archived integer not null default 0, "
+                    "updated_at_ms integer, updated_at integer)"
+                )
+                con.execute(
+                    "insert into threads (id, rollout_path, title, archived, updated_at_ms, updated_at) "
+                    "values (?, ?, ?, 0, 10, 10)",
+                    (
+                        "thread-heading-variant",
+                        str(session_path),
+                        "# Foo\n\n## detail",
+                    ),
+                )
+                con.commit()
+            finally:
+                con.close()
+
+            tracker = ActiveSessionTracker(
+                platform=FakePlatform(),
+                state_db=state_db,
+                sessions_root=sessions_root,
+                session_index_path=root / "session_index.jsonl",
+                poll_ms=500,
+                enabled=False,
+            )
+
+            self.assertEqual(tracker.path_for_title("Foo detail"), session_path)
+
+    def test_title_prefix_only_strips_markdown_markers_at_line_starts(self) -> None:
+        self.assertEqual(_title_prefix("# Heading\n\n## Detail"), "Heading Detail")
+        self.assertEqual(_title_prefix("A # B"), "A # B")
+        self.assertFalse(_title_matches("Fix # issue", "Fix issue"))
 
     def test_current_path_prefers_cdp_session_id_over_title_mapping(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -921,7 +1014,7 @@ class ActiveSessionTrackerTests(unittest.TestCase):
                 state_db,
                 "019f-current",
                 session_path,
-                title="Current title after the latest user message",
+                title="# Current title after the latest user message\n\n## detail",
             )
             # The index still has the title captured when the session was
             # first created; state_5.sqlite is already current.
