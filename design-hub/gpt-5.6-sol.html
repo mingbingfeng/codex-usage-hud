@@ -1,0 +1,1017 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>会话气泡执行状态方案对比</title>
+<style>
+  :root {
+    --page: #0d0d0d;
+    --surface: #111111;
+    --panel: #212121;
+    --panel-soft: #181818;
+    --border: #454545;
+    --divider: #323232;
+    --text: #fcfcfc;
+    --request-text: #e9e9e9;
+    --muted: #999999;
+    --request-muted: #868686;
+    --accent: #0169cc;
+    --info: #b06dff;
+    --success: #00a240;
+    --error: #e02e2a;
+    --warning: #3f589f;
+    --bubble-width: 430px;
+    --bubble-height: 118px;
+    --body-width: 402px;
+    --body-height: 48px;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    min-height: 100%;
+    margin: 0;
+    background: var(--page);
+    color: var(--text);
+    font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
+    letter-spacing: 0;
+  }
+
+  button { font: inherit; letter-spacing: 0; }
+
+  .page {
+    width: min(1080px, calc(100% - 40px));
+    margin: 0 auto;
+    padding: 24px 0 36px;
+  }
+
+  .page-head {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 20px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--divider);
+  }
+
+  h1 {
+    margin: 0;
+    font-size: 18px;
+    line-height: 1.35;
+    font-weight: 700;
+  }
+
+  .subtitle {
+    max-width: 690px;
+    margin: 7px 0 0;
+    color: var(--muted);
+    font-size: 11px;
+    line-height: 1.65;
+  }
+
+  .controls {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    flex: none;
+  }
+
+  .control {
+    min-width: 34px;
+    height: 30px;
+    padding: 0 9px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--panel);
+    color: var(--request-text);
+    cursor: pointer;
+  }
+
+  .control:hover,
+  .control:focus-visible {
+    border-color: var(--accent);
+    outline: none;
+  }
+
+  .evidence {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    margin: 16px 0 0;
+    border-top: 1px solid var(--divider);
+    border-bottom: 1px solid var(--divider);
+  }
+
+  .fact {
+    min-width: 0;
+    padding: 10px 12px;
+    border-right: 1px solid var(--divider);
+  }
+
+  .fact:last-child { border-right: 0; }
+
+  .fact b {
+    display: block;
+    margin-bottom: 3px;
+    color: var(--request-text);
+    font-size: 10.5px;
+    font-weight: 700;
+  }
+
+  .fact span {
+    display: block;
+    color: var(--request-muted);
+    font-size: 10px;
+    line-height: 1.5;
+  }
+
+  .timeline { margin: 16px 0 20px; }
+
+  .timeline-head {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    min-width: 0;
+    margin-bottom: 7px;
+  }
+
+  .phase-index {
+    flex: none;
+    color: var(--accent);
+    font: 700 10px/1.4 Consolas, monospace;
+  }
+
+  .phase-name {
+    flex: none;
+    color: var(--request-text);
+    font-size: 11px;
+    font-weight: 700;
+  }
+
+  .event-name {
+    min-width: 0;
+    overflow: hidden;
+    color: var(--muted);
+    font: 10px/1.4 Consolas, monospace;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .source-tag {
+    flex: none;
+    padding: 2px 6px;
+    border: 1px solid var(--divider);
+    border-radius: 5px;
+    color: var(--request-muted);
+    font-size: 9px;
+  }
+
+  .source-tag.design {
+    border-color: var(--warning);
+    color: #bdc9ef;
+  }
+
+  .track {
+    position: relative;
+    height: 3px;
+    overflow: hidden;
+    background: var(--divider);
+  }
+
+  .track-fill {
+    width: 0;
+    height: 100%;
+    background: var(--accent);
+  }
+
+  .comparison {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 24px;
+  }
+
+  .scheme { min-width: 0; }
+
+  .scheme-head {
+    min-height: 62px;
+    padding: 0 2px 9px;
+  }
+
+  .scheme-kicker {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    margin-bottom: 4px;
+  }
+
+  .scheme-kicker strong {
+    color: var(--request-text);
+    font-size: 12px;
+  }
+
+  .scheme-mark {
+    padding: 2px 6px;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    color: var(--muted);
+    font-size: 9px;
+  }
+
+  .scheme-mark.recommended {
+    border-color: var(--accent);
+    color: #76b8f6;
+  }
+
+  .scheme-head p {
+    margin: 0;
+    color: var(--muted);
+    font-size: 10.5px;
+    line-height: 1.55;
+  }
+
+  .stage {
+    min-height: 190px;
+    overflow-x: auto;
+    padding: 30px 18px 26px;
+    border-top: 1px solid var(--divider);
+    border-bottom: 1px solid var(--divider);
+    background: #151515;
+  }
+
+  .bubble {
+    width: var(--bubble-width);
+    height: var(--bubble-height);
+    padding: 8px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+    overflow: hidden;
+    border: 1px solid var(--bubble-border, #3c4a58);
+    border-left: 2px solid var(--bubble-accent, var(--accent));
+    border-radius: 10px;
+    background: var(--bubble-bg, #181818);
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.42);
+    transition: background-color 150ms ease, border-color 150ms ease;
+  }
+
+  .bubble-head {
+    width: var(--body-width);
+    height: 22px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .bubble-title {
+    min-width: 0;
+    flex: 1;
+    overflow: hidden;
+    color: #c3c3c3;
+    font-size: 12px;
+    font-weight: 700;
+    line-height: 22px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .close {
+    width: 22px;
+    height: 22px;
+    flex: none;
+    display: grid;
+    place-items: center;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--request-muted);
+    cursor: pointer;
+    font-size: 11px;
+  }
+
+  .close:hover { background: #292929; color: var(--text); }
+
+  .bubble-body {
+    position: relative;
+    width: var(--body-width);
+    height: var(--body-height);
+    min-height: var(--body-height);
+    max-height: var(--body-height);
+    overflow: hidden;
+  }
+
+  .output,
+  .activity-feed,
+  .pinned-layout {
+    width: 100%;
+    height: var(--body-height);
+  }
+
+  .output {
+    display: -webkit-box;
+    overflow: hidden;
+    color: var(--request-text);
+    font-size: 11px;
+    line-height: 16px;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+  }
+
+  .output.peek {
+    padding-right: 26px;
+    color: #cfcfcf;
+  }
+
+  .activity-feed {
+    display: none;
+    grid-template-rows: repeat(3, 14px);
+    gap: 3px;
+    padding-right: 24px;
+  }
+
+  .activity-row {
+    min-width: 0;
+    height: 14px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    overflow: hidden;
+    font-size: 10.5px;
+    line-height: 14px;
+    white-space: nowrap;
+  }
+
+  .row-icon {
+    width: 12px;
+    flex: none;
+    color: var(--request-muted);
+    text-align: center;
+  }
+
+  .row-text {
+    min-width: 0;
+    overflow: hidden;
+    color: #cfcfcf;
+    text-overflow: ellipsis;
+  }
+
+  .activity-row.command .row-icon,
+  .activity-row.command .row-text { font-family: Consolas, monospace; }
+
+  .activity-row.title .row-icon,
+  .activity-row.title .row-text,
+  .activity-row.live .row-icon { color: #76b8f6; }
+  .activity-row.success .row-icon { color: var(--success); }
+  .activity-row.failure .row-icon,
+  .activity-row.failure .row-text { color: #ef7773; }
+  .activity-row.wait .row-icon,
+  .activity-row.wait .row-text { color: #bdc9ef; }
+  .activity-row.tail .row-text { color: var(--muted); }
+
+  .body-toggle {
+    position: absolute;
+    top: 0;
+    right: 0;
+    width: 22px;
+    height: 18px;
+    display: none;
+    place-items: center;
+    padding: 0;
+    border: 1px solid var(--divider);
+    border-radius: 5px;
+    background: #212121;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 10px;
+  }
+
+  .body-toggle:hover,
+  .body-toggle:focus-visible {
+    border-color: var(--accent);
+    color: #76b8f6;
+    outline: none;
+  }
+
+  .pinned-layout {
+    display: none;
+    grid-template-rows: 26px 19px;
+    gap: 3px;
+  }
+
+  .pinned-output {
+    display: -webkit-box;
+    height: 26px;
+    overflow: hidden;
+    color: #b9b9b9;
+    font-size: 10.5px;
+    line-height: 13px;
+    opacity: 0.72;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+  }
+
+  .live-line {
+    min-width: 0;
+    height: 19px;
+    display: flex;
+    align-items: flex-end;
+    gap: 6px;
+    padding-top: 2px;
+    border-top: 1px solid var(--divider);
+  }
+
+  .live-symbol {
+    width: 12px;
+    flex: none;
+    color: #76b8f6;
+    font-size: 10px;
+    text-align: center;
+  }
+
+  .live-text {
+    min-width: 0;
+    flex: 1;
+    overflow: hidden;
+    color: var(--muted);
+    font-size: 10.5px;
+    line-height: 15px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .expand {
+    height: 17px;
+    flex: none;
+    padding: 0 6px;
+    border: 1px solid var(--divider);
+    border-radius: 5px;
+    background: #212121;
+    color: #76b8f6;
+    cursor: pointer;
+    font-size: 9px;
+    line-height: 15px;
+  }
+
+  .bubble-foot {
+    width: var(--body-width);
+    height: 18px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .status {
+    min-width: 0;
+    flex: 1;
+    overflow: hidden;
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 18px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .status.shimmer {
+    background-image: linear-gradient(
+      90deg,
+      var(--status-color, var(--muted)) 0,
+      var(--status-color, var(--muted)) calc(50% - 29px),
+      #ffffff 50%,
+      var(--status-color, var(--muted)) calc(50% + 29px),
+      var(--status-color, var(--muted)) 100%
+    );
+    background-size: calc(100% + 116px) 100%;
+    color: transparent;
+    background-clip: text;
+    -webkit-background-clip: text;
+    animation: existing-shimmer 1s linear infinite;
+  }
+
+  @keyframes existing-shimmer {
+    from { background-position: 0 0; }
+    to { background-position: 116px 0; }
+  }
+
+  .workdir {
+    max-width: 170px;
+    flex: none;
+    overflow: hidden;
+    color: var(--request-muted);
+    font-size: 9px;
+    line-height: 18px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .round {
+    min-width: 18px;
+    height: 18px;
+    flex: none;
+    display: grid;
+    place-items: center;
+    padding: 0 6px;
+    border: 1px solid #3d6387;
+    border-radius: 9px;
+    background: #142333;
+    color: #dcecff;
+    font-size: 8px;
+    font-weight: 700;
+  }
+
+  .scheme-note {
+    min-height: 58px;
+    margin: 10px 2px 0;
+    color: var(--muted);
+    font-size: 10.5px;
+    line-height: 1.6;
+  }
+
+  .scheme-note strong { color: var(--request-text); }
+
+  .decision {
+    margin-top: 24px;
+    border-top: 1px solid var(--divider);
+  }
+
+  .decision-row {
+    display: grid;
+    grid-template-columns: 150px repeat(2, minmax(0, 1fr));
+    border-bottom: 1px solid var(--divider);
+  }
+
+  .decision-row > div {
+    min-width: 0;
+    padding: 9px 12px;
+    color: var(--muted);
+    font-size: 10.5px;
+    line-height: 1.5;
+  }
+
+  .decision-row > div:not(:last-child) { border-right: 1px solid var(--divider); }
+  .decision-row .label { color: var(--request-text); font-weight: 700; }
+  .decision-row.head > div { color: var(--request-text); font-weight: 700; }
+  .decision-row .pick { color: #76b8f6; }
+
+  @media (max-width: 900px) {
+    .comparison { grid-template-columns: 1fr; }
+    .scheme-head { min-height: 0; }
+    .evidence { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .fact:nth-child(2) { border-right: 0; }
+    .fact:nth-child(-n+2) { border-bottom: 1px solid var(--divider); }
+  }
+
+  @media (max-width: 600px) {
+    .page { width: calc(100% - 20px); padding-top: 16px; }
+    .page-head { align-items: flex-start; flex-direction: column; }
+    .controls { width: 100%; }
+    .control { flex: 1; }
+    .evidence { grid-template-columns: 1fr; }
+    .fact { border-right: 0; border-bottom: 1px solid var(--divider); }
+    .fact:last-child { border-bottom: 0; }
+    .stage { padding-left: 10px; padding-right: 10px; }
+    .decision-row { grid-template-columns: 92px repeat(2, minmax(150px, 1fr)); }
+    .decision { overflow-x: auto; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .bubble { transition: none; }
+    .status.shimmer { animation: none; color: var(--status-color, var(--muted)); }
+  }
+</style>
+</head>
+<body>
+<main class="page">
+  <header class="page-head">
+    <div>
+      <h1>会话气泡执行状态方案对比</h1>
+      <p class="subtitle">同一组当前会话事件，同一 430px 宽度、48px 三行正文和 18px 页脚。演示只比较信息所有权，不改气泡几何，也不引入新的气泡动画。</p>
+    </div>
+    <div class="controls" aria-label="播放控制">
+      <button class="control" id="prev" type="button" title="上一步">&larr;</button>
+      <button class="control" id="play" type="button" title="暂停">暂停</button>
+      <button class="control" id="next" type="button" title="下一步">&rarr;</button>
+      <button class="control" id="replay" type="button" title="重播">重播</button>
+      <button class="control" id="speed" type="button" title="播放速度">1x</button>
+    </div>
+  </header>
+
+  <section class="evidence" aria-label="当前会话观察结论">
+    <div class="fact"><b>执行意图先到</b><span>custom_tool_call 最早暴露命令；其 completed 不等于进程成功。</span></div>
+    <div class="fact"><b>执行期间静默</b><span>本轮未出现 item_started 或 stdout 增量，不能伪装实时日志。</span></div>
+    <div class="fact"><b>完成后一次回填</b><span>CommandExecution 才给 status、exit_code、duration 和完整输出。</span></div>
+    <div class="fact"><b>标题必须降级</b><span>本轮 Reasoning summary 为空；优先折叠标题，缺失时由工具意图生成短标题。</span></div>
+  </section>
+
+  <section class="timeline" aria-live="polite">
+    <div class="timeline-head">
+      <span class="phase-index" id="phaseIndex">01 / 08</span>
+      <span class="phase-name" id="phaseName">输出态</span>
+      <span class="event-name" id="eventName">AgentMessage phase=commentary</span>
+      <span class="source-tag" id="sourceTag">当前会话已观测</span>
+    </div>
+    <div class="track"><div class="track-fill" id="trackFill"></div></div>
+  </section>
+
+  <section class="comparison">
+    <article class="scheme">
+      <div class="scheme-head">
+        <div class="scheme-kicker"><strong>方案 A · 时段切换</strong><span class="scheme-mark">活动信息完整</span></div>
+        <p>执行期自动让正文显示固定三槽；新 assistant 输出到达时立刻归还正文。右上角按钮可回看被保留的上一条输出。</p>
+      </div>
+      <div class="stage">
+        <div class="bubble" id="bubbleA">
+          <div class="bubble-head">
+            <span class="bubble-title" id="titleA"></span>
+            <button class="close" type="button" title="关闭">x</button>
+          </div>
+          <div class="bubble-body">
+            <div class="output" id="outputA"></div>
+            <div class="activity-feed" id="feedA"></div>
+            <button class="body-toggle" id="toggleA" type="button" title="回看上一条输出">&harr;</button>
+          </div>
+          <div class="bubble-foot">
+            <span class="status" id="statusA"></span>
+            <span class="workdir">codex-usage-hud</span>
+            <span class="round">24</span>
+          </div>
+        </div>
+      </div>
+      <p class="scheme-note" id="noteA"></p>
+    </article>
+
+    <article class="scheme">
+      <div class="scheme-head">
+        <div class="scheme-kicker"><strong>方案 B · 输出常驻</strong><span class="scheme-mark recommended">建议默认</span></div>
+        <p>执行期把正文稳定分成两行输出和一行执行摘要；只有用户主动展开时才显示完整三槽，新输出到达时自动收起。</p>
+      </div>
+      <div class="stage">
+        <div class="bubble" id="bubbleB">
+          <div class="bubble-head">
+            <span class="bubble-title" id="titleB"></span>
+            <button class="close" type="button" title="关闭">x</button>
+          </div>
+          <div class="bubble-body">
+            <div class="output" id="outputB"></div>
+            <div class="pinned-layout" id="pinnedB">
+              <div class="pinned-output" id="pinnedOutputB"></div>
+              <div class="live-line">
+                <span class="live-symbol" id="liveSymbolB">...</span>
+                <span class="live-text" id="liveTextB"></span>
+                <button class="expand" id="expandB" type="button">展开</button>
+              </div>
+            </div>
+            <div class="activity-feed" id="feedB"></div>
+            <button class="body-toggle" id="collapseB" type="button" title="收起执行详情">&darr;</button>
+          </div>
+          <div class="bubble-foot">
+            <span class="status" id="statusB"></span>
+            <span class="workdir">codex-usage-hud</span>
+            <span class="round">24</span>
+          </div>
+        </div>
+      </div>
+      <p class="scheme-note" id="noteB"></p>
+    </article>
+  </section>
+
+  <section class="decision" aria-label="方案取舍">
+    <div class="decision-row head"><div>取舍</div><div>方案 A</div><div class="pick">方案 B</div></div>
+    <div class="decision-row"><div class="label">输出优先</div><div>执行期自动切走，但内容不销毁，可一键回看。</div><div>输出始终可见；只有用户主动展开才临时切走。</div></div>
+    <div class="decision-row"><div class="label">执行密度</div><div>默认完整三槽，适合盯执行过程。</div><div>默认一行摘要；需要时展开完整三槽。</div></div>
+    <div class="decision-row"><div class="label">建议</div><div>适合作为“专注执行”可选模式。</div><div class="pick">更符合“输出为主、执行不遮盖输出”的产品原则。</div></div>
+  </section>
+</main>
+
+<script>
+  const byId = (id) => document.getElementById(id);
+  const BASE_OUTPUT = "当前会话给出了比旧样本更重要的边界：工具调用记录先出现，但外层 completed 不代表命令成功；真正的成功、失败、退出码和输出都在稍后的 CommandExecution 完成事件里。";
+  const NEXT_OUTPUT = "当前样本没有流式命令输出，也没有可直接使用的 Reasoning 折叠标题。界面应显示真实等待，并在结果到达后一次性回填；标题缺失时由工具意图生成短标题。";
+  const LAST_OUTPUT = "两套方案都保留上一条输出，并在任何新 assistant 输出到达时立即归还正文。等确认是协议兜底态，本轮没有观测到审批专用事件。";
+
+  const frames = [
+    {
+      phase: "输出态",
+      event: "AgentMessage phase=commentary",
+      observed: true,
+      duration: 3400,
+      output: BASE_OUTPUT,
+      status: "输出 · 已说明真实事件边界",
+      tone: "output",
+      noteA: "<strong>正文归输出所有。</strong> 这是当前气泡的主路径；三行都给最新 assistant 文本。",
+      noteB: "<strong>正文归输出所有。</strong> 与方案 A 完全相同，方案差异只在执行期出现。"
+    },
+    {
+      phase: "思考静默",
+      event: "item_completed Reasoning · summary=[]",
+      observed: true,
+      duration: 3800,
+      rows: [
+        ["title", ">", "思考 · 当前无可用折叠标题"],
+        ["tail", "·", "保留：上一条 assistant 输出"],
+        ["live", "...", "等待下一事件 · {s}s"]
+      ],
+      live: "思考中 · 暂无折叠标题 · {s}s",
+      status: "思考 · 暂无折叠标题",
+      tone: "running",
+      noteA: "<strong>不能虚构折叠标题。</strong> 当前 rollout 的 summary 为空，正文明确降级为“思考”，直到工具意图出现。",
+      noteB: "<strong>输出仍占两行。</strong> 一行直播只说明真实可知状态；没有标题就不猜。"
+    },
+    {
+      phase: "工具已发出",
+      event: "custom_tool_call exec",
+      observed: true,
+      duration: 5000,
+      rows: [
+        ["title", ">", "定位会话气泡执行链路"],
+        ["command", "$", "search_graph \"activitySteps activeTail\""],
+        ["live", "...", "等待 CommandExecution · {s}s"]
+      ],
+      live: "定位执行链路 · 等待结果 {s}s",
+      status: "定位会话气泡执行链路",
+      tone: "running",
+      noteA: "<strong>固定三槽，不做纯 FIFO。</strong> 标题、动作、等待状态各占一行；footer 只放短标题，不再塞完整命令。",
+      noteB: "<strong>一行只给决策信息。</strong> 完整命令留在展开态，默认不抢输出面积。"
+    },
+    {
+      phase: "并行结果回填",
+      event: "3 x CommandExecution item_completed",
+      observed: true,
+      duration: 4800,
+      rows: [
+        ["success", "+", "完成 · 读取 planning_archive"],
+        ["failure", "x", "失败 · renderer_*.py 路径 · exit 1"],
+        ["failure", "x", "失败 · renderer_hud.py 不存在 · exit 1"]
+      ],
+      live: "并行检查 · 完成 1 / 失败 2",
+      status: "失败 2 / 完成 1 · 并行检查",
+      tone: "error",
+      noteA: "<strong>完成后一次性回填。</strong> 失败来自 CommandExecution.status，而不是外层 tool call 的 completed。",
+      noteB: "<strong>默认只汇总结果。</strong> 展开后可看三条真实结果；输出仍没有被系统自动遮盖。"
+    },
+    {
+      phase: "新输出到达",
+      event: "AgentMessage phase=commentary",
+      observed: true,
+      duration: 4200,
+      output: NEXT_OUTPUT,
+      status: "输出 · 已确认数据源边界",
+      tone: "output",
+      noteA: "<strong>立即归还正文。</strong> 新 assistant 输出优先级最高，不等 task_complete，也不等待执行历史消失。",
+      noteB: "<strong>立即恢复三行输出。</strong> 即使用户刚才展开了执行详情，也会自动收起。"
+    },
+    {
+      phase: "长命令静默",
+      event: "custom_tool_call -> 2.521s silence",
+      observed: true,
+      duration: 5200,
+      rows: [
+        ["title", ">", "汇总当前会话事件顺序"],
+        ["command", "$", "解析当前 rollout JSONL"],
+        ["live", "...", "无 item_started / stdout 增量 · {s}s"]
+      ],
+      live: "汇总当前会话 · 无流式输出 {s}s",
+      status: "汇总当前会话事件顺序",
+      tone: "running",
+      noteA: "<strong>静默就是事实。</strong> 计时来自现有本地 elapsed 节拍；没有新增 spinner，也不伪造日志行。",
+      noteB: "<strong>输出钉住不变。</strong> 直播行只更新已有计时信息，保持安静。"
+    },
+    {
+      phase: "等确认兜底",
+      event: "call pending without terminal result",
+      observed: false,
+      duration: 4800,
+      rows: [
+        ["title", ">", "准备应用会话气泡修改"],
+        ["command", "$", "等待 Codex 窗口确认"],
+        ["wait", "!", "尚未收到可判定的终态事件"]
+      ],
+      live: "等确认 · 请回到 Codex 窗口",
+      status: "等确认 · 应用会话气泡修改",
+      tone: "waiting",
+      noteA: "<strong>这是设计兜底，不是本轮实测。</strong> 没有审批专用事件时，只在调用长期无终态且有可靠上下文时进入。",
+      noteB: "<strong>警示只占一行。</strong> 操作仍在 Codex 窗口完成，HUD 不承载确认按钮。"
+    },
+    {
+      phase: "输出再次接管",
+      event: "assistant output handoff",
+      observed: false,
+      duration: 4200,
+      output: LAST_OUTPUT,
+      status: "输出 · 方案比较已就绪",
+      tone: "output",
+      noteA: "<strong>状态收束。</strong> 输出回到三行，执行记录留在历史/tooltip；气泡宽高和既有动效都未改变。",
+      noteB: "<strong>状态收束。</strong> 默认策略仍是输出常驻；完整执行详情由用户主动展开。"
+    }
+  ];
+
+  const toneStyle = {
+    output: { bg: "#181818", border: "#454545", accent: "#0169cc", status: "#999999", shimmer: false },
+    running: { bg: "#151c23", border: "#31516e", accent: "#0169cc", status: "#999999", shimmer: true },
+    error: { bg: "#241716", border: "#713331", accent: "#e02e2a", status: "#e02e2a", shimmer: true },
+    waiting: { bg: "#181a24", border: "#46588d", accent: "#3f589f", status: "#9baee6", shimmer: true }
+  };
+
+  function makeBubble(suffix, pinned) {
+    const bubble = byId("bubble" + suffix);
+    const output = byId("output" + suffix);
+    const feed = byId("feed" + suffix);
+    const status = byId("status" + suffix);
+    const title = byId("title" + suffix);
+    const toggle = byId(pinned ? "collapseB" : "toggleA");
+    const pinnedLayout = pinned ? byId("pinnedB") : null;
+    const pinnedOutput = pinned ? byId("pinnedOutputB") : null;
+    const liveText = pinned ? byId("liveTextB") : null;
+    const liveSymbol = pinned ? byId("liveSymbolB") : null;
+    let expanded = false;
+    let peek = false;
+    let active = false;
+    let rows = [];
+    let storedOutput = BASE_OUTPUT;
+
+    function renderRows(seconds) {
+      feed.replaceChildren();
+      rows.slice(0, 3).forEach(([kind, icon, text]) => {
+        const row = document.createElement("div");
+        row.className = "activity-row " + kind;
+        const iconNode = document.createElement("span");
+        iconNode.className = "row-icon";
+        iconNode.textContent = icon;
+        const textNode = document.createElement("span");
+        textNode.className = "row-text";
+        textNode.textContent = text.replace("{s}", String(seconds));
+        row.append(iconNode, textNode);
+        feed.appendChild(row);
+      });
+    }
+
+    function syncMode() {
+      if (!active) {
+        output.style.display = "-webkit-box";
+        feed.style.display = "none";
+        toggle.style.display = "none";
+        if (pinnedLayout) pinnedLayout.style.display = "none";
+        return;
+      }
+      if (!pinned) {
+        output.style.display = peek ? "-webkit-box" : "none";
+        output.classList.toggle("peek", peek);
+        feed.style.display = peek ? "none" : "grid";
+        toggle.style.display = "grid";
+        toggle.title = peek ? "返回执行状态" : "回看上一条输出";
+        return;
+      }
+      output.style.display = "none";
+      pinnedLayout.style.display = expanded ? "none" : "grid";
+      feed.style.display = expanded ? "grid" : "none";
+      toggle.style.display = expanded ? "grid" : "none";
+    }
+
+    toggle.addEventListener("click", () => {
+      if (!active) return;
+      if (pinned) expanded = false;
+      else peek = !peek;
+      syncMode();
+    });
+
+    if (pinned) {
+      byId("expandB").addEventListener("click", () => {
+        if (!active) return;
+        expanded = true;
+        syncMode();
+      });
+    }
+
+    return {
+      apply(frame, seconds) {
+        const style = toneStyle[frame.tone];
+        bubble.style.setProperty("--bubble-bg", style.bg);
+        bubble.style.setProperty("--bubble-border", style.border);
+        bubble.style.setProperty("--bubble-accent", style.accent);
+        title.textContent = "优化会话气泡执行状态 · 已处理 " + elapsedLabel(totalElapsed());
+        status.textContent = frame.status;
+        status.style.setProperty("--status-color", style.status);
+        status.classList.toggle("shimmer", style.shimmer);
+
+        active = Boolean(frame.rows);
+        if (frame.output) {
+          storedOutput = frame.output;
+          output.textContent = storedOutput;
+          if (pinnedOutput) pinnedOutput.textContent = storedOutput;
+          expanded = false;
+          peek = false;
+        }
+        if (active) {
+          rows = frame.rows;
+          renderRows(seconds);
+          if (pinnedOutput) pinnedOutput.textContent = storedOutput;
+          if (liveText) liveText.textContent = frame.live.replace("{s}", String(seconds));
+          if (liveSymbol) liveSymbol.textContent = frame.tone === "waiting" ? "!" : frame.tone === "error" ? "x" : "...";
+        }
+        syncMode();
+      },
+      tick(frame, seconds) {
+        title.textContent = "优化会话气泡执行状态 · 已处理 " + elapsedLabel(totalElapsed());
+        if (!frame.rows) return;
+        renderRows(seconds);
+        if (liveText) liveText.textContent = frame.live.replace("{s}", String(seconds));
+      }
+    };
+  }
+
+  const bubbleA = makeBubble("A", false);
+  const bubbleB = makeBubble("B", true);
+  const starts = [];
+  let totalDuration = 0;
+  frames.forEach((frame) => {
+    starts.push(totalDuration);
+    totalDuration += frame.duration;
+  });
+
+  let virtualTime = 0;
+  let lastTimestamp = null;
+  let playing = true;
+  let speed = 1;
+  let currentIndex = -1;
+
+  function totalElapsed() { return Math.max(0, Math.floor(virtualTime / 1000)); }
+
+  function elapsedLabel(seconds) {
+    const minutes = Math.floor(seconds / 60);
+    const rest = seconds % 60;
+    return minutes ? minutes + "m" + String(rest).padStart(2, "0") + "s" : seconds + "s";
+  }
+
+  function indexForTime(time) {
+    for (let i = frames.length - 1; i >= 0; i -= 1) {
+      if (time >= starts[i]) return i;
+    }
+    return 0;
+  }
+
+  function applyCurrent(force) {
+    const index = indexForTime(virtualTime);
+    const frame = frames[index];
+    const seconds = Math.floor((virtualTime - starts[index]) / 1000);
+    if (force || index !== currentIndex) {
+      currentIndex = index;
+      byId("phaseIndex").textContent = String(index + 1).padStart(2, "0") + " / " + String(frames.length).padStart(2, "0");
+      byId("phaseName").textContent = frame.phase;
+      byId("eventName").textContent = frame.event;
+      byId("sourceTag").textContent = frame.observed ? "当前会话已观测" : "设计兜底";
+      byId("sourceTag").classList.toggle("design", !frame.observed);
+      byId("noteA").innerHTML = frame.noteA;
+      byId("noteB").innerHTML = frame.noteB;
+      bubbleA.apply(frame, seconds);
+      bubbleB.apply(frame, seconds);
+    } else {
+      bubbleA.tick(frame, seconds);
+      bubbleB.tick(frame, seconds);
+    }
+    byId("trackFill").style.width = Math.min(100, virtualTime / totalDuration * 100) + "%";
+  }
+
+  function seek(index) {
+    const clamped = Math.max(0, Math.min(frames.length - 1, index));
+    virtualTime = starts[clamped];
+    currentIndex = -1;
+    applyCurrent(true);
+  }
+
+  function setPlaying(value) {
+    playing = value;
+    byId("play").textContent = playing ? "暂停" : "播放";
+    byId("play").title = playing ? "暂停" : "播放";
+  }
+
+  function loop(timestamp) {
+    if (lastTimestamp === null) lastTimestamp = timestamp;
+    const delta = timestamp - lastTimestamp;
+    lastTimestamp = timestamp;
+    if (playing) {
+      virtualTime += delta * speed;
+      if (virtualTime >= totalDuration) virtualTime = 0;
+    }
+    applyCurrent(false);
+    requestAnimationFrame(loop);
+  }
+
+  byId("prev").addEventListener("click", () => { seek(currentIndex - 1); setPlaying(false); });
+  byId("next").addEventListener("click", () => { seek(currentIndex + 1); setPlaying(false); });
+  byId("play").addEventListener("click", () => setPlaying(!playing));
+  byId("replay").addEventListener("click", () => { seek(0); setPlaying(true); });
+  byId("speed").addEventListener("click", () => {
+    speed = speed === 1 ? 2 : speed === 2 ? 4 : 1;
+    byId("speed").textContent = speed + "x";
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "ArrowLeft") { seek(currentIndex - 1); setPlaying(false); }
+    if (event.key === "ArrowRight") { seek(currentIndex + 1); setPlaying(false); }
+    if (event.key === " ") { event.preventDefault(); setPlaying(!playing); }
+  });
+
+  applyCurrent(true);
+  requestAnimationFrame(loop);
+</script>
+</body>
+</html>
