@@ -1,0 +1,501 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>会话气泡 · 执行状态 UI 演示（方案 A/B）</title>
+<style>
+  :root{
+    --surface:#10161D; --panelSurface:#141B24; --panelBorder:#263241;
+    --text:#DCE7F2; --muted:#8492A6; --accent:#F3D27A; --info:#9CCBFF;
+    --warning:#FFB86B; --error:#FF6B6B; --success:#8FE3A1;
+    --requestText:#B8C6D8; --requestMuted:#5E6A78;
+  }
+  *{box-sizing:border-box; margin:0; padding:0;}
+  html,body{background:#0B0F15; color:var(--text);
+    font-family:"Microsoft YaHei UI","Segoe UI",sans-serif; padding:20px 24px 40px;}
+  .top{display:flex; justify-content:space-between; align-items:flex-end; gap:16px; flex-wrap:wrap;}
+  .top h1{font-size:17px; font-weight:700;}
+  .top .sub{font-size:11px; color:var(--muted); margin-top:6px; line-height:1.6;}
+  .controls{display:flex; gap:8px;}
+  .controls button{background:var(--panelSurface); color:var(--text); border:1px solid var(--panelBorder);
+    border-radius:8px; padding:6px 14px; font-size:12px; cursor:pointer; font-family:inherit;}
+  .controls button:hover{border-color:var(--muted);}
+  .ticker{margin:16px 0 18px; background:var(--panelSurface); border:1px solid var(--panelBorder);
+    border-radius:10px; padding:8px 12px; display:flex; align-items:center; gap:10px; overflow:hidden;}
+  .tk-title{font-size:10px; color:var(--requestMuted); flex:none; letter-spacing:1px;}
+  #tkList{display:flex; gap:8px; align-items:center; overflow:hidden; white-space:nowrap;}
+  .ev{font-family:Consolas,monospace; font-size:10.5px; color:var(--muted); flex:none;}
+  .ev i{font-style:normal; color:var(--requestMuted); margin-right:5px;}
+  .ev.new{color:var(--info);}
+  .ev.silent{color:var(--requestMuted); animation:pulse 1.6s ease-in-out infinite;}
+  @keyframes pulse{0%,100%{opacity:.35;}50%{opacity:1;}}
+
+  .cols{display:flex; gap:24px; flex-wrap:wrap; align-items:flex-start;}
+  .col{flex:1 1 460px; max-width:520px; min-width:440px;}
+  .col-head{margin-bottom:10px;}
+  .col-head b{font-size:13px;}
+  .col-head .hint{display:block; font-size:10.5px; color:var(--muted); margin-top:4px; line-height:1.55;}
+  .stage{background:radial-gradient(1200px 400px at 50% -80px,#141B24,#0B0F15);
+    border:1px solid var(--panelBorder); border-radius:14px; padding:26px 20px 20px; min-height:220px;}
+  .note{font-size:10.5px; color:var(--requestMuted); line-height:1.6; margin-top:10px; min-height:32px;}
+  .note b{color:var(--muted); font-weight:600;}
+
+  /* ============ 气泡卡片：复刻 qt_rendering 常量 ============ */
+  .card{width:430px; border-radius:10px; padding:8px 10px; display:flex; flex-direction:column; gap:7px;
+    background:var(--cardBg,#182230); border:1px solid var(--border,#31405A);
+    border-left:2px solid var(--curBorder,#8EB8E8);
+    box-shadow:0 8px 28px rgba(0,0,0,.45); transition:background .18s,border-color .18s;}
+  .head{display:flex; align-items:center; gap:8px;}
+  .h-title{flex:1; font-size:12px; font-weight:700; color:var(--hColor,#BCC8D7);
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+  .close{flex:none; width:22px; height:22px; display:flex; align-items:center; justify-content:center;
+    font-size:10px; color:var(--requestMuted); border-radius:6px;}
+  .close:hover{background:rgba(255,255,255,.06); color:var(--text);}
+
+  .body{position:relative; width:402px; min-height:48px;}
+  .layer{transition:opacity .15s ease;}
+  .output{font-size:11px; line-height:1.45; color:var(--requestText);
+    display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:3; overflow:hidden;}
+  .output.peek{outline:1px dashed rgba(156,203,255,.35); outline-offset:4px; border-radius:4px;}
+
+  /* 方案A：活动 feed（3 行） */
+  .feed{display:none; flex-direction:column; gap:3px; font-size:11px; line-height:1.45;}
+  .row{display:flex; gap:6px; align-items:baseline; white-space:nowrap; overflow:hidden;}
+  .row i{font-style:normal; flex:none; width:13px; text-align:center;}
+  .row span{overflow:hidden; text-overflow:ellipsis;}
+  .row.k-done i{color:var(--success);} .row.k-done span{color:var(--requestText);}
+  .row.k-fail i{color:var(--error);} .row.k-fail span{color:var(--error);}
+  .row.k-title i{color:var(--info);} .row.k-title span{color:var(--info);}
+  .row.k-cmd i{color:var(--muted); font-family:Consolas,monospace; font-size:10px;}
+  .row.k-cmd span{font-family:Consolas,monospace; font-size:10.5px; color:var(--requestText);}
+  .row.k-out i{color:var(--requestMuted); font-family:Consolas,monospace;}
+  .row.k-out span{color:var(--muted);}
+  .row.k-live i{color:var(--info);}
+  .row.k-live span{color:var(--muted);}
+  .row.k-wait i{color:var(--warning);} .row.k-wait span{color:var(--warning);}
+
+  /* 方案B：输出钉住 + 直播条 */
+  .pinwrap{display:none; flex-direction:column; gap:6px;}
+  .pin{font-size:11px; line-height:1.45; color:var(--requestText); opacity:.55;
+    display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; overflow:hidden;}
+  .livebar{display:flex; align-items:center; gap:6px; height:18px; border-top:1px solid var(--border,#31405A); padding-top:5px;}
+  .lb-icon{flex:none; font-style:normal; color:var(--info); font-size:11px;}
+  .lb-text{flex:1; font-size:11px; color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+  .lb-btn{flex:none; background:rgba(156,203,255,.10); color:var(--info); border:1px solid rgba(156,203,255,.35);
+    font-size:9px; border-radius:7px; padding:1px 7px; cursor:pointer; font-family:inherit; line-height:1.5;}
+  .lb-btn:hover{background:rgba(156,203,255,.2);}
+
+  .collapse{position:absolute; top:-2px; right:0; display:none; background:rgba(156,203,255,.10);
+    color:var(--info); border:1px solid rgba(156,203,255,.35); font-size:9px; border-radius:7px;
+    padding:1px 7px; cursor:pointer; font-family:inherit;}
+  .collapse:hover{background:rgba(156,203,255,.2);}
+
+  /* footer：复刻 status(shimmer)+workdir+badge 结构 */
+  .foot-row{display:flex; align-items:center; gap:8px; height:18px;}
+  .status{flex:1; min-width:0; font-size:11px; font-weight:700; color:var(--muted);
+    white-space:nowrap; overflow:hidden;}
+  .shimmer-on{
+    background-image:linear-gradient(90deg,
+      var(--sc,#8492A6) 0, var(--sc,#8492A6) calc(50% - 29px),
+      rgba(255,255,255,.96) 50%,
+      var(--sc,#8492A6) calc(50% + 29px), var(--sc,#8492A6) 100%);
+    background-size:calc(100% + 116px) 100%;
+    -webkit-background-clip:text; background-clip:text; color:transparent;
+    animation:shimmer 1s linear infinite;
+  }
+  @keyframes shimmer{from{background-position:0 0;}to{background-position:116px 0;}}
+  .workdir{flex:none; max-width:170px; font-size:9px; color:var(--requestMuted);
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+  .badge{flex:none; height:18px; min-width:18px; border-radius:9px; padding:0 6px;
+    display:flex; align-items:center; justify-content:center; font-size:8px; font-weight:700;
+    background:var(--badgeBg,#2A3440); border:1px solid var(--badgeBorder,#3A4A5E); color:var(--badgeText,#DCE7F2);}
+
+  .legend{margin-top:26px; font-size:10.5px; color:var(--muted); line-height:1.8;
+    border-top:1px solid var(--panelBorder); padding-top:12px;}
+  .legend code{font-family:Consolas,monospace; color:var(--info); font-size:10px;}
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div>
+    <h1>会话气泡 · 执行状态演示 —— 方案 A「时段插播·完成归还」 vs 方案 B「输出常驻·直播条」</h1>
+    <p class="sub">事件时序取自真实 codex Desktop 会话（01a04b41：24 秒长命令 / 读文件 / apply_patch / 失败命令 / 等确认）。
+    气泡几何与动效按现网 Qt 常量复刻：宽 430px、正文 3 行 402px、padding 10/8、间距 7、圆角 10、footer 18px、
+    shimmer 30ms·步进 3.5px·光带 58px、状态配色为 Qt <code style="font-family:Consolas">_theme_mix</code> 同款混色。</p>
+  </div>
+  <div class="controls">
+    <button id="btnPlay">⏸ 暂停</button>
+    <button id="btnReplay">↻ 重播</button>
+    <button id="btnSpeed">速度 1×</button>
+  </div>
+</header>
+
+<div class="ticker"><span class="tk-title">ROLLOUT 事件 →</span><div id="tkList"></div></div>
+
+<main class="cols">
+  <section class="col">
+    <div class="col-head"><b>方案 A · 时段插播 · 完成归还</b>
+      <span class="hint">codex 忙 → 主区整体切为 3 行活动直播（最新在底）；agent_message / task_complete 到达 → 主区自动归还给输出。
+      活动期<b>点击主区</b>可临时回看输出（虚线框即回看态，再点返回）。</span></div>
+    <div class="stage">
+      <div class="card" id="cardA">
+        <div class="head"><span class="h-title" id="hA"></span><span class="close">✕</span></div>
+        <div class="body" id="bodyA" style="cursor:default">
+          <div class="output layer" id="outA"></div>
+          <div class="feed layer" id="feedA"></div>
+        </div>
+        <div class="foot-row">
+          <span class="status" id="stA"></span>
+          <span class="workdir">codex-usage-hud</span>
+          <span class="badge">3</span>
+        </div>
+      </div>
+    </div>
+    <div class="note" id="noteA"></div>
+  </section>
+
+  <section class="col">
+    <div class="col-head"><b>方案 B · 输出常驻 · 直播条</b>
+      <span class="hint">输出永不退场：执行期输出钉住 2 行（半透明冻结）+ 底部 1 行直播条常驻；
+      <b>点「展开 ▲」</b>才占满 3 行活动，agent_message 到达自动收起。系统绝不遮盖输出，遮挡只由用户主动触发。</span></div>
+    <div class="stage">
+      <div class="card" id="cardB">
+        <div class="head"><span class="h-title" id="hB"></span><span class="close">✕</span></div>
+        <div class="body" id="bodyB">
+          <div class="output layer" id="outB"></div>
+          <div class="pinwrap layer" id="pinB">
+            <div class="pin" id="pinTextB"></div>
+            <div class="livebar"><i class="lb-icon" id="lbIconB">⠋</i><span class="lb-text" id="lbTextB"></span><button class="lb-btn" id="lbBtnB">展开 ▲</button></div>
+          </div>
+          <div class="feed layer" id="feedB"></div>
+          <button class="collapse" id="colBtnB">收起 ▼</button>
+        </div>
+        <div class="foot-row">
+          <span class="status" id="stB"></span>
+          <span class="workdir">codex-usage-hud</span>
+          <span class="badge">3</span>
+        </div>
+      </div>
+    </div>
+    <div class="note" id="noteB"></div>
+  </section>
+</main>
+
+<div class="legend">
+  <b>活动行图例</b>：<code>✓/✗</code> 已完成动作（含耗时）　<code>▸</code> 折叠标题（来自 Reasoning.summary_text，阶段结束时揭晓）　
+  <code>$</code> 命令全文（中缀省略）　<code>└</code> 命令完成后一次性回填的 stdout 尾行　<code>⠙/⠸</code> 进行行（本地计时；执行期 rollout 无流式输出，这是数据源硬约束）<br>
+  <b>数据前提</b>（实施项，本次未改代码）：parser 补 <code>Reasoning.summary_text</code> 折叠标题、<code>FileChange</code> 编辑步骤、
+  输出改用 <code>CommandExecution.formatted_output</code>、<code>command_execution_text</code> 剥掉 <code>pwsh -Command</code> 壳。
+  事件驱动无轮询：秒数/spinner 是唯一本地动画且仅活跃期。
+</div>
+
+<script>
+/* ================= 运行错误可视横幅（页面自身调试用） ================= */
+function showErr(e){
+  var b=document.getElementById('errBanner');
+  if(!b){ b=document.createElement('div'); b.id='errBanner';
+    b.style.cssText='position:fixed;top:0;left:0;right:0;z-index:99;background:#5A1F1F;color:#FFD9D9;font:12px/1.5 Consolas,monospace;padding:6px 12px;';
+    (document.body||document.documentElement).appendChild(b); }
+  b.textContent='⚠ 脚本错误: '+(e&&e.message?e.message:String(e));
+}
+window.onerror=function(msg){ showErr({message:msg}); };
+
+/* ================= 主题混色（复刻 theme._theme_mix） ================= */
+function mix(a,b,r){
+  var pa=[1,3,5].map(function(i){return parseInt(a.substr(i,2),16);});
+  var pb=[1,3,5].map(function(i){return parseInt(b.substr(i,2),16);});
+  return '#'+pa.map(function(v,i){return Math.round(v+(pb[i]-v)*r).toString(16).padStart(2,'0');}).join('');
+}
+var T={surface:'#10161D',panelBorder:'#263241',text:'#DCE7F2',muted:'#8492A6',
+  accent:'#F3D27A',info:'#9CCBFF',warning:'#FFB86B',error:'#FF6B6B',success:'#8FE3A1',requestText:'#B8C6D8'};
+var ACC={done:T.success,thinking:T.accent,running:T.info,error:T.error,waiting:T.warning};
+
+function applyPalette(card,kind){
+  var a=ACC[kind]||T.accent;
+  var bgMix=kind==='error'?0.16:kind==='waiting'?0.12:kind==='done'?0.16:0.12;
+  var bdMix=kind==='error'?0.55:kind==='waiting'?0.45:kind==='done'?0.55:0.45;
+  var cardBg=mix(T.surface,a,bgMix), border=mix(T.panelBorder,a,bdMix);
+  card.style.setProperty('--cardBg',cardBg);
+  card.style.setProperty('--border',border);
+  card.style.setProperty('--curBorder',mix(border,a,0.78));
+  card.style.setProperty('--hColor',mix(T.text,T.muted,0.36));
+  card.style.setProperty('--badgeBg',mix(a,T.surface,0.10));
+  card.style.setProperty('--badgeBorder',mix(T.panelBorder,a,0.68));
+  card.style.setProperty('--badgeText',T.text);
+  card.style.setProperty('--sc', (kind==='done'||kind==='error')?a:T.muted);
+}
+
+/* ================= 场景封装 ================= */
+var SPIN=['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏'];
+function $(id){ return document.getElementById(id); }
+
+function makeScene(sfx,isB){
+  var card=$('card'+sfx), out=$('out'+sfx), feed=$('feed'+sfx), st=$('st'+sfx), h=$('h'+sfx);
+  var note=$('note'+sfx), body=$('body'+sfx);
+  /* B 独有元素：A 场景下为 null，所有引用都必须判空 */
+  var pin=$('pin'+sfx), pinText=$('pinText'+sfx), lbIcon=$('lbIcon'+sfx), lbText=$('lbText'+sfx);
+  var s={mode:'output', lastOutput:'', kind:'done', liveLabel:'', peek:false};
+
+  function setFooter(text,kind,shimmer){
+    s.kind=kind; st.textContent=text;
+    st.classList.toggle('shimmer-on',!!shimmer);
+    applyPalette(card,kind);
+  }
+  function renderFeed(rows){
+    feed.innerHTML='';
+    var keep=rows.slice(-3);
+    for(var ri=0;ri<keep.length;ri++){
+      var r=keep[ri];
+      var div=document.createElement('div'); div.className='row k-'+r.k;
+      var i=document.createElement('i'); i.textContent=r.icon||'';
+      var sp=document.createElement('span'); sp.textContent=r.text;
+      if(r.live) sp.dataset.liveText=r.text;
+      div.appendChild(i); div.appendChild(sp); feed.appendChild(div);
+    }
+  }
+  function setMode(mode){
+    s.mode=mode; s.peek=false; out.classList.remove('peek');
+    if(isB){
+      var expanded=(mode==='b-feed'), pinned=(mode==='b-pin');
+      feed.style.display=expanded?'flex':'none';
+      if(pin) pin.style.display=pinned?'flex':'none';
+      out.style.display=expanded?'none':'block';
+      out.style.opacity=pinned?'.55':'1';
+      out.style.webkitLineClamp=pinned?'2':'3';
+      var cb=$('colBtnB'); if(cb) cb.style.display=expanded?'block':'none';
+    }else{
+      feed.style.display=(mode==='feed')?'flex':'none';
+      out.style.display=(mode==='feed')?'none':'block';
+    }
+  }
+  if(body) body.addEventListener('click',function(e){
+    if(e.target&&e.target.closest&&e.target.closest('button'))return;
+    if(!isB&&s.mode==='feed'){
+      s.peek=!s.peek; out.classList.toggle('peek',s.peek);
+      out.style.display=s.peek?'block':'none';
+      feed.style.display=s.peek?'none':'flex';
+    }
+  });
+  return {
+    s:s, setFooter:setFooter, renderFeed:renderFeed, setMode:setMode,
+    setOutput:function(t){ s.lastOutput=t; out.textContent=t; if(pinText) pinText.textContent=t; },
+    pinOutput:function(){ if(pinText) pinText.textContent=s.lastOutput; },
+    setLive:function(label){ s.liveLabel=label; if(lbText) lbText.textContent=label; if(lbIcon) lbIcon.textContent=SPIN[0]; },
+    header:function(t){ h.textContent=t; },
+    note:function(html){ note.innerHTML=html; },
+    tickLive:function(sec){
+      var spin=SPIN[Math.floor(Date.now()/80)%SPIN.length];
+      var lives=feed.querySelectorAll('span[data-live-text]');
+      for(var li=0;li<lives.length;li++){
+        var sp=lives[li];
+        sp.textContent=s.liveLabel.replace('{t}',sec);
+        var row=sp.parentElement;
+        var i=row?row.querySelector('i'):null;
+        if(i) i.textContent=spin;
+      }
+      if(isB&&(s.mode==='b-pin'||s.mode==='b-feed')&&lbText){
+        if(s.liveLabel) lbText.textContent=s.liveLabel.replace('{t}',sec);
+        if(lbIcon) lbIcon.textContent=spin;
+      }
+    }
+  };
+}
+var A=makeScene('A',false), B=makeScene('B',true);
+
+/* ================= 内容（取自真实会话 01a04b41） ================= */
+var OUT_PREV='已按顺序完成：1. 第 1 步完整运行约 24 秒，输出 hud-live-1 至 hud-live-4。2. 已读取根目录 AGENTS.md 前 8 行。3. 已创建 tmp/hud-observe.txt。4. 运行 hud-no-such-cmd-xyz 确认报错路径正常。';
+var OUT_FINAL='本轮已按顺序完成 5 步：pytest 失败已定位（断言 3 ≠ 2，tests/test_ui.py::BudgetHelper），AGENTS.md 读取正常，tmp/hud-observe.txt 已创建并通过验证。';
+var OUT_FINAL2='已确认 rtk rm -rf build/ 需要授权；已在 codex 窗口放行并完成清理。全部 6 步执行完毕，工作区无遗留变更。';
+var H_TITLE='优化会话气泡步骤展示';
+
+function tickerAdd(text,silent){
+  var list=$('tkList'); if(!list) return;
+  var sp=document.createElement('span'); sp.className='ev new';
+  var ts=new Date();
+  sp.innerHTML='<i>'+ts.toTimeString().slice(0,8)+'</i>'+text;
+  list.appendChild(sp);
+  while(list.children.length>5) list.removeChild(list.firstChild);
+  if(silent){
+    var sEl=document.createElement('span'); sEl.className='ev silent';
+    sEl.textContent='… rollout 静默（无新事件，本地计时中）';
+    list.appendChild(sEl);
+  }
+}
+
+/* ================= 时间线 ================= */
+var TL=[];
+var phaseStart=0;
+function at(t,fn){ TL.push({t:t,fn:fn}); }
+
+at(0,function(){ phaseStart=0;
+  A.setMode('output'); A.setOutput(OUT_PREV);
+  A.setFooter('✓ 完成 · 4步(命令2 编辑1 失败1)','done',false);
+  A.header(H_TITLE+' · 已处理 46秒');
+  A.note('<b>空闲/输出态</b>：与现网行为完全一致 —— 主区=最新输出 3 行，footer=最近动作。以下进入新一轮任务。');
+  B.setMode('output'); B.setOutput(OUT_PREV);
+  B.setFooter('✓ 完成 · 4步(命令2 编辑1 失败1)','done',false);
+  B.header(H_TITLE+' · 已处理 46秒');
+  B.note('<b>空闲/输出态</b>：与现网行为完全一致。方案 B 只有在执行期才出现钉住+直播条。');
+  tickerAdd('（上一轮 task_complete 已收尾）');
+});
+at(2000,function(){ phaseStart=2; tickerAdd('event_msg task_started',true);
+  A.setMode('feed');
+  A.renderFeed([{k:'done',icon:'✓',text:'编辑 tmp/hud-observe.txt · 2s'},{k:'live',icon:'⠋',live:1,text:'⠙ 思考中 {t}s…'}]);
+  A.setFooter('⠙ 思考中','thinking',true);
+  A.note('<b>思考期</b>：rollout 静默 → 第 3 行只能本地计时。上一动作保留在第 1 行，看完即走、不丢上下文。');
+  B.setMode('b-pin'); B.pinOutput();
+  B.setLive('⠙ 思考中 {t}s…');
+  B.setFooter('⠙ 思考中','thinking',true);
+  B.note('<b>思考期</b>：输出降为钉住 2 行（半透明冻结、未离场），直播条 1 行常驻。');
+});
+at(5000,function(){ tickerAdd('item_completed Reasoning →「梳理执行顺序」');
+  A.renderFeed([{k:'done',icon:'✓',text:'编辑 tmp/hud-observe.txt · 2s'},
+                {k:'title',icon:'▸',text:'梳理执行顺序 · 3s'},
+                {k:'live',icon:'⠋',live:1,text:'⠙ 思考中 {t}s…'}]);
+  A.setFooter('⠙ 思考中 · 梳理执行顺序','thinking',true);
+  A.note('<b>折叠标题揭晓</b>：Reasoning 完成瞬间标题滑入第 2 行（数据源仅在阶段结束写入，天然滞后一步）。');
+  B.setLive('⠙ 思考中 {t}s · 梳理执行顺序');
+  B.setFooter('⠙ 思考中 · 梳理执行顺序','thinking',true);
+  B.note('<b>折叠标题揭晓</b>：直播条同步带上标题；输出仍钉在场。');
+});
+at(9000,function(){ phaseStart=9; tickerAdd('custom_tool_call exec_command',true);
+  A.renderFeed([{k:'title',icon:'▸',text:'梳理执行顺序 · 3s'},
+                {k:'cmd',icon:'$',text:'python -m pytest tests/test_ui.py -x -q'},
+                {k:'live',icon:'⠋',live:1,text:'⠙ 运行中 {t}s… 等待输出'}]);
+  A.setFooter('⠙ 执行命令 · pytest -x -q','running',true);
+  A.note('<b>命令执行期</b>（rollout 静默 8s）：feed 第 2 行=命令全文，第 3 行=本地计时。此时无任何流式输出可显示。');
+  B.setLive('⠙ 执行命令 · pytest -x -q · {t}s');
+  B.setFooter('⠙ 执行命令 · pytest -x -q','running',true);
+  B.note('<b>命令执行期</b>：直播条显示命令名+本地计时；点击「展开 ▲」可看 3 行活动。');
+});
+at(17000,function(){ tickerAdd('item_completed CommandExecution · failed (outlen=322)');
+  A.renderFeed([{k:'cmd',icon:'$',text:'python -m pytest tests/test_ui.py -x -q'},
+                {k:'fail',icon:'✗',text:'失败 · 退出码 1 · 8s'},
+                {k:'out',icon:'└',text:'FAILED tests/test_ui.py::BudgetHelper - assert 3 == 2'}]);
+  A.setFooter('✗ 失败 · pytest -x -q','error',true);
+  A.note('<b>完成瞬间回填</b>：输出尾行一次性到达（事件驱动），失败行+尾行构成「发生了什么」的最小完整证据。footer 转红并停留至下轮。');
+  B.setLive('✗ 失败 · pytest -x -q');
+  B.setFooter('✗ 失败 · pytest -x -q','error',true);
+  B.note('<b>完成瞬间</b>：直播条转失败红；输出仍钉住未动。展开可看命令+失败+尾行三行。');
+});
+at(20000,function(){ phaseStart=20; tickerAdd('item_completed Reasoning →「读取 AGENTS.md 前 8 行」');
+  A.renderFeed([{k:'fail',icon:'✗',text:'失败 · 退出码 1 · 8s'},
+                {k:'cmd',icon:'$',text:'Get-Content .\\AGENTS.md -TotalCount 8'},
+                {k:'live',icon:'⠋',live:1,text:'⠙ 运行中 {t}s… 等待输出'}]);
+  A.setFooter('⠙ 执行命令 · 读取 AGENTS.md','running',true);
+  A.note('<b>下一动作</b>：feed 顶部丢弃最旧行、追加新行（保留最近 3 行=当前轮活动窗口）。');
+  B.setLive('⠙ 执行命令 · 读取 AGENTS.md · {t}s');
+  B.setFooter('⠙ 执行命令 · 读取 AGENTS.md','running',true);
+});
+at(21500,function(){ tickerAdd('item_completed CommandExecution · completed');
+  A.renderFeed([{k:'fail',icon:'✗',text:'失败 · 退出码 1 · 8s'},
+                {k:'done',icon:'✓',text:'命令完成 · 1s'},
+                {k:'out',icon:'└',text:'# Codex Project Instructions'}]);
+  A.setFooter('✓ 命令完成 · AGENTS.md','running',true);
+  B.setLive('✓ 命令完成 · AGENTS.md');
+  B.setFooter('✓ 命令完成 · AGENTS.md','running',true);
+});
+at(24500,function(){ phaseStart=24.5; tickerAdd('item_completed Reasoning →「准备补丁」',true);
+  A.renderFeed([{k:'done',icon:'✓',text:'命令完成 · 1s'},
+                {k:'title',icon:'▸',text:'准备补丁：hud-observe.txt'},
+                {k:'live',icon:'⠋',live:1,text:'⠙ 整理补丁 {t}s…'}]);
+  A.setFooter('⠙ 编辑 · hud-observe.txt','running',true);
+  B.setLive('⠙ 编辑 · hud-observe.txt · {t}s');
+  B.setFooter('⠙ 编辑 · hud-observe.txt','running',true);
+});
+at(26500,function(){ tickerAdd('item_completed FileChange · 1 file (+1)');
+  A.renderFeed([{k:'title',icon:'▸',text:'准备补丁：hud-observe.txt'},
+                {k:'done',icon:'✓',text:'编辑 tmp/hud-observe.txt · 1s'},
+                {k:'out',icon:'└',text:'M tmp/hud-observe.txt'}]);
+  A.setFooter('✓ 编辑 · hud-observe.txt','running',true);
+  A.note('<b>编辑步骤</b>：FileChange 结构化事件 →「编辑 + 文件名」标题（现网把它误显示为“执行命令+原始 JS”，为数据前提修复项）。');
+  B.setLive('✓ 编辑 · hud-observe.txt');
+  B.setFooter('✓ 编辑 · hud-observe.txt','running',true);
+});
+at(29500,function(){ phaseStart=29.5; tickerAdd('item_completed AgentMessage → 归还/收起');
+  A.setMode('output'); A.setOutput(OUT_FINAL);
+  A.setFooter('✓ 完成 · 5步(命令3 编辑1 失败1)','done',false);
+  A.header(H_TITLE+' · 已处理 28秒');
+  A.note('<b>输出归还</b>：agent_message 到达 → 150ms 淡变回输出视图（与 WORK_OVERLAY_RESTORE_FADE_IN_MS 一致）。执行期被插播的输出永远是上一轮静止文本，无信息损失。');
+  B.setMode('output'); B.setOutput(OUT_FINAL);
+  B.setFooter('✓ 完成 · 5步(命令3 编辑1 失败1)','done',false);
+  B.header(H_TITLE+' · 已处理 28秒');
+  B.note('<b>自动收起</b>：agent_message 到达 → 直播条消失、输出恢复满 3 行/满透明度并更新为最新内容。');
+});
+at(33500,function(){ phaseStart=33.5; tickerAdd('request_user_input（等确认）',true);
+  A.setMode('feed');
+  A.renderFeed([{k:'done',icon:'✓',text:'编辑 tmp/hud-observe.txt · 1s'},
+                {k:'cmd',icon:'$',text:'rtk rm -rf build/'},
+                {k:'wait',icon:'⠸',live:1,text:'⠸ 等待你在 codex 窗口确认…'}]);
+  A.setFooter('⠸ 等确认 · rm -rf build/','waiting',true);
+  A.note('<b>等确认</b>：危险命令被 codex 拦下 → feed 明示命令全文，footer 转警示色。确认动作仍发生在 codex 窗口（HUD 只观测）。');
+  B.setMode('b-pin'); B.pinOutput();
+  B.setLive('⠸ 等确认 · rm -rf build/');
+  B.setFooter('⠸ 等确认 · rm -rf build/','waiting',true);
+  B.note('<b>等确认</b>：直播条转警示色；输出保持钉住。');
+});
+at(37500,function(){ tickerAdd('task_complete');
+  A.setMode('output'); A.setOutput(OUT_FINAL2);
+  A.setFooter('✓ 完成 · 6步(命令4 编辑2 失败1)','done',false);
+  A.header(H_TITLE+' · 已处理 36秒');
+  A.note('<b>收尾</b>：回到输出态。点击「↻ 重播」可再看一遍完整时序；活动全史仍在 tooltip 中（现网行为保留）。');
+  B.setMode('output'); B.setOutput(OUT_FINAL2);
+  B.setFooter('✓ 完成 · 6步(命令4 编辑2 失败1)','done',false);
+  B.header(H_TITLE+' · 已处理 36秒');
+  B.note('<b>收尾</b>：输出态与现网一致。');
+});
+
+/* ================= 常驻帧循环调度器 ================= */
+var idx=0, vt=0, lastTs=null, speed=1, playing=true, finished=false, lastCount=-1;
+var btnPlay=$('btnPlay'), btnReplay=$('btnReplay'), btnSpeed=$('btnSpeed');
+
+function tick(vNow){
+  var sec=Math.floor(vNow/1000);
+  if(sec===lastCount) return;
+  lastCount=sec;
+  var scenes=[A,B];
+  for(var si=0;si<scenes.length;si++){
+    var S=scenes[si];
+    S.tickLive(Math.max(0,Math.floor((vNow-phaseStart*1000)/1000)));
+    if(S.s.kind!=='done') S.header(H_TITLE+' · 已处理 '+sec+'秒');
+  }
+}
+function loop(ts){
+  if(lastTs===null) lastTs=ts;
+  var dt=ts-lastTs; lastTs=ts;
+  if(playing&&!finished){
+    vt+=dt*speed;
+    while(idx<TL.length&&TL[idx].t<=vt){
+      try{ TL[idx].fn(); }catch(e){ showErr(e); }
+      idx++;
+    }
+    if(idx>=TL.length){ finished=true; if(btnPlay) btnPlay.textContent='↻ 重播'; }
+  }
+  try{ tick(vt); }catch(e){ showErr(e); }
+  requestAnimationFrame(loop);
+}
+function startReplay(){
+  idx=0; vt=0; finished=false; playing=true; lastCount=-1; phaseStart=0; lastTs=null;
+  if(btnPlay) btnPlay.textContent='⏸ 暂停';
+}
+if(btnPlay) btnPlay.onclick=function(){
+  if(finished){ startReplay(); return; }
+  playing=!playing;
+  btnPlay.textContent=playing?'⏸ 暂停':'▶ 播放';
+};
+if(btnReplay) btnReplay.onclick=startReplay;
+if(btnSpeed) btnSpeed.onclick=function(){
+  speed=(speed===1)?2:(speed===2)?4:1;
+  btnSpeed.textContent='速度 '+speed+'×';
+};
+/* B 场景专属按钮：只接一次 */
+var lbBtn=$('lbBtnB'), colBtn=$('colBtnB');
+if(lbBtn) lbBtn.onclick=function(){ if(B.s.mode==='b-pin') B.setMode('b-feed'); };
+if(colBtn) colBtn.onclick=function(){ if(B.s.mode==='b-feed') B.setMode('b-pin'); };
+requestAnimationFrame(loop);
+
+</script>
+</body>
+</html>

@@ -1,0 +1,624 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>会话气泡「执行状态」展示方案 · 不改宽高 / 不改动画</title>
+<style>
+  :root{
+    --bg:#0A0E13;
+    --panel:#12181F;
+    --panel2:#161D26;
+    --border:#232E3C;
+    --text:#DCE7F2;
+    --muted:#8492A6;
+    --dim:#5E6A78;
+    --accent:#F3D27A;
+    --info:#9CCBFF;
+    --warn:#FFB86B;
+    --error:#FF6B6B;
+    --success:#8FE3A1;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    background:var(--bg);
+    color:var(--text);
+    font-family:"Microsoft YaHei UI","Segoe UI",system-ui,sans-serif;
+    font-size:14px;
+    line-height:1.65;
+    padding:36px 28px 80px;
+  }
+  .wrap{max-width:1420px;margin:0 auto}
+  h1{font-size:24px;font-weight:700;letter-spacing:.3px;margin-bottom:8px}
+  .sub{color:var(--muted);font-size:13px;margin-bottom:32px}
+  h2{
+    font-size:16px;font-weight:700;margin:44px 0 6px;
+    padding-left:11px;border-left:3px solid var(--accent);
+  }
+  h2 .en{color:var(--dim);font-weight:400;font-size:12px;margin-left:8px}
+  .lead{color:var(--muted);font-size:13px;margin:0 0 18px 14px;max-width:1000px}
+  h3{font-size:13px;font-weight:700;color:var(--info);margin:22px 0 10px}
+
+  /* ---------- 证据卡 ---------- */
+  .evid{display:grid;grid-template-columns:repeat(auto-fit,minmax(228px,1fr));gap:12px;margin:16px 0 8px}
+  .ev{background:var(--panel);border:1px solid var(--border);border-radius:9px;padding:14px 16px}
+  .ev .n{font-size:26px;font-weight:700;color:var(--accent);line-height:1.15;font-variant-numeric:tabular-nums}
+  .ev .n.bad{color:var(--error)}
+  .ev .n.good{color:var(--success)}
+  .ev .l{font-size:11.5px;color:var(--muted);margin-top:5px}
+  .ev .s{font-size:10.5px;color:var(--dim);margin-top:3px}
+
+  /* ---------- 代码 ---------- */
+  pre{
+    background:#0D1218;border:1px solid var(--border);border-radius:8px;
+    padding:13px 15px;overflow-x:auto;font-size:12px;line-height:1.6;
+    font-family:"Cascadia Mono","Consolas","Courier New",monospace;
+  }
+  pre .c{color:#5A6674}
+  pre .k{color:#C792EA}
+  pre .s{color:#8FE3A1}
+  pre .f{color:#82AAFF}
+  pre .x{color:#FF6B6B}
+  pre .p{color:#F3D27A}
+  code{
+    font-family:"Cascadia Mono","Consolas",monospace;font-size:12px;
+    background:#0D1218;border:1px solid var(--border);border-radius:4px;
+    padding:1px 5px;color:var(--info);
+  }
+  .file{
+    font-family:"Cascadia Mono","Consolas",monospace;font-size:11px;
+    color:var(--dim);margin:14px 0 5px;
+  }
+  .file b{color:var(--warn);font-weight:600}
+
+  /* ---------- 对比表 ---------- */
+  table{width:100%;border-collapse:collapse;margin:14px 0;font-size:12.5px}
+  th,td{border:1px solid var(--border);padding:8px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--accent);font-weight:700;font-size:12px}
+  td.c{text-align:center}
+  .yes{color:var(--success);font-weight:700}
+  .no{color:var(--error);font-weight:700}
+  .mid{color:var(--warn);font-weight:700}
+
+  /* ---------- 场景切换 ---------- */
+  .tabs{display:flex;gap:7px;margin:18px 0 22px;flex-wrap:wrap}
+  .tab{
+    background:var(--panel);border:1px solid var(--border);color:var(--muted);
+    padding:7px 15px;border-radius:7px;cursor:pointer;font-size:12.5px;
+    font-family:inherit;transition:.15s;
+  }
+  .tab:hover{border-color:#31404F;color:var(--text)}
+  .tab.on{background:#1D2732;border-color:var(--accent);color:var(--accent);font-weight:700}
+
+  /* ---------- 方案列 ---------- */
+  .cols{display:grid;grid-template-columns:repeat(3,1fr);gap:20px;margin-top:6px}
+  @media(max-width:1360px){.cols{grid-template-columns:1fr}}
+  .col{background:var(--panel);border:1px solid var(--border);border-radius:11px;padding:16px 16px 20px}
+  .col.pick{border-color:var(--accent);box-shadow:0 0 0 1px rgba(243,210,122,.16)}
+  .colhdr{display:flex;align-items:baseline;gap:9px;margin-bottom:3px}
+  .colhdr .t{font-size:15px;font-weight:700}
+  .col.pick .colhdr .t{color:var(--accent)}
+  .colhdr .tag{
+    font-size:10px;padding:2px 7px;border-radius:4px;
+    background:#1D2732;color:var(--info);border:1px solid var(--border);
+  }
+  .col.pick .colhdr .tag{background:rgba(243,210,122,.12);color:var(--accent);border-color:rgba(243,210,122,.3)}
+  .coldesc{font-size:11.5px;color:var(--muted);margin-bottom:16px;min-height:34px}
+
+  /* ---------- 气泡复刻（严格 430px） ---------- */
+  .bub{
+    width:430px;max-width:100%;
+    background:#141B24;border:1px solid #263241;border-radius:10px;
+    padding:8px 10px;
+    display:flex;flex-direction:column;gap:7px;
+    position:relative;overflow:hidden;
+  }
+  .bub.now{opacity:.94}
+  .bub .hd{display:flex;align-items:center;gap:8px;min-height:16px}
+  .bub .hd .ttl{
+    flex:1;font-size:12px;font-weight:700;color:#DCE7F2;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  }
+  .bub .hd .x{width:22px;height:22px;flex:none;border-radius:4px;background:#1B2431;border:1px solid #2C3846}
+  .bub .bd{
+    font-size:10.67px;line-height:1.35;color:#B8C6D8;width:402px;max-width:100%;
+    white-space:pre-wrap;word-break:break-word;
+  }
+  /* 方案：正文固定 3 行高度 —— 高度恒定，消除抖动 */
+  .bub .bd.fix3{height:43px;overflow:hidden;display:flex;flex-direction:column;justify-content:flex-start}
+  .bub .bd .ln{
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:402px;
+  }
+  .bub .bd .ln.cmd{
+    color:#DCE7F2;font-weight:700;
+  }
+  .bub .bd .ln.out{color:#B8C6D8}
+  .bub .bd .ln.mut{color:#6B7787}
+  .bub .bd .ln.err{color:#FF9A9A}
+  .bub .bd .ln.ok{color:#8FE3A1}
+  .bub .ft{display:flex;align-items:center;gap:8px;min-height:18px}
+  .bub .ft .st{
+    flex:1;min-width:0;font-size:10.67px;font-weight:700;color:#8492A6;
+    white-space:nowrap;overflow:hidden;
+  }
+  .bub .ft .st.running{color:#8492A6}
+  .bub .ft .st.fail{color:#FF6B6B}
+  .bub .ft .st.done{color:#F3D27A}
+  .bub .ft .wd{
+    font-size:9.33px;color:#5E6A78;max-width:170px;
+    white-space:nowrap;overflow:hidden;flex:none;
+  }
+  .bub .ft .bg{
+    flex:none;width:18px;height:18px;border-radius:4px;
+    background:#1B2431;border:1px solid #2C3846;
+    font-size:8px;font-weight:700;color:#8492A6;
+    display:flex;align-items:center;justify-content:center;
+  }
+
+  /* Shimmer 微光 —— 复刻 ShimmerTextLabel（30ms 步进 / 58px 光带） */
+  .shim{position:relative;display:inline-block;white-space:nowrap}
+  .shim::after{
+    content:attr(data-t);
+    position:absolute;left:0;top:0;
+    background:linear-gradient(100deg,
+      rgba(255,255,255,0) 38%,
+      rgba(255,255,255,.92) 50%,
+      rgba(255,255,255,0) 62%);
+    background-size:58px 100%;
+    background-repeat:no-repeat;
+    -webkit-background-clip:text;background-clip:text;
+    -webkit-text-fill-color:transparent;
+    animation:sweep 2.1s linear infinite;
+  }
+  @keyframes sweep{
+    0%{background-position:-58px 0}
+    100%{background-position:calc(100% + 58px) 0}
+  }
+
+  .cap{
+    font-size:10.5px;color:var(--dim);margin-top:9px;
+    font-family:"Cascadia Mono","Consolas",monospace;
+  }
+  .note{
+    font-size:11.5px;color:var(--muted);margin-top:11px;
+    padding:9px 12px;background:#0D1218;border-radius:7px;border-left:2px solid var(--border);
+  }
+  .note b{color:var(--accent)}
+  .note .w{color:var(--warn);font-weight:700}
+
+  .kv{font-size:12px;color:var(--muted);margin:10px 0 0}
+  .kv b{color:var(--text);font-weight:600}
+  ul{margin:10px 0 10px 20px;font-size:12.5px;color:var(--muted)}
+  li{margin:5px 0}
+  li b{color:var(--text)}
+  .foot{margin-top:48px;padding-top:18px;border-top:1px solid var(--border);color:var(--dim);font-size:11px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>会话气泡「执行状态」展示方案</h1>
+  <div class="sub">
+    约束：气泡宽度 430px 不变 · 高度恒定 · Shimmer 微光 / 完成湮灭 / 切换过渡全部保留　|　
+    数据来源：<code>~/.codex/sessions/2026/08/2[7-9]/**/*.jsonl</code>（真实 rollout，2452 条 CommandExecution）
+  </div>
+
+  <!-- ================= 诊断 ================= -->
+  <h2>一、现状诊断<span class="en">What the bubble shows today</span></h2>
+  <p class="lead">
+    当前气泡左下角显示的「命令 / 读文件 / 编辑 / 失败 / 等确认」来自
+    <code>activity_steps</code> 的最后一步，主内容区显示 codex 最近一轮输出 <code>lastText</code>。
+    用真实 rollout 数据回放后，有两个硬伤让「执行状态」几乎不可读。
+  </p>
+
+  <div class="evid">
+    <div class="ev">
+      <div class="n bad">100%</div>
+      <div class="l">命令标题被 shell 前缀污染</div>
+      <div class="s">2452/2452 条首 token 均为带完整路径的 pwsh.exe</div>
+    </div>
+    <div class="ev">
+      <div class="n bad">89.7%</div>
+      <div class="l">属于可剥离的 shell 包装形式</div>
+      <div class="s">2199 条为 [pwsh.exe, -Command, &lt;真实命令&gt;]</div>
+    </div>
+    <div class="ev">
+      <div class="n bad">0%</div>
+      <div class="l">实际成功剥离的比例</div>
+      <div class="s">_shell_launcher 路径比对失败，剥离从未生效</div>
+    </div>
+    <div class="ev">
+      <div class="n">47<span style="font-size:15px"> 字符</span></div>
+      <div class="l">每条命令浪费的固定前缀</div>
+      <div class="s">而左下角最窄仅约 206px ≈ 35 个英数字</div>
+    </div>
+  </div>
+
+  <div class="evid">
+    <div class="ev">
+      <div class="n good">100%</div>
+      <div class="l"><code>parsed_cmd</code> 字段覆盖率</div>
+      <div class="s">提供已剥离包装的干净命令，当前完全未使用</div>
+    </div>
+    <div class="ev">
+      <div class="n">96.7%</div>
+      <div class="l">命令带 <code>aggregated_output</code></div>
+      <div class="s">2371 条有输出，95.2% 输出含 ≥2 个换行</div>
+    </div>
+    <div class="ev">
+      <div class="n">4 283<span style="font-size:15px"> 字符</span></div>
+      <div class="l">输出长度中位数</div>
+      <div class="s">而 step.output 被 compact 到 220 字符</div>
+    </div>
+    <div class="ev">
+      <div class="n bad">8.1%</div>
+      <div class="l">命令实际失败率</div>
+      <div class="s">199/2452，失败细节同样被换行坍缩吞掉</div>
+    </div>
+  </div>
+
+  <!-- ================= 根因 ================= -->
+  <h2>二、两个根因<span class="en">Root causes, verified on real data</span></h2>
+
+  <h3>根因 1 · shell 启动器识别用了「完整路径」比对裸名</h3>
+  <div class="file"><b>src/codex_usage_hud/core/parser.py:169-173</b> — <code>_shell_launcher()</code></div>
+<pre><span class="k">def</span> <span class="f">_shell_launcher</span>(value: <span class="k">str</span>) -> <span class="k">bool</span>:
+    name = <span class="k">str</span>(value <span class="k">or</span> <span class="s">""</span>).strip().casefold()
+    <span class="k">if</span> name.endswith(<span class="s">".exe"</span>):
+        name = name[: -<span class="k">len</span>(<span class="s">".exe"</span>)]
+    <span class="x">return name in _SHELL_LAUNCHERS   # ← 集合里是 "pwsh"，这里传进来是 "d:\...\7\pwsh"</span></pre>
+  <p class="kv">
+    实测：<code>_shell_launcher(r"D:\Program Files\PowerShell\7\pwsh.exe")</code>
+    → 去 <code>.exe</code> 得 <code>d:\program files\powershell\7\pwsh</code> →
+    <b>不在</b> <code>_SHELL_LAUNCHERS</code>（集合内为裸名 <code>pwsh</code> / <code>bash</code> …）→ 返回 <b>False</b>。
+    于是 <code>_normalise_command_parts</code> 的剥离分支被整个跳过，左下角原样吐出：
+  </p>
+<pre><span class="c"># 左下角现在实际显示（status_label，单行，最窄约 206px）</span>
+<span class="x">D:\Program Files\PowerShell\7\pwsh.exe -Command git status --s…</span>
+<span class="c"># 真正该显示的（来自 parsed_cmd[0].cmd，100% 覆盖）</span>
+<span class="p">git status --short --branch</span></pre>
+
+  <h3>根因 2 · <code>compact_text</code> 把换行压成空格，「三行细节」无从谈起</h3>
+  <div class="file"><b>src/codex_usage_hud/core/parser.py:52-59</b> — <code>compact_text()</code></div>
+<pre><span class="k">def</span> <span class="f">compact_text</span>(value: Any, limit: <span class="k">int</span> = <span class="s">140</span>) -> <span class="k">str</span>:
+    <span class="k">if</span> value <span class="k">is</span> <span class="k">None</span>: <span class="k">return</span> <span class="s">""</span>
+    text = re.sub(<span class="s">r"\s+"</span>, <span class="s">" "</span>, <span class="k">str</span>(value)).strip()   <span class="x"># ← \r\n 也被压成空格</span></pre>
+  <p class="kv">
+    <code>activity_steps</code> 在 <b>parser.py:2530-2535</b> 与 <b>2572-2575</b> 用 <code>compact_text(…, 220)</code>
+    存 <code>output</code>。结果是「<b>从开头</b>截取的 220 字符、<b>没有换行</b>」的一坨文本 ——
+    既拿不到最新进展，也没有行结构。真实对比：
+  </p>
+<pre><span class="c"># 现状：step.output（compact 220，换行已坍缩，且是输出的最开头）</span>
+<span class="x">tools\_grab_clipboard.ps1 tools\update_renderer_contract.py tools\run_validation.py
+tools\run_live_acceptance.py tools\register-codebase-memory-mcp.ps1 tools\probe_code…</span>
+
+<span class="c"># 期望：保留换行的尾部 3 行（最新进展，信息密度最高）</span>
+<span class="p">src\codex_usage_hud\renderer_runtime_assembly.py
+src\codex_usage_hud\renderer_runtime.py
+src\codex_usage_hud\renderer_request_projection.py</span></pre>
+
+  <!-- ================= 方案 ================= -->
+  <h2>三、两套方案<span class="en">Two proposals · 真实数据回放</span></h2>
+  <p class="lead">
+    下面三列分别是 <b>现状</b> / <b>方案 A</b> / <b>方案 B</b>，同为 430px 宽的真实气泡结构，
+    用同一条真实 rollout 记录渲染。切换场景看不同状态下的表现。
+  </p>
+
+  <div class="tabs" id="tabs"></div>
+  <div class="cols" id="cols"></div>
+
+  <!-- ================= 对比 ================= -->
+  <h2>四、方案取舍<span class="en">Trade-offs</span></h2>
+  <table>
+    <tr>
+      <th style="width:20%">维度</th>
+      <th style="width:26%">方案 A · 尾随三行</th>
+      <th style="width:26%">方案 B · 滚动流</th>
+      <th style="width:28%">说明</th>
+    </tr>
+    <tr>
+      <td><b>核心思路</b></td>
+      <td>每次刷新取当前活跃步骤输出的<b>最后 3 行</b>快照</td>
+      <td>维护行缓冲，新行从底部推入、旧行上移，3 行窗口<b>持续滚动</b></td>
+      <td>A 是「现在在哪」，B 是「怎么走到这」</td>
+    </tr>
+    <tr>
+      <td><b>左下角</b></td>
+      <td colspan="2" class="c">修复 shell 剥离后的干净命令标题（两方案相同）</td>
+      <td>仍走 <code>ShimmerTextLabel</code>，单行，微光动画不变</td>
+    </tr>
+    <tr>
+      <td><b>气泡高度</b></td>
+      <td class="yes">恒定</td>
+      <td class="yes">恒定</td>
+      <td>正文固定 3 行高（43px），不再随内容 1~3 行抖动</td>
+    </tr>
+    <tr>
+      <td><b>气泡宽度</b></td>
+      <td class="yes">430px 不变</td>
+      <td class="yes">430px 不变</td>
+      <td>不动 <code>WORK_OVERLAY_WIDTH</code>，不新增控件</td>
+    </tr>
+    <tr>
+      <td><b>动画</b></td>
+      <td class="yes">全部保留</td>
+      <td class="yes">全部保留</td>
+      <td>Shimmer / 完成湮灭 / 切换过渡 / 徽标动画均不触碰</td>
+    </tr>
+    <tr>
+      <td><b>读取连续性</b></td>
+      <td class="mid">中</td>
+      <td class="yes">高</td>
+      <td>B 能看到连续推进过程，A 每帧是独立快照</td>
+    </tr>
+    <tr>
+      <td><b>长输出尾部价值</b></td>
+      <td class="yes">高</td>
+      <td class="yes">高</td>
+      <td>两方案都取尾部，规避了 median 4283 字符的头部噪声</td>
+    </tr>
+    <tr>
+      <td><b>实现复杂度</b></td>
+      <td class="yes">低</td>
+      <td class="mid">中</td>
+      <td>B 需在 <code>activity_steps</code> 侧维护行缓冲与去重</td>
+    </tr>
+    <tr>
+      <td><b>新增数据字段</b></td>
+      <td><code>activeTail</code>（保留换行的尾部 3 行）</td>
+      <td><code>activeTail</code> + <code>tailSeq</code>（行序号）</td>
+      <td>均挂在既有 <code>ActivityStep</code> 上，不改 payload 结构</td>
+    </tr>
+    <tr>
+      <td><b>推荐场景</b></td>
+      <td colspan="2" class="c"><b>先做 A</b>，跑通后用 B 作为可选增强</td>
+      <td>A 改动面小、风险低，可独立上线验证</td>
+    </tr>
+  </table>
+
+  <!-- ================= 改动清单 ================= -->
+  <h2>五、改动清单<span class="en">Change list · 精确到 file:line</span></h2>
+  <p class="lead">两方案共用的底层修复（必须做）+ 各自差异部分。所有改动都不触碰布局常量与动画代码。</p>
+
+  <h3>共用 · 底层修复</h3>
+  <table>
+    <tr><th style="width:34%">位置</th><th style="width:22%">动作</th><th>内容</th></tr>
+    <tr>
+      <td><code>parser.py:169-173</code></td><td>修复 bug</td>
+      <td><code>_shell_launcher</code> 先取 basename 再比对，并兼容正反斜杠；使 89.7% 的 shell 包装可被剥离</td>
+    </tr>
+    <tr>
+      <td><code>parser.py:206-212</code></td><td>增强</td>
+      <td><code>command_execution_text</code> 优先读 <code>parsed_cmd[0].cmd</code>（100% 覆盖、已剥离），失败再回退现有解析</td>
+    </tr>
+    <tr>
+      <td><code>parser.py:2362-2587</code></td><td>新增字段</td>
+      <td>在 <code>ActivityStep</code> 上新增 <code>active_tail</code>：按 <code>\r?\n</code> 切分输出，取最后 3 行，每行 <code>compact_text(…, 120)</code>，<b>保留换行</b></td>
+    </tr>
+    <tr>
+      <td><code>parser.py:543-553</code></td><td>扩展结构</td>
+      <td><code>ActivityStep</code> 增加 <code>active_tail: str = ""</code>（方案 B 另加 <code>tail_seq: int = 0</code>）</td>
+    </tr>
+    <tr>
+      <td><code>model.py:435-463</code></td><td>保持</td>
+      <td><code>_overlay_activity_step_prefix</code> / <code>_step_text</code> 逻辑不动，前缀文案语义不变</td>
+    </tr>
+  </table>
+
+  <h3>方案 A 差异</h3>
+  <table>
+    <tr><th style="width:34%">位置</th><th style="width:22%">动作</th><th>内容</th></tr>
+    <tr>
+      <td><code>qt_rendering.py:630</code></td><td>改数据源</td>
+      <td><code>body_text</code> 优先取活跃步骤的 <code>activeTail</code>；无活跃步骤时回退 <code>lastText</code>（保持现有行为）</td>
+    </tr>
+    <tr>
+      <td><code>qt_rendering.py:639</code></td><td>固定高度</td>
+      <td><code>detail.setFixedHeight(3 × lineSpacing)</code> 替代自适应高度，消除 1~3 行抖动</td>
+    </tr>
+    <tr>
+      <td><code>qt_rendering.py:696-711</code></td><td>保持</td>
+      <td><code>status_label</code> 的 shimmer 开关、颜色映射、tooltip 全部不动</td>
+    </tr>
+  </table>
+
+  <h3>方案 B 差异（在 A 之上叠加）</h3>
+  <table>
+    <tr><th style="width:34%">位置</th><th style="width:22%">动作</th><th>内容</th></tr>
+    <tr>
+      <td><code>parser.py:2362-2587</code></td><td>行缓冲</td>
+      <td>为运行中步骤维护 <code>tail_seq</code> 递增行缓冲，输出增量追加而非整体替换</td>
+    </tr>
+    <tr>
+      <td><code>qt_rendering.py:630</code></td><td>滚动窗口</td>
+      <td>正文渲染行缓冲窗口的末 3 行，新行进底部、旧行上移</td>
+    </tr>
+    <tr>
+      <td><code>overlay_projection.py:217-315</code></td><td>合并策略</td>
+      <td><code>_merge_activity_steps</code> 需按 <code>tail_seq</code> 合并，避免刷新时行缓冲被重置</td>
+    </tr>
+  </table>
+
+  <h3>不改动清单（显式约束）</h3>
+  <table>
+    <tr><th style="width:40%">位置</th><th>承诺</th></tr>
+    <tr><td><code>constants.py:8-13</code></td><td><code>WORK_OVERLAY_WIDTH=430</code> / <code>TEXT_WRAP_WIDTH=402</code> / <code>BODY_MAX_LINES=3</code> 一律不动</td></tr>
+    <tr><td><code>qt_visuals.py:64-139</code></td><td><code>ShimmerTextLabel</code> 微光动画（30ms 步进 / 58px 光带 / 峰值 245）不动</td></tr>
+    <tr><td><code>qt_transitions.py</code></td><td>卡片收缩 / 位移 / 恢复 / 完成湮灭全套过渡不动</td></tr>
+    <tr><td><code>constants.py:20-31</code></td><td>完成徽标 168px 与 520ms 湮灭动画不动</td></tr>
+    <tr><td><code>qt_rendering.py:369-457</code></td><td>footer 布局（status / workdir 170 / round badge 18）不动</td></tr>
+  </table>
+
+  <div class="note">
+    <b>关于高度的一处权衡：</b>当前正文高度是自适应的（<code>_wrapped_label_height</code>，
+    内容 1~3 行时高度在 14~43px 间变化）。两方案都建议改为<span class="w">固定 3 行高（43px）</span>——
+    在输出充足的典型状态下高度与现在<b>完全一致</b>，同时消除短内容时的高度抖动。
+    若要求「任何状态下绝对零像素变化」，则保留自适应高度即可，代价是气泡高度仍会随内容跳动。
+  </div>
+
+  <div class="foot">
+    生成于真实 rollout 回放 · 样本：2452 条 CommandExecution（2026-08-27 ~ 08-29，32 个会话文件）·
+    气泡结构复刻自 <code>ui/work_overlay/constants.py</code> 与 <code>qt_rendering.py:304-457</code>
+  </div>
+</div>
+
+<script>
+// ---------- 真实场景数据（取自 ~/.codex/sessions/2026/08/2[7-9]） ----------
+var SCENES = [
+  {
+    name: "运行中 · 命令刚发起",
+    time: "11:24:07", elapsed: "已处理 12s", title: "Codex 工作",
+    workdir: "[default] codex-usage-hud", badge: "3",
+    cmd: "git status --short --branch",
+    rawCmd: "D:\\Program Files\\PowerShell\\7\\pwsh.exe -Command git status --short --branch",
+    status: "running", statusLabel: "命令",
+    agentOut: "我先看一下当前工作区的改动状态，确认有哪些文件被修改过，再决定提交范围。",
+    tail: ["## main...origin/main", " D tmp_test_skills/token-skill/SKILL.md", "?? tmp_bubble.png"],
+    stream: ["## main...origin/main", " D tmp_test_skills/token-skill/SKILL.md", "?? tmp_bubble.png"]
+  },
+  {
+    name: "命令失败 · exit 1",
+    time: "11:26:41", elapsed: "已处理 47s", title: "Codex 工作",
+    workdir: "[default] codex-usage-hud", badge: "7",
+    cmd: "python tools/update_renderer_contract.py --check",
+    rawCmd: "D:\\Program Files\\PowerShell\\7\\pwsh.exe -Command python tools/update_renderer_contract.py --check",
+    status: "failed", statusLabel: "失败",
+    agentOut: "契约校验没有通过，说明渲染器契约文件与当前实现已经不同步。我需要定位是哪一处字段发生了偏移。",
+    tail: ['  "sha256": "0abf2f9cce8d07adea52a60a212a5849a4211b8ccf2197092...', "}", "Contract check FAILED: 1 mismatch"],
+    stream: ["Contract check FAILED: 1 mismatch", "  expected: renderer.contract.v3", "  actual:   renderer.contract.v2"]
+  },
+  {
+    name: "命令完成 · 短输出",
+    time: "11:31:02", elapsed: "已处理 1m20s", title: "Codex 工作",
+    workdir: "[default] codex-usage-hud", badge: "9",
+    cmd: "git show --stat --oneline --decorate HEAD",
+    rawCmd: "D:\\Program Files\\PowerShell\\7\\pwsh.exe -Command git show --stat --oneline --decorate HEAD",
+    status: "completed", statusLabel: "命令",
+    agentOut: "已确认最近一次提交的改动范围，只涉及 README，接下来可以据此判断是否需要补充致谢条目。",
+    tail: ["13d53e3 (HEAD -> main, origin/main, origin/HEAD) docs: add ackn...",
+           " README.md | 5 +++++",
+           " 1 file changed, 5 insertions(+)"],
+    stream: ["13d53e3 (HEAD -> main, origin/main, origin/HEAD) docs: add ackn...",
+             " README.md | 5 +++++",
+             " 1 file changed, 5 insertions(+)"]
+  }
+];
+
+// ---------- 气泡渲染 ----------
+function esc(s){return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");}
+function fit(s){ // 模拟 402px / 8pt 单行截断
+  var max=64; return s.length>max ? s.slice(0,max-1)+"…" : s;
+}
+
+function bubble(cfg){
+  // cfg: {footerText, footerCls, shimmer, bodyHtml, footNote}
+  var st = '<span class="ft"><span class="st '+cfg.footerCls+'">';
+  if(cfg.shimmer){
+    st += '<span class="shim" data-t="'+esc(cfg.footerText)+'">'+esc(cfg.footerText)+'</span>';
+  }else{
+    st += esc(cfg.footerText);
+  }
+  st += '</span><span class="wd">'+esc(cfg.workdir)+'</span><span class="bg">'+esc(cfg.badge)+'</span></span>';
+  return ''
+   + '<div class="bub">'
+   +   '<div class="hd"><span class="ttl">'+esc(cfg.header)+'</span><span class="x"></span></div>'
+   +   '<div class="bd '+(cfg.fix3?'fix3':'')+'">'+cfg.bodyHtml+'</div>'
+   +   st
+   + '</div>';
+}
+
+// 现状：左下角 = 被污染的原始命令（texts[-1]），正文 = lastText（自适应高度，此处 2 行）
+function renderNow(s){
+  var footer = s.statusLabel + "：" + s.rawCmd;
+  var body = '<span class="ln">'+esc(fit(s.agentOut))+'</span>';
+  return bubble({
+    header: s.time+" | "+s.elapsed+" | "+s.title,
+    bodyHtml: body,
+    footerText: fit(footer),
+    footerCls: s.status==="failed"?"fail":(s.status==="completed"?"done":"running"),
+    shimmer: s.status==="running",
+    workdir: s.workdir, badge: s.badge, fix3:false
+  });
+}
+
+// 方案 A：左下角 = 干净标题；正文 = 固定 3 行（标题行 + 输出尾部 3 行中的后 2 行）
+function renderA(s){
+  var cls = s.status==="running"?"mut":(s.status==="failed"?"err":"out");
+  var lines = s.tail.slice(-2).map(function(l){return '<span class="ln '+cls+'">'+esc(fit(l))+'</span>';}).join("");
+  var head = '<span class="ln cmd">▸ '+esc(fit(s.cmd))+'</span>';
+  return bubble({
+    header: s.time+" | "+s.elapsed+" | "+s.title,
+    bodyHtml: head+lines,
+    footerText: fit(s.statusLabel+"："+s.cmd),
+    footerCls: s.status==="failed"?"fail":(s.status==="completed"?"done":"running"),
+    shimmer: s.status==="running",
+    workdir: s.workdir, badge: s.badge, fix3:true
+  });
+}
+
+// 方案 B：同 A，但正文三行全部是滚动的输出流（标题只在左下角）
+function renderB(s){
+  var cls = s.status==="running"?"mut":(s.status==="failed"?"err":"out");
+  var lines = s.stream.slice(-3).map(function(l,i){
+    var op = i===s.stream.slice(-3).length-1 ? 1 : (0.45 + i*0.22);
+    return '<span class="ln '+cls+'" style="opacity:'+op.toFixed(2)+'">'+esc(fit(l))+'</span>';
+  }).join("");
+  return bubble({
+    header: s.time+" | "+s.elapsed+" | "+s.title,
+    bodyHtml: lines,
+    footerText: fit(s.statusLabel+"："+s.cmd),
+    footerCls: s.status==="failed"?"fail":(s.status==="completed"?"done":"running"),
+    shimmer: s.status==="running",
+    workdir: s.workdir, badge: s.badge, fix3:true
+  });
+}
+
+var CAP = {
+  now: "左下角被 47 字符 shell 前缀占据 · 正文为 agent 输出 · 高度随内容 1~3 行抖动",
+  a:   "左下角 = 干净命令标题 · 正文固定 3 行（标题 + 尾部 2 行）· 高度恒定",
+  b:   "左下角 = 干净命令标题 · 正文 3 行滚动流（越往下越新）· 高度恒定"
+};
+
+var NOTES = {
+  now: '<b>问题：</b>真正有用的命令被挤出可视区；正文是 agent 的文字输出，与"正在执行什么"无关。',
+  a:   '<b>要点：</b>正文第 1 行做折叠标题（<code>▸</code> 前缀，加粗），后 2 行取输出尾部 —— 最新进展永远在视野内。',
+  b:   '<b>要点：</b>正文全部交给输出流，新行从底部推入、旧行上移并渐隐，能看出推进过程；标题仍归左下角。'
+};
+
+function render(){
+  var s = SCENES[cur];
+  var now = renderNow(s), a = renderA(s), b = renderB(s);
+  document.getElementById("cols").innerHTML = ''
+    + '<div class="col">'
+    +   '<div class="colhdr"><span class="t">现状</span><span class="tag">baseline</span></div>'
+    +   '<div class="coldesc">左下角用 <code>texts[-1]</code>，正文用 <code>lastText</code></div>'
+    +   now + '<div class="cap">'+CAP.now+'</div>'
+    +   '<div class="note">'+NOTES.now+'</div>'
+    + '</div>'
+    + '<div class="col pick">'
+    +   '<div class="colhdr"><span class="t">方案 A · 尾随三行</span><span class="tag">推荐先做</span></div>'
+    +   '<div class="coldesc">正文 = 折叠标题行 + 输出尾部，每次刷新取当前快照</div>'
+    +   a + '<div class="cap">'+CAP.a+'</div>'
+    +   '<div class="note">'+NOTES.a+'</div>'
+    + '</div>'
+    + '<div class="col">'
+    +   '<div class="colhdr"><span class="t">方案 B · 滚动流</span><span class="tag">可选增强</span></div>'
+    +   '<div class="coldesc">正文 = 3 行滚动窗口，新行底部推入、旧行上移渐隐</div>'
+    +   b + '<div class="cap">'+CAP.b+'</div>'
+    +   '<div class="note">'+NOTES.b+'</div>'
+    + '</div>';
+}
+
+var cur = 0;
+function tabs(){
+  document.getElementById("tabs").innerHTML = SCENES.map(function(s,i){
+    return '<button class="tab'+(i===cur?" on":"")+'" data-i="'+i+'">'+esc(s.name)+'</button>';
+  }).join("");
+  document.querySelectorAll(".tab").forEach(function(b){
+    b.onclick=function(){ cur=+b.dataset.i; tabs(); render(); };
+  });
+}
+tabs(); render();
+</script>
+</body>
+</html>
