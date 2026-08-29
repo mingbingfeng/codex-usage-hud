@@ -63,5 +63,5 @@ jobs:
             tests/test_ui.py::BudgetHelperTests::test_desktop_work_overlay_skips_when_pyside6_unavailable \
             tests/test_ui.py::BudgetHelperTests::test_desktop_work_overlay_starts_when_pyside6_available \
             tests/test_ui.py::DaemonLifecycleTests::test_run_renderer_hud_session_drains_work_overlay_commands_with_window_prep \
-            tests/test_ui.py::DaemonLifecycleTests::test_cli_import_does_not_eagerly_import_qt_hud \
+            tests/test_architecture.py::test_cli_facade_import_does_not_eagerly_load_qt_hud \
             tests/test_ui.py::DaemonLifecycleTests::test_launch_codex_app_debugger_uses_macos_open_args
