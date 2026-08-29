@@ -544,10 +544,11 @@ def handle_active_session_command(
     try:
         accepted = resolver(command)
     except Exception as exc:
+        error_detail = _exc_detail_log(
+            exc, tag="renderer_active_session_candidate_failed"
+        )
         return _status(
-            f"会话候选匹配失败：{_exc_detail_log(
-                exc, tag='renderer_active_session_candidate_failed'
-            )}",
+            f"会话候选匹配失败：{error_detail}",
             kind="error",
         )
     if not bool(accepted):
@@ -673,10 +674,11 @@ def handle_background_command(
             try:
                 workdir = background_usage_workdir(runtime, event_id)
             except Exception as exc:
+                error_detail = _exc_detail_log(
+                    exc, tag="background_usage_workdir_read_failed"
+                )
                 return _status(
-                    f"无法读取后台任务工作目录：{_exc_detail_log(
-                        exc, tag='background_usage_workdir_read_failed'
-                    )}",
+                    f"无法读取后台任务工作目录：{error_detail}",
                     kind="error",
                 )
             if workdir is None:
@@ -684,10 +686,11 @@ def handle_background_command(
             try:
                 _open_system_path(workdir)
             except OSError as exc:
+                error_detail = _exc_detail_log(
+                    exc, tag="background_usage_workdir_open_failed"
+                )
                 return _status(
-                    f"无法打开工作目录：{_exc_detail_log(
-                        exc, tag='background_usage_workdir_open_failed'
-                    )}",
+                    f"无法打开工作目录：{error_detail}",
                     kind="error",
                 )
             return _status("已打开工作目录。")
@@ -739,13 +742,14 @@ def handle_background_command(
             "backgroundUsagePolicyQuery": "policyQuery",
             "backgroundUsagePolicySet": "policyApply",
         }.get(action, "open")
+        error_detail = _exc_detail_log(
+            exc, tag="background_usage_read_failed"
+        )
         return runtime_settings.background_usage_response_status(
             kind,
             request_id,
             event_id=str(command.get("eventId") or "").strip(),
-            error=f"用量总览读取失败：{_exc_detail_log(
-                exc, tag='background_usage_read_failed'
-            )}"
+            error=f"用量总览读取失败：{error_detail}"
         )
 
 
@@ -763,10 +767,11 @@ def handle_cleanup_command(
                 str(command.get("inventoryRevision") or "").strip(),
             )
         except Exception as exc:
+            error_detail = _exc_detail_log(
+                exc, tag="session_cleanup_workdir_read_failed"
+            )
             return _status(
-                f"无法读取会话工作目录：{_exc_detail_log(
-                    exc, tag='session_cleanup_workdir_read_failed'
-                )}",
+                f"无法读取会话工作目录：{error_detail}",
                 kind="error",
             )
         try:
@@ -782,10 +787,11 @@ def handle_cleanup_command(
         try:
             _open_system_path(workdir)
         except OSError as exc:
+            error_detail = _exc_detail_log(
+                exc, tag="session_cleanup_workdir_open_failed"
+            )
             return _status(
-                f"无法打开工作目录：{_exc_detail_log(
-                    exc, tag='session_cleanup_workdir_open_failed'
-                )}",
+                f"无法打开工作目录：{error_detail}",
                 kind="error",
             )
         return _status("已打开工作目录。")
@@ -900,10 +906,11 @@ def handle_insights_command(
         try:
             _open_system_path(workdir)
         except OSError as exc:
+            error_detail = _exc_detail_log(
+                exc, tag="usage_insights_workdir_open_failed"
+            )
             return _status(
-                f"无法打开工作目录：{_exc_detail_log(
-                    exc, tag='usage_insights_workdir_open_failed'
-                )}",
+                f"无法打开工作目录：{error_detail}",
                 kind="error",
             )
         return _status("已打开工作目录。")
@@ -1149,10 +1156,9 @@ def handle_general_command(
                     ports.load_config()
                 )
             except (OSError, ValueError) as exc:
+                error_detail = _exc_detail_log(exc, tag="pricing_export_failed")
                 return _status(
-                    f"价格 JSON 生成失败：{_exc_detail_log(
-                        exc, tag='pricing_export_failed'
-                    )}",
+                    f"价格 JSON 生成失败：{error_detail}",
                     kind="error",
                 )
             if used_template:
@@ -1176,10 +1182,9 @@ def handle_general_command(
                 path = _pricing_file_path(command.get("filename"))
                 ports.pricing_open_path(path)
             except (OSError, ValueError) as exc:
+                error_detail = _exc_detail_log(exc, tag="pricing_open_failed")
                 return _status(
-                    f"价格文件打开失败：{_exc_detail_log(
-                        exc, tag='pricing_open_failed'
-                    )}",
+                    f"价格文件打开失败：{error_detail}",
                     kind="error",
                 )
             status = _status(f"已请求打开价格 JSON：{path}")
@@ -1410,10 +1415,11 @@ def handle_general_command(
             return _status("今天不再显示预算预警。")
         return _status(f"无法处理未知设置命令：{action or 'empty'}", kind="error")
     except Exception as exc:
+        error_detail = _exc_detail_log(
+            exc, tag="renderer_settings_command_failed"
+        )
         return _status(
-            f"设置命令执行失败：{_exc_detail_log(
-                exc, tag='renderer_settings_command_failed'
-            )}",
+            f"设置命令执行失败：{error_detail}",
             kind="error",
         )
 
@@ -1678,12 +1684,13 @@ def _handle_renderer_settings_command(
             try:
                 accepted = enqueue(provider_delete_command)
             except Exception as exc:
+                error_detail = _exc_detail_log(
+                    exc, tag="provider_delete_history_enqueue_failed"
+                )
                 return {
                     **result,
                     **_status(
-                        f"供应商配置已删除，但会话历史后台清理未能启动：{_exc_detail_log(
-                            exc, tag='provider_delete_history_enqueue_failed'
-                        )}",
+                        f"供应商配置已删除，但会话历史后台清理未能启动：{error_detail}",
                         kind="warning",
                     ),
                     "providerDeleteHistoryEnqueueFailed": True,
