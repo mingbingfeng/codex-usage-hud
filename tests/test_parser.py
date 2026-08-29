@@ -23,10 +23,13 @@ from codex_usage_hud.core.parser import (
     JsonlTailState,
     RequestTokens,
     SseRequestStateMachine,
+    active_output_tail,
+    classify_gap,
     command_execution_text,
     extract_log_field,
     extract_session_thread_identity,
     parse_timestamp,
+    tool_command_text,
 )
 from codex_usage_hud.core.calculator import UsageCalculator
 
@@ -1527,3 +1530,305 @@ class MultiAgentSessionMetaTests(unittest.TestCase):
         self.assertEqual(parsed.agent_nickname, "Singer")
         self.assertTrue(parsed.is_subagent)
 
+
+class ActivityExecutionFeedTests(unittest.TestCase):
+    """WP feed 回归：剥壳命令、parsed_cmd、折叠标题、FileChange、active_tail。"""
+
+    @staticmethod
+    def _dated(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        for index, item in enumerate(records, 1):
+            item["_line"] = index
+            item["_dt"] = parse_timestamp(item["timestamp"])
+        return records
+
+    def test_command_execution_text_prefers_parsed_cmd(self) -> None:
+        item = {
+            "type": "CommandExecution",
+            "command": [
+                "D:\\Program Files\\PowerShell\\7\\pwsh.exe",
+                "-Command",
+                "git status --short",
+            ],
+            "parsed_cmd": [{"type": "unknown", "cmd": "git status --short"}],
+        }
+
+        self.assertEqual(command_execution_text(item), "git status --short")
+
+    def test_command_execution_text_strips_full_path_shell_wrapper(self) -> None:
+        # 无 parsed_cmd 时回退 command 数组：完整路径 pwsh 包装也要剥掉。
+        item = {
+            "type": "CommandExecution",
+            "command": [
+                "D:\\Program Files\\PowerShell\\7\\pwsh.exe",
+                "-Command",
+                "pytest -x -q",
+            ],
+        }
+
+        self.assertEqual(command_execution_text(item), "pytest -x -q")
+
+    def test_tool_command_text_extracts_cmd_from_js_glue_input(self) -> None:
+        payload = {
+            "name": "exec",
+            "input": (
+                "const r = await tools.exec_command({\n"
+                "  cmd: 'hud-live-long-command',\n"
+                "  workdir: 'E:\\\\demo',\n"
+                "})"
+            ),
+        }
+
+        self.assertEqual(tool_command_text(payload), "hud-live-long-command")
+
+    def test_activity_steps_backfill_completion_attributes(self) -> None:
+        parser = JsonlSessionParser()
+        records = self._dated(
+            [
+                record("2026-08-29T02:00:00Z", "event_msg", {"type": "task_started"}),
+                record(
+                    "2026-08-29T02:00:01Z",
+                    "response_item",
+                    {
+                        "type": "custom_tool_call",
+                        "name": "exec",
+                        "call_id": "call-1",
+                        "input": json.dumps({"cmd": "hud-long-running"}),
+                    },
+                ),
+                record(
+                    "2026-08-29T02:00:02Z",
+                    "event_msg",
+                    {
+                        "type": "item_completed",
+                        "item": {
+                            "id": "exec-1",
+                            "type": "CommandExecution",
+                            "command": [
+                                "D:\\Program Files\\PowerShell\\7\\pwsh.exe",
+                                "-Command",
+                                "hud-long-running",
+                            ],
+                            "parsed_cmd": [
+                                {"type": "unknown", "cmd": "hud-long-running"}
+                            ],
+                            "status": "completed",
+                            "exit_code": 0,
+                            "formatted_output": "line-1\r\nline-2\r\nline-3\r\nline-4\r\n",
+                            "duration": {"secs": 24, "nanos": 481244700},
+                        },
+                    },
+                ),
+                record(
+                    "2026-08-29T02:00:03Z",
+                    "response_item",
+                    {
+                        "type": "custom_tool_call_output",
+                        "call_id": "call-1",
+                        "output": "exit code: 0",
+                    },
+                ),
+            ]
+        )
+
+        steps = parser.activity_steps(records, task_started_index=0)
+
+        self.assertEqual(len(steps), 1)
+        step = steps[0]
+        self.assertEqual(step.status, "completed")
+        self.assertEqual(step.detail, "hud-long-running")
+        # formatted_output 优先，且不被 custom_tool_call_output 原始串覆盖。
+        self.assertEqual(step.output, "line-1 line-2 line-3 line-4")
+        self.assertEqual(step.active_tail, "line-2\nline-3\nline-4")
+        self.assertEqual(step.exit_code, 0)
+        self.assertEqual(step.duration_text, "24s")
+        self.assertEqual(step.command_raw, "hud-long-running")
+
+    def test_active_output_tail_keeps_last_three_lines_with_newlines(self) -> None:
+        text = "a\r\nb\r\nc\r\nd\r\n\r\n"
+
+        self.assertEqual(active_output_tail(text), "b\nc\nd")
+        self.assertEqual(active_output_tail(""), "")
+
+    def test_failed_command_prefers_stderr_and_keeps_exit_code(self) -> None:
+        parser = JsonlSessionParser()
+        records = self._dated(
+            [
+                record("2026-08-29T02:00:00Z", "event_msg", {"type": "task_started"}),
+                record(
+                    "2026-08-29T02:00:01Z",
+                    "event_msg",
+                    {
+                        "type": "item_completed",
+                        "item": {
+                            "id": "exec-2",
+                            "type": "CommandExecution",
+                            "command": ["pwsh.exe", "-Command", "hud-nope"],
+                            "parsed_cmd": [{"cmd": "hud-nope"}],
+                            "status": "failed",
+                            "exit_code": 1,
+                            "stdout": "",
+                            "stderr": "command not found",
+                        },
+                    },
+                ),
+            ]
+        )
+
+        steps = parser.activity_steps(records, task_started_index=0)
+
+        self.assertEqual(len(steps), 1)
+        step = steps[0]
+        self.assertEqual(step.title, "命令失败")
+        self.assertEqual(step.status, "failed")
+        self.assertEqual(step.exit_code, 1)
+        self.assertEqual(step.output, "command not found")
+        self.assertEqual(step.active_tail, "command not found")
+
+    def test_reasoning_summary_titles_become_steps(self) -> None:
+        parser = JsonlSessionParser()
+        records = self._dated(
+            [
+                record("2026-08-29T02:00:00Z", "event_msg", {"type": "task_started"}),
+                record(
+                    "2026-08-29T02:00:01Z",
+                    "event_msg",
+                    {
+                        "type": "item_completed",
+                        "item": {
+                            "type": "Reasoning",
+                            "id": "rs-1",
+                            "summary_text": [
+                                "**读取 AGENTS.md 前 8 行**",
+                                "**Planning next step**",
+                            ],
+                        },
+                    },
+                ),
+            ]
+        )
+
+        steps = parser.activity_steps(records, task_started_index=0)
+
+        self.assertEqual(len(steps), 1)
+        self.assertEqual(steps[0].title, "思考")
+        self.assertEqual(steps[0].detail, "读取 AGENTS.md 前 8 行")
+        self.assertEqual(steps[0].status, "completed")
+
+    def test_response_item_reasoning_title_is_fallback_step(self) -> None:
+        parser = JsonlSessionParser()
+        records = self._dated(
+            [
+                record("2026-08-29T02:00:00Z", "event_msg", {"type": "task_started"}),
+                record(
+                    "2026-08-29T02:00:01Z",
+                    "response_item",
+                    {
+                        "type": "reasoning",
+                        "summary": [
+                            {"type": "summary_text", "text": "**准备补丁**"},
+                        ],
+                    },
+                ),
+            ]
+        )
+
+        steps = parser.activity_steps(records, task_started_index=0)
+
+        self.assertEqual(len(steps), 1)
+        self.assertEqual(steps[0].title, "思考")
+        self.assertEqual(steps[0].detail, "准备补丁")
+
+    def test_completed_reasoning_event_preferred_over_response_item(self) -> None:
+        parser = JsonlSessionParser()
+        records = self._dated(
+            [
+                record("2026-08-29T02:00:00Z", "event_msg", {"type": "task_started"}),
+                record(
+                    "2026-08-29T02:00:01Z",
+                    "response_item",
+                    {
+                        "type": "reasoning",
+                        "summary": [
+                            {"type": "summary_text", "text": "**Raw draft**"},
+                        ],
+                    },
+                ),
+                record(
+                    "2026-08-29T02:00:02Z",
+                    "event_msg",
+                    {
+                        "type": "item_completed",
+                        "item": {
+                            "type": "Reasoning",
+                            "id": "rs-2",
+                            "summary_text": ["**Final heading**"],
+                        },
+                    },
+                ),
+            ]
+        )
+
+        steps = parser.activity_steps(records, task_started_index=0)
+
+        self.assertEqual(len(steps), 1)
+        self.assertEqual(steps[0].detail, "Final heading")
+
+    def test_file_change_item_becomes_edit_step(self) -> None:
+        parser = JsonlSessionParser()
+        records = self._dated(
+            [
+                record("2026-08-29T02:00:00Z", "event_msg", {"type": "task_started"}),
+                record(
+                    "2026-08-29T02:00:01Z",
+                    "event_msg",
+                    {
+                        "type": "item_completed",
+                        "item": {
+                            "id": "fc-1",
+                            "type": "FileChange",
+                            "status": "completed",
+                            "changes": {
+                                "E:\\Project\\demo\\tmp\\hud-observe.txt": {
+                                    "type": "add",
+                                    "content": "desktop-observe-ok\n",
+                                    "unified_diff": "",
+                                }
+                            },
+                        },
+                    },
+                ),
+            ]
+        )
+
+        steps = parser.activity_steps(records, task_started_index=0)
+
+        self.assertEqual(len(steps), 1)
+        step = steps[0]
+        self.assertEqual(step.title, "编辑文件")
+        self.assertEqual(step.detail, "hud-observe.txt")
+        self.assertEqual(step.status, "completed")
+        self.assertEqual(step.output, "hud-observe.txt +1")
+        self.assertEqual(step.tool_name, "apply_patch")
+
+    def test_latest_activity_keeps_request_user_input_classification(self) -> None:
+        parser = JsonlSessionParser()
+        records = self._dated(
+            [
+                record("2026-08-29T02:00:00Z", "event_msg", {"type": "task_started"}),
+                record(
+                    "2026-08-29T02:00:01Z",
+                    "response_item",
+                    {
+                        "type": "custom_tool_call",
+                        "name": "request_user_input",
+                        "call_id": "wait-1",
+                        "input": json.dumps({"prompt": "允许执行？"}),
+                    },
+                ),
+            ]
+        )
+
+        # 等确认分类的正源是 activity.detail 前缀（_work_status_from_snapshot）。
+        activity = parser.latest_activity(records)
+        self.assertEqual(activity.kind, "tool call")
+        self.assertTrue(activity.detail.startswith("request_user_input"))

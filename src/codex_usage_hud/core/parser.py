@@ -103,6 +103,28 @@ def reasoning_text(payload: Mapping[str, Any]) -> str:
     return " ".join(part for part in parts if part)
 
 
+def reasoning_title_text(value: Any) -> str:
+    """Strip markdown emphasis from a reasoning summary heading."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"\*\*(.+?)\*\*", r"\1", text, flags=re.DOTALL)
+    text = text.replace("**", "").replace("`", "")
+    text = re.sub(r"^#+\s*", "", text)
+    return compact_text(text, 90)
+
+
+def reasoning_summary_title(payload: Mapping[str, Any]) -> str:
+    """Return the first de-markdowned reasoning summary heading, if any."""
+    summary = payload.get("summary_text")
+    if isinstance(summary, Sequence) and not isinstance(summary, (str, bytes, bytearray)):
+        for entry in summary:
+            title = reasoning_title_text(entry)
+            if title:
+                return title
+    return reasoning_title_text(reasoning_text(payload))
+
+
 def _tool_argument_value(payload: Mapping[str, Any]) -> Any:
     """Return tool arguments across the legacy and current JSONL shapes."""
     for key in ("arguments", "input", "parameters"):
@@ -170,6 +192,10 @@ def _shell_launcher(value: str) -> bool:
     name = str(value or "").strip().casefold()
     if name.endswith(".exe"):
         name = name[: -len(".exe")]
+    # Launcher tokens arrive as absolute paths on Windows
+    # (D:\Program Files\PowerShell\7\pwsh), so compare the final path
+    # segment. Splitting on both separators keeps /-style paths working.
+    name = re.split(r"[/\\]", name)[-1]
     return name in _SHELL_LAUNCHERS
 
 
@@ -203,16 +229,67 @@ def _normalise_command_parts(parts: Sequence[str]) -> str:
     return " ".join(values)
 
 
-def command_execution_text(item: Mapping[str, Any]) -> str:
+def _parsed_cmd_segments(item: Mapping[str, Any]) -> list[str]:
+    """Return non-empty ``parsed_cmd[].cmd`` segments of a CommandExecution item.
+
+    Codex records the shell-stripped command here for every execution, which
+    is cleaner than the raw ``command`` argv that still carries the full
+    pwsh/bash launcher path.
+    """
+    parsed = item.get("parsed_cmd")
+    if not isinstance(parsed, Sequence) or isinstance(parsed, (str, bytes, bytearray)):
+        return []
+    segments: list[str] = []
+    for entry in parsed:
+        if isinstance(entry, Mapping):
+            cmd = str(entry.get("cmd") or "").strip()
+            if cmd:
+                segments.append(cmd)
+    return segments
+
+
+def command_execution_text(item: Mapping[str, Any], limit: int = 200) -> str:
     """Extract a readable command from a CommandExecution item."""
+    segments = _parsed_cmd_segments(item)
+    if segments:
+        return compact_text(" ".join(segments), limit)
     value = item.get("command") or item.get("cmd") or ""
     parts = _command_parts(value)
     if parts:
         value = _normalise_command_parts(parts)
-    return compact_text(value, 140)
+    return compact_text(value, limit)
 
 
-def tool_command_text(payload: Mapping[str, Any]) -> str:
+def command_execution_raw_text(item: Mapping[str, Any], limit: int = 2000) -> str:
+    """Return the un-truncated command text for tooltip and clipboard use."""
+    segments = _parsed_cmd_segments(item)
+    if segments:
+        text = " ".join(segments)
+    else:
+        value = item.get("command") or item.get("cmd") or ""
+        parts = _command_parts(value)
+        text = _normalise_command_parts(parts) if parts else str(value)
+    return text[:limit] if text else ""
+
+
+_JS_CMD_ARGUMENT_RE = re.compile(r"\bcmd\s*:\s*(['\"])(.*?)\1", re.DOTALL)
+_PATCH_BLOCK_RE = re.compile(r"\*\*\* Begin Patch.*?(?:\*\*\* End Patch|$)", re.DOTALL)
+_PATCH_TARGET_RE = re.compile(r"(?:Add|Update|Delete) File:\s*([^\r\n\"]+)")
+
+
+def _patch_tool_texts(text: str) -> tuple[str, str] | None:
+    """Split an apply_patch JS input into (compact detail, raw patch text)."""
+    match = _PATCH_BLOCK_RE.search(text)
+    if not match:
+        return None
+    block = match.group(0)
+    target = _PATCH_TARGET_RE.search(block)
+    name = _file_change_basename(target.group(1).strip()) if target else ""
+    detail = f"apply_patch {name}".strip()
+    return detail, block[:2000]
+
+
+def tool_command_text(payload: Mapping[str, Any], limit: int = 200) -> str:
     """Extract a command from function/custom tool arguments when present."""
     value = _tool_argument_value(payload)
     mapped = _mapping_from_tool_arguments(value)
@@ -220,7 +297,157 @@ def tool_command_text(payload: Mapping[str, Any]) -> str:
         value = mapped.get("command") or mapped.get("cmd") or value
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         value = " ".join(str(part) for part in value if part)
-    return compact_text(value, 140)
+    text = str(value or "")
+    if mapped is None and text:
+        # JS glue inputs (`const r = await tools.exec_command({cmd: '...'})`)
+        # are not JSON; pull the wrapped command out so running steps show the
+        # user-facing command instead of the harness source line.
+        match = _JS_CMD_ARGUMENT_RE.search(text)
+        if match:
+            text = match.group(2).replace("\\'", "'").replace('\\"', '"')
+        else:
+            patch_texts = _patch_tool_texts(text)
+            if patch_texts is not None:
+                return compact_text(patch_texts[0], limit)
+    return compact_text(text, limit)
+
+
+def tool_command_raw_text(payload: Mapping[str, Any], limit: int = 2000) -> str:
+    """Return the un-truncated tool command for tooltip and clipboard use."""
+    value = _tool_argument_value(payload)
+    mapped = _mapping_from_tool_arguments(value)
+    if mapped is not None:
+        value = mapped.get("command") or mapped.get("cmd") or value
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        value = " ".join(str(part) for part in value if part)
+    text = str(value or "")
+    if mapped is None and text:
+        match = _JS_CMD_ARGUMENT_RE.search(text)
+        if match:
+            text = match.group(2).replace("\\'", "'").replace('\\"', '"')
+        else:
+            patch_texts = _patch_tool_texts(text)
+            if patch_texts is not None:
+                return patch_texts[1][:limit]
+    return text[:limit] if text else ""
+
+
+def command_execution_output(item: Mapping[str, Any]) -> str:
+    """Pick the best completed-command output, preferring structured fields.
+
+    ``formatted_output`` keeps the line structure Codex already rendered; on
+    failure the stderr stream is the payload the user actually needs.
+    """
+    failed = str(item.get("status") or "").casefold() in {"failed", "error"}
+    if failed:
+        candidates = (
+            item.get("stderr"),
+            item.get("formatted_output"),
+            item.get("stdout"),
+            item.get("aggregated_output"),
+        )
+    else:
+        candidates = (
+            item.get("formatted_output"),
+            item.get("stdout"),
+            item.get("aggregated_output"),
+        )
+    for candidate in candidates:
+        text = str(candidate or "")
+        if text.strip():
+            return text
+    return ""
+
+
+def active_output_tail(
+    text: str,
+    *,
+    lines: int = 3,
+    width: int = 120,
+) -> str:
+    """Return the last command output lines joined by real newlines."""
+    if not text:
+        return ""
+    raw_lines = re.split(r"\r?\n", str(text))
+    while raw_lines and not raw_lines[-1].strip():
+        raw_lines.pop()
+    if not raw_lines:
+        return ""
+    tail = [compact_text(line, width) for line in raw_lines[-lines:]]
+    return "\n".join(line for line in tail if line)
+
+
+def _file_change_basename(path: Any) -> str:
+    return str(path or "").replace("\\", "/").rsplit("/", 1)[-1]
+
+
+def _exit_code_or_none(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def file_change_output(changes: Mapping[str, Any]) -> str:
+    """Summarize one FileChange item as per-file +/- line counts."""
+    parts: list[str] = []
+    for path, change in changes.items():
+        name = _file_change_basename(path)
+        if not isinstance(change, Mapping):
+            parts.append(name)
+            continue
+        diff = str(change.get("unified_diff") or "")
+        if diff:
+            added = sum(
+                1
+                for line in diff.splitlines()
+                if line.startswith("+") and not line.startswith("+++")
+            )
+            removed = sum(
+                1
+                for line in diff.splitlines()
+                if line.startswith("-") and not line.startswith("---")
+            )
+            parts.append(f"{name} +{added}/-{removed}")
+            continue
+        kind = str(change.get("type") or "").casefold()
+        content = change.get("content")
+        if kind == "add" and content:
+            parts.append(f"{name} +{len(str(content).splitlines())}")
+        elif kind == "delete":
+            parts.append(f"{name} 删除")
+        else:
+            parts.append(name)
+    return compact_text(" · ".join(parts), 220)
+
+
+def _command_duration_text(duration: Any) -> str:
+    seconds: float | None = None
+    if isinstance(duration, Mapping):
+        try:
+            seconds = float(duration.get("secs") or 0) + float(
+                duration.get("nanos") or 0
+            ) / 1_000_000_000
+        except (TypeError, ValueError):
+            seconds = None
+    elif isinstance(duration, (int, float)):
+        seconds = float(duration)
+    if seconds is None or seconds < 0:
+        return ""
+    total = max(0, int(round(seconds)))
+    if total < 60:
+        return f"{total}s"
+    minutes, rest = divmod(total, 60)
+    if minutes < 60:
+        return f"{minutes}m{rest:02d}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h{minutes:02d}m{rest:02d}s"
 
 
 def _activity_from_record(record: Mapping[str, Any]) -> "Activity | None":
@@ -268,6 +495,12 @@ def _activity_from_record(record: Mapping[str, Any]) -> "Activity | None":
                     timestamp,
                 )
             if item_type == "reasoning":
+                if payload_type == "item_completed":
+                    return Activity(
+                        "reasoning",
+                        reasoning_summary_title(item) or "正在思考",
+                        timestamp,
+                    )
                 return Activity("reasoning", "正在思考", timestamp)
     if record_type == "response_item" and payload_type == "message":
         if is_turn_aborted_message(payload):
@@ -277,7 +510,9 @@ def _activity_from_record(record: Mapping[str, Any]) -> "Activity | None":
             return None
         return Activity("assistant", compact_text(message_text(payload), 160), timestamp)
     if record_type == "response_item" and payload_type == "reasoning":
-        return Activity("reasoning", "正在思考", timestamp)
+        return Activity(
+            "reasoning", reasoning_summary_title(payload) or "正在思考", timestamp
+        )
     if record_type == "event_msg" and payload_type == "task_started":
         return Activity("reasoning", "正在思考", timestamp)
     return None
@@ -551,6 +786,13 @@ class ActivityStep:
     line: int = 0
     tool_name: str = ""
     output: str = ""
+    # Backfilled the instant the command completes: local display needs the
+    # exit code, the newline-preserving output tail, and the rounded duration
+    # because Codex emits zero events between start and completion.
+    exit_code: int | None = None
+    active_tail: str = ""
+    duration_text: str = ""
+    command_raw: str = ""
 
 
 @dataclass
@@ -587,6 +829,9 @@ class WorkStatusItem:
     task_started_at: datetime | None = None
     started_at: datetime | None = None
     updated_at: datetime | None = None
+    # Timestamp of the newest assistant output; the bubble feed compares it
+    # against task_started_at to detect "thinking, no fresh answer yet".
+    last_output_at: datetime | None = None
     current: bool = False
     pending_accounting: bool = False
     draft_text: str = ""
@@ -2374,6 +2619,20 @@ class JsonlSessionParser:
         steps: list[ActivityStep] = []
         open_indexes: list[int] = []
 
+        # Desktop builds report reasoning titles through event_msg
+        # item_completed Reasoning records; raw response_item reasoning entries
+        # are the fallback for sessions that never emit them. Prefer the
+        # completed form so a single reasoning round never yields two steps.
+        prefer_completed_reasoning = any(
+            record.get("type") == "event_msg"
+            and isinstance(record.get("payload"), Mapping)
+            and str(
+                (record["payload"].get("item") or {}).get("type") or ""
+            ).casefold()
+            == "reasoning"
+            for record in records[start_index:]
+        )
+
         def add_open_step(
             record: Mapping[str, Any],
             *,
@@ -2381,6 +2640,7 @@ class JsonlSessionParser:
             detail: str,
             call_id: str,
             tool_name: str = "",
+            command_raw: str = "",
         ) -> None:
             steps.append(
                 ActivityStep(
@@ -2391,6 +2651,7 @@ class JsonlSessionParser:
                     call_id=call_id,
                     line=_as_int(record.get("_line")),
                     tool_name=tool_name,
+                    command_raw=command_raw,
                 )
             )
             open_indexes.append(len(steps) - 1)
@@ -2456,6 +2717,7 @@ class JsonlSessionParser:
                 raw_name = _tool_call_name(payload)
                 name = raw_name.casefold()
                 command = tool_command_text(payload)
+                command_raw = tool_command_raw_text(payload)
                 tool_call_id = str(
                     payload.get("call_id") or payload.get("id") or ""
                 ).strip()
@@ -2472,6 +2734,8 @@ class JsonlSessionParser:
                         step.tool_name = raw_name
                     if command and not step.detail:
                         step.detail = command
+                    if command_raw and not step.command_raw:
+                        step.command_raw = command_raw
                     continue
                 title = (
                     "执行命令"
@@ -2486,7 +2750,23 @@ class JsonlSessionParser:
                         payload.get("call_id") or payload.get("id") or ""
                     ).strip(),
                     tool_name=raw_name,
+                    command_raw=command_raw,
                 )
+                continue
+            if record_type == "response_item" and payload_type == "reasoning":
+                if prefer_completed_reasoning:
+                    continue
+                title = reasoning_summary_title(payload)
+                if title:
+                    steps.append(
+                        ActivityStep(
+                            timestamp=record.get("_dt"),
+                            title="思考",
+                            detail=title,
+                            status="completed",
+                            line=_as_int(record.get("_line")),
+                        )
+                    )
                 continue
             if record_type == "event_msg" and payload_type in {
                 "item_started",
@@ -2497,9 +2777,48 @@ class JsonlSessionParser:
                 if not isinstance(item, Mapping):
                     continue
                 item_type = str(item.get("type") or "").replace("_", "").casefold()
+                if item_type == "reasoning":
+                    if payload_type == "item_completed":
+                        title = reasoning_summary_title(item)
+                        if title:
+                            steps.append(
+                                ActivityStep(
+                                    timestamp=record.get("_dt"),
+                                    title="思考",
+                                    detail=title,
+                                    status="completed",
+                                    line=_as_int(record.get("_line")),
+                                )
+                            )
+                    continue
+                if item_type == "filechange":
+                    if payload_type == "item_completed":
+                        changes = item.get("changes") or {}
+                        if isinstance(changes, Mapping) and changes:
+                            failed = str(item.get("status") or "").casefold() in {
+                                "failed",
+                                "error",
+                            }
+                            names = " · ".join(
+                                _file_change_basename(path) for path in changes
+                            )
+                            steps.append(
+                                ActivityStep(
+                                    timestamp=record.get("_dt"),
+                                    title="编辑文件",
+                                    detail=compact_text(names, 200),
+                                    status="failed" if failed else "completed",
+                                    call_id=str(item.get("id") or "").strip(),
+                                    line=_as_int(record.get("_line")),
+                                    tool_name="apply_patch",
+                                    output=file_change_output(changes),
+                                )
+                            )
+                    continue
                 if item_type != "commandexecution":
                     continue
                 command = command_execution_text(item)
+                command_raw = command_execution_raw_text(item)
                 completed = payload_type == "item_completed"
                 failed = str(item.get("status") or "").casefold() in {
                     "failed",
@@ -2514,11 +2833,14 @@ class JsonlSessionParser:
                     step = steps[index]
                     step.timestamp = record.get("_dt") or step.timestamp
                     step.detail = command or step.detail
+                    if command_raw:
+                        step.command_raw = command_raw
                     step.status = "running"
                     step.line = _as_int(record.get("_line"), step.line)
                     continue
                 if index is None or not completed:
                     if completed:
+                        output_text = command_execution_output(item)
                         steps.append(
                             ActivityStep(
                                 timestamp=record.get("_dt"),
@@ -2527,12 +2849,13 @@ class JsonlSessionParser:
                                 status="failed" if failed else "completed",
                                 call_id=str(item.get("id") or "").strip(),
                                 line=_as_int(record.get("_line")),
-                                output=compact_text(
-                                    item.get("aggregated_output")
-                                    or item.get("output")
-                                    or "",
-                                    220,
+                                output=compact_text(output_text, 220),
+                                exit_code=_exit_code_or_none(item.get("exit_code")),
+                                active_tail=active_output_tail(output_text),
+                                duration_text=_command_duration_text(
+                                    item.get("duration")
                                 ),
+                                command_raw=command_raw,
                             )
                         )
                     else:
@@ -2541,6 +2864,7 @@ class JsonlSessionParser:
                             title="执行命令",
                             detail=command,
                             call_id=str(item.get("id") or "").strip(),
+                            command_raw=command_raw,
                         )
                     continue
                 step = steps[index]
@@ -2551,10 +2875,13 @@ class JsonlSessionParser:
                 if not step.call_id:
                     step.call_id = str(item.get("id") or "").strip()
                 step.line = _as_int(record.get("_line"), step.line)
-                step.output = compact_text(
-                    item.get("aggregated_output") or item.get("output") or "",
-                    220,
-                )
+                if command_raw:
+                    step.command_raw = command_raw
+                output_text = command_execution_output(item)
+                step.output = compact_text(output_text, 220)
+                step.exit_code = _exit_code_or_none(item.get("exit_code"))
+                step.active_tail = active_output_tail(output_text)
+                step.duration_text = _command_duration_text(item.get("duration"))
                 close_open_step(index)
                 continue
             if record_type == "response_item" and payload_type in {
@@ -2569,10 +2896,14 @@ class JsonlSessionParser:
                     if steps[index].status not in {"failed", "completed"}:
                         steps[index].status = "completed"
                     steps[index].timestamp = record.get("_dt") or steps[index].timestamp
-                    steps[index].output = compact_text(
-                        payload.get("output") or payload.get("result") or "",
-                        220,
-                    )
+                    if not steps[index].output:
+                        # Structured CommandExecution output is preferred; the
+                        # raw tool-output string is only a fallback for
+                        # sessions that never emit the completed item.
+                        steps[index].output = compact_text(
+                            payload.get("output") or payload.get("result") or "",
+                            220,
+                        )
                     close_open_step(index)
 
         if any(

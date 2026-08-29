@@ -137,6 +137,7 @@ from codex_usage_hud.core.parser import (
 )
 from codex_usage_hud.ui.work_overlay_qt import (
     WORK_OVERLAY_QT_TRANSITION_ANIMATIONS_ENABLED,
+    WORK_OVERLAY_REST_CARD_EXTRA_HEIGHT,
     WORK_OVERLAY_STACK_SPACING,
     WORK_OVERLAY_STATE_READ_FAILURE_GRACE_SECONDS,
     WORK_OVERLAY_STATE_READ_RETRY_MS,
@@ -145,6 +146,10 @@ from codex_usage_hud.ui.work_overlay_qt import (
     _completed_badge_palette,
     _completed_pending_caption_opacity,
     _completed_pending_finish_progress,
+    _overlay_feed_active,
+    _overlay_feed_rows,
+    _overlay_feed_spinner_frame,
+    _overlay_footer_selection,
     _completed_pending_launch_progress,
     _completed_pending_launch_scale,
     _completed_pending_particle_state,
@@ -9008,7 +9013,12 @@ class WorkOverlayTransitionTests(unittest.TestCase):
         rest = _find_item_rect(items, "rest", "card", layout_width=430)
         next_card = _find_item_rect(items, "next", "card", layout_width=430)
 
-        self.assertEqual(rest[3], 110.0)
+        # The rest card reserves extra slot height so its action button row is
+        # never clipped by the shared transition card height.
+        self.assertEqual(
+            rest[3],
+            110.0 + float(WORK_OVERLAY_REST_CARD_EXTRA_HEIGHT),
+        )
         self.assertEqual(
             next_card[1],
             rest[1] + rest[3] + float(WORK_OVERLAY_STACK_SPACING),
@@ -21103,3 +21113,218 @@ class DaemonLifecycleTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WorkOverlayFeedProjectionTests(unittest.TestCase):
+    """WP feed 纯函数回归：feed 激活判定、行型、footer 优先级选择。"""
+
+    @staticmethod
+    def _iso(minutes_ago: float) -> str:
+        from datetime import datetime, timedelta, timezone
+
+        moment = datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)
+        return moment.isoformat()
+
+    @staticmethod
+    def _step(
+        title: str,
+        detail: str,
+        status: str,
+        *,
+        minutes_ago: float = 1.0,
+        **extra: object,
+    ) -> dict[str, object]:
+        step = {
+            "title": title,
+            "detail": detail,
+            "status": status,
+            "timestamp": WorkOverlayFeedProjectionTests._iso(minutes_ago),
+            "toolName": "exec",
+            "callId": "c1",
+            "line": 1,
+            "output": "",
+            "activeTail": "",
+            "exitCode": None,
+            "durationText": "",
+            "commandRaw": detail,
+        }
+        step.update(extra)
+        return step
+
+    def _item(self, **overrides: object) -> dict[str, object]:
+        item = {
+            "id": "s1",
+            "kind": "session",
+            "status": "tool",
+            "title": "demo",
+            "taskStartedAt": self._iso(5.0),
+            "lastOutputAt": self._iso(6.0),
+            "lastText": "上一次回答",
+            "activitySteps": (
+                self._step("思考", "梳理执行顺序", "completed", minutes_ago=4.0),
+                self._step("执行命令", "pytest -x -q", "running", minutes_ago=0.5),
+            ),
+        }
+        item.update(overrides)
+        return item
+
+    def test_feed_active_running_step_and_stale_output(self) -> None:
+        self.assertTrue(_overlay_feed_active(self._item()))
+        # 无新 agent_message（lastOutputAt 早于 taskStartedAt）→ 思考期 feed。
+        thinking = self._item(
+            activitySteps=(self._step("思考", "阅读计划", "completed", minutes_ago=0.2),)
+        )
+        self.assertTrue(_overlay_feed_active(thinking))
+
+    def test_feed_inactive_after_fresh_output_without_running_step(self) -> None:
+        done = self._item(
+            status="recent",
+            lastOutputAt=self._iso(0.1),
+            lastText="任务完成",
+            activitySteps=(self._step("命令完成", "pytest -x -q", "completed"),),
+        )
+
+        self.assertFalse(_overlay_feed_active(done))
+
+    def test_feed_holds_for_failed_last_step_and_waiting_user(self) -> None:
+        failed = self._item(
+            activitySteps=(self._step("命令失败", "hud-nope", "failed", exitCode=1),)
+        )
+        waiting = self._item(
+            status="waiting_user",
+            activitySteps=(),
+        )
+
+        self.assertTrue(_overlay_feed_active(failed))
+        self.assertTrue(_overlay_feed_active(waiting))
+
+    def test_feed_rows_running_command_shapes(self) -> None:
+        rows = _overlay_feed_rows(self._item(), spinner_frame="⠙", now=None)
+
+        kinds = [row["kind"] for row in rows]
+        self.assertIn("cmd", kinds)
+        self.assertIn("live", kinds)
+        cmd_row = next(row for row in rows if row["kind"] == "cmd")
+        self.assertEqual(cmd_row["action"], "copy_command")
+        self.assertEqual(cmd_row["command"], "pytest -x -q")
+        live_row = next(row for row in rows if row["kind"] == "live")
+        self.assertEqual(live_row["action"], "peek_output")
+        self.assertIn("回输出", live_row["text"])
+        self.assertIn("运行中", live_row["text"])
+
+    def test_feed_rows_completed_output_tail_and_reasoning_title(self) -> None:
+        item = self._item(
+            status="running",
+            activitySteps=(
+                self._step("思考", "梳理执行顺序", "completed", minutes_ago=2.0),
+                self._step(
+                    "命令完成",
+                    "git status",
+                    "completed",
+                    minutes_ago=1.0,
+                    activeTail="nothing to commit\nworking tree clean",
+                    durationText="1s",
+                ),
+            ),
+        )
+
+        rows = _overlay_feed_rows(item, spinner_frame="⠙")
+
+        # 3 行上限：思考标题行被更近的完成/输出/思考中行挤出窗口。
+        self.assertEqual(
+            [row["kind"] for row in rows],
+            ["done", "out", "live"],
+        )
+        self.assertEqual(rows[0]["text"], "✓ 命令：git status · 1s")
+        self.assertEqual(rows[1]["text"], "└ working tree clean")
+        self.assertIn("思考中", rows[2]["text"])
+
+        full_rows = _overlay_feed_rows(item, spinner_frame="⠙", max_rows=10)
+        self.assertTrue(
+            any(row["text"].startswith("▸ 梳理执行顺序") for row in full_rows)
+        )
+
+    def test_feed_rows_failed_step_includes_exit_code(self) -> None:
+        item = self._item(
+            activitySteps=(
+                self._step(
+                    "命令失败",
+                    "hud-nope",
+                    "failed",
+                    exitCode=1,
+                    activeTail="not recognized",
+                ),
+            )
+        )
+
+        rows = _overlay_feed_rows(item)
+
+        fail_row = next(row for row in rows if row["kind"] == "fail")
+        self.assertIn("✗", fail_row["text"])
+        self.assertIn("退出码 1", fail_row["text"])
+
+    def test_feed_rows_capped_at_three(self) -> None:
+        item = self._item(
+            status="running",
+            activitySteps=(
+                self._step("思考", "标题一", "completed", minutes_ago=5.0),
+                self._step("思考", "标题二", "completed", minutes_ago=4.0),
+                self._step("命令完成", "git status", "completed", minutes_ago=3.0),
+                self._step("执行命令", "pytest -x -q", "running", minutes_ago=0.2),
+            ),
+        )
+
+        self.assertEqual(len(_overlay_feed_rows(item)), 3)
+
+    def test_footer_selection_priority(self) -> None:
+        running = self._item()
+        kind, text = _overlay_footer_selection(running)
+        self.assertEqual(kind, "running")
+        self.assertIn("pytest -x -q", text)
+
+        waiting = self._item(
+            status="waiting_user",
+            activitySteps=(
+                self._step(
+                    "调用工具",
+                    "request_user_input {cmd: 'dangerous'}",
+                    "running",
+                    toolName="request_user_input",
+                ),
+            ),
+        )
+        kind, text = _overlay_footer_selection(waiting)
+        self.assertEqual(kind, "wait")
+        self.assertTrue(text.startswith("等确认"))
+
+        failed = self._item(
+            activitySteps=(
+                self._step("命令失败", "hud-nope", "failed", exitCode=1),
+            )
+        )
+        kind, text = _overlay_footer_selection(failed)
+        self.assertEqual(kind, "failed")
+        self.assertIn("退出码 1", text)
+
+        thinking = self._item(
+            activitySteps=(self._step("思考", "阅读计划", "completed"),)
+        )
+        kind, text = _overlay_footer_selection(thinking)
+        self.assertEqual(kind, "thinking")
+        self.assertEqual(text, "思考中 · 阅读计划")
+
+        finished = self._item(
+            status="recent",
+            activitySteps=(
+                self._step("思考", "收尾", "completed"),
+                self._step("命令完成", "git log", "completed"),
+            ),
+        )
+        kind, text = _overlay_footer_selection(finished)
+        self.assertEqual(kind, "plain")
+        self.assertEqual(text, "命令：git log")
+
+    def test_spinner_frame_respects_constant_toggle(self) -> None:
+        frame = _overlay_feed_spinner_frame(1)
+        self.assertTrue(frame == "" or isinstance(frame, str))
+        self.assertEqual(_overlay_feed_spinner_frame(-3), _overlay_feed_spinner_frame(0))

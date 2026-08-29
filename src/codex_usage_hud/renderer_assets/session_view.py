@@ -1239,8 +1239,8 @@ TEXT = r"""
     return !!rect && rect.width > 0 && rect.height > 0;
   }
 
-  function smallestActivityTextNode(scope, needle) {
-    if (!scope || !needle) return null;
+  function activityTextMatches(scope, needle) {
+    if (!scope || !needle) return [];
     const hudRoot = document.getElementById(rootId);
     const selectors = [
       "[data-content-search-unit-key]",
@@ -1271,7 +1271,39 @@ TEXT = r"""
       .sort((left, right) => (
         Number(right.visible) - Number(left.visible)
         || (left.text.length - needle.length) - (right.text.length - needle.length)
-      ))[0]?.node || null;
+      ));
+  }
+
+  // DOM_POSITION bits kept local so round-ordinal ordering never depends on
+  // the global Node constructor being present.
+  const DOM_POSITION_PRECEDING = 2;
+  const DOM_POSITION_FOLLOWING = 4;
+
+  function activityRoundOrdinal(node, scope, headers = null) {
+    // 1-based ordinal of the round a node sits in within a request turn, or 0
+    // when the boundary cannot be determined. Uses the same work-disclosure
+    // headers the disclosure fallback relies on: a node belongs to round k
+    // when it is contained in, or appears after, the k-th header.
+    if (!node) return 0;
+    const toggles = headers || activityWorkDisclosureToggles(scope);
+    if (!toggles.length) return 0;
+    let ordinal = 0;
+    for (const header of toggles) {
+      if (typeof header.contains === "function" && header.contains(node)) {
+        ordinal += 1;
+        break;
+      }
+      if (typeof node.compareDocumentPosition !== "function") break;
+      const bits = node.compareDocumentPosition(header);
+      if (bits & DOM_POSITION_FOLLOWING) {
+        ordinal += 1;
+        continue;
+      }
+      if (bits & DOM_POSITION_PRECEDING) break;
+      ordinal += 1;
+      break;
+    }
+    return ordinal;
   }
 
   function activityRoundNeedlePool(copyText, locateTexts) {
@@ -1295,22 +1327,44 @@ TEXT = r"""
   function findActivityRoundTarget(copyText, requestTarget, roundIndex = 0, locateTexts = []) {
     const needles = activityRoundNeedlePool(copyText, locateTexts);
     const requestScope = requestTarget?.turn || requestTarget?.unit || null;
-    const scopes = requestScope ? [requestScope] : [];
-    for (const scope of scopes) {
+    if (!requestScope) return null;
+    const expectedRound = Math.round(Number(roundIndex || 0));
+    const headers = activityWorkDisclosureToggles(requestScope);
+    const visibleMatches = [];
+    const hiddenMatches = [];
+    const seen = new Set();
+    for (const needle of needles) {
       // Prefer the first needle with a visible match: the longest copyText
       // needle often only exists in Codex's hidden search-index copy, while a
       // shorter line or another round entry (agent message, tool call) can
       // match the visible paragraph the user should actually see.
-      let hiddenMatch = null;
-      for (const needle of needles) {
-        const match = smallestActivityTextNode(scope, needle);
-        if (!match) continue;
-        if (visibleActivityNode(match) === match) return match;
-        if (!hiddenMatch) hiddenMatch = match;
+      for (const match of activityTextMatches(requestScope, needle)) {
+        if (seen.has(match.node)) continue;
+        seen.add(match.node);
+        if (visibleActivityNode(match.node) === match.node) visibleMatches.push(match.node);
+        else hiddenMatches.push(match.node);
       }
-      if (hiddenMatch) return hiddenMatch;
     }
-    return null;
+    const selectRoundAware = (list) => {
+      // The same tool output can appear in several rounds of a task, and the
+      // tightest text match would then land on the first occurrence instead of
+      // the requested one. Prefer a candidate whose round ordinal is closest
+      // to the requested round index.
+      if (expectedRound <= 0 || !list.length) return null;
+      const ordinals = list
+        .map((node) => ({ node, ordinal: activityRoundOrdinal(node, requestScope, headers) }))
+        .filter((entry) => entry.ordinal > 0)
+        .sort((left, right) => (
+          Math.abs(left.ordinal - expectedRound) - Math.abs(right.ordinal - expectedRound)
+          || left.ordinal - right.ordinal
+        ));
+      return ordinals[0]?.node || null;
+    };
+    return selectRoundAware(visibleMatches)
+      || visibleMatches[0]
+      || selectRoundAware(hiddenMatches)
+      || hiddenMatches[0]
+      || null;
   }
 
   function visibleActivityNode(node) {
@@ -1329,6 +1383,17 @@ TEXT = r"""
     const visibleNode = visibleActivityNode(node) || node;
     visibleNode.scrollIntoView?.({ block: "center", inline: "nearest", behavior });
     return visibleNode;
+  }
+
+  function activityTargetInViewport(node, timeline) {
+    if (!node || typeof node.getBoundingClientRect !== "function") return true;
+    const rect = node.getBoundingClientRect();
+    if (!rect || rect.height <= 0 || rect.width <= 0) return false;
+    const viewport = typeof timeline?.getBoundingClientRect === "function"
+      ? timeline.getBoundingClientRect()
+      : null;
+    if (!viewport || viewport.height <= 0) return true;
+    return rect.top < viewport.bottom - 2 && rect.bottom > viewport.top + 2;
   }
 
   function activityLooksLikeWorkDisclosure(node) {
@@ -1469,22 +1534,34 @@ TEXT = r"""
 
   function pulseActivityConversationTarget(target, roundIndex = 0) {
     if (!target) return;
-    const token = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    target.dataset.codexHudLocatePulse = token;
-    if (roundIndex) target.dataset.codexHudLocateRound = String(roundIndex);
-    target.animate?.(
-      [
-        { boxShadow: "0 0 0 0 rgba(243, 210, 122, 0)" },
-        { boxShadow: "0 0 0 3px rgba(243, 210, 122, .72)" },
-        { boxShadow: "0 0 0 8px rgba(243, 210, 122, 0)" },
-      ],
-      { duration: 1200, easing: "ease-out" },
-    );
-    ctx.lifecycle.timeout("conversation_locate_pulse", () => {
-      if (!target.isConnected || target.dataset.codexHudLocatePulse !== token) return;
-      delete target.dataset.codexHudLocatePulse;
-      delete target.dataset.codexHudLocateRound;
-    }, 1300);
+    // Pulse the enclosing round-scoped unit as well as the leaf so the
+    // highlight stays visible even when the matched text node is small.
+    const hudRoot = document.getElementById(rootId);
+    const container = target.closest?.("[data-content-search-unit-key]");
+    const pulseNodes = [];
+    if (container && container !== target && !hudRoot?.contains?.(container)) {
+      pulseNodes.push(container, target);
+    } else {
+      pulseNodes.push(target);
+    }
+    for (const node of pulseNodes) {
+      const token = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      node.dataset.codexHudLocatePulse = token;
+      if (roundIndex) node.dataset.codexHudLocateRound = String(roundIndex);
+      node.animate?.(
+        [
+          { boxShadow: "0 0 0 0 rgba(243, 210, 122, 0)" },
+          { boxShadow: "0 0 0 3px rgba(243, 210, 122, .72)" },
+          { boxShadow: "0 0 0 8px rgba(243, 210, 122, 0)" },
+        ],
+        { duration: 1200, easing: "ease-out" },
+      );
+      ctx.lifecycle.timeout("conversation_locate_pulse", () => {
+        if (!node.isConnected || node.dataset.codexHudLocatePulse !== token) return;
+        delete node.dataset.codexHudLocatePulse;
+        delete node.dataset.codexHudLocateRound;
+      }, 1300);
+    }
   }
 
   function scrollToActivityRequest(taskPrompt, behavior = "smooth") {
@@ -1601,6 +1678,18 @@ TEXT = r"""
     if (!target.isConnected) {
       finishActivityScroll(operation);
       return false;
+    }
+    // Virtualization can re-mount the turn after the smooth scroll settles and
+    // shift the target out of the viewport. Verify the final position and do
+    // one corrective auto scroll before pulsing.
+    if (!activityTargetInViewport(target, timeline)) {
+      target.scrollIntoView?.({ block: "center", inline: "nearest", behavior: "auto" });
+      if (!(await waitForActivityVirtualization(1, operation))) return false;
+      if (!activityScrollIsCurrent(operation)) return false;
+      if (!target.isConnected) {
+        finishActivityScroll(operation);
+        return false;
+      }
     }
     pulseActivityConversationTarget(target, roundIndex);
     finishActivityScroll(operation);

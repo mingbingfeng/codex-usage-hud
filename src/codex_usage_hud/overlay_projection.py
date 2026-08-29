@@ -64,6 +64,7 @@ def work_item_to_overlay_dict(item: WorkStatusItem) -> dict[str, object]:
         "taskStartedAt": _iso_or_empty(item.task_started_at),
         "startedAt": _iso_or_empty(item.started_at),
         "updatedAt": _iso_or_empty(item.updated_at),
+        "lastOutputAt": _iso_or_empty(getattr(item, "last_output_at", None)),
         "current": item.current,
         "pendingAccounting": item.pending_accounting,
         "draftText": getattr(item, "draft_text", ""),

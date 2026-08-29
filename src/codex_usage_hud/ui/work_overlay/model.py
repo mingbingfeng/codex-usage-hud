@@ -10,7 +10,11 @@ from typing import Any
 
 from ... import overlay_projection
 from ...core import parse_timestamp
-from .constants import WORK_OVERLAY_HOTSPOT_HOVER_ALPHA
+from .constants import (
+    WORK_OVERLAY_BODY_MAX_LINES,
+    WORK_OVERLAY_FEED_SPINNER_ENABLED,
+    WORK_OVERLAY_HOTSPOT_HOVER_ALPHA,
+)
 
 def _compact_work_text(value: object, limit: int) -> str:
     text = " ".join(str(value or "").split())
@@ -475,6 +479,260 @@ def _overlay_activity_tooltip(item: Mapping[str, object]) -> str:
     return "\n".join(_overlay_activity_step_texts(item))
 
 
+_FEED_SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+_FEED_ACTIVE_STATUSES = frozenset({"running", "active", "tool"})
+
+
+def _overlay_feed_spinner_frame(tick: int) -> str:
+    """Return the braille spinner glyph for the running feed rows."""
+    if not WORK_OVERLAY_FEED_SPINNER_ENABLED:
+        return ""
+    return _FEED_SPINNER_FRAMES[max(0, int(tick)) % len(_FEED_SPINNER_FRAMES)]
+
+
+def _overlay_step_elapsed_seconds(
+    step: Mapping[str, object],
+    now: datetime,
+) -> int:
+    """Local seconds since a step started; execution windows are event-silent."""
+    started_at = parse_timestamp(str(step.get("timestamp") or "").strip())
+    if started_at is None:
+        return 0
+    if started_at.tzinfo is None:
+        current = now.replace(tzinfo=None)
+    else:
+        current = now.astimezone(started_at.tzinfo)
+    return max(0, int((current - started_at).total_seconds()))
+
+
+def _overlay_output_is_stale(item: Mapping[str, object]) -> bool:
+    """Whether no fresh agent output arrived after the current task started."""
+    task_started_at = parse_timestamp(
+        str(item.get("taskStartedAt") or "").strip()
+    )
+    if task_started_at is None:
+        return False
+    last_output_at = parse_timestamp(str(item.get("lastOutputAt") or "").strip())
+    if last_output_at is None:
+        return True
+    return last_output_at < task_started_at
+
+
+def _overlay_feed_active(item: Mapping[str, object]) -> bool:
+    """Whether the bubble body should show the live activity feed.
+
+    Execution windows emit zero rollout events, so the feed is the only
+    surface that can show local progress; the output view returns as soon as
+    a fresh agent message lands and no step is left open.
+    """
+    status = str(item.get("status") or "").strip().lower()
+    steps = _overlay_activity_steps(item)
+    if any(
+        str(step.get("status") or "").strip().lower() == "running" for step in steps
+    ):
+        return True
+    if status == "waiting_user":
+        return True
+    if status in _FEED_ACTIVE_STATUSES:
+        if steps and str(steps[-1].get("status") or "").strip().lower() == "failed":
+            # 失败滞留：hold the feed so the failure stays visible until the
+            # next output arrives.
+            return True
+        if not str(item.get("lastText") or "").strip():
+            return True
+        return _overlay_output_is_stale(item)
+    return False
+
+
+def _overlay_feed_tail_line(step: Mapping[str, object]) -> str:
+    tail = str(step.get("activeTail") or "")
+    line = ""
+    for candidate in tail.splitlines():
+        candidate = candidate.strip()
+        if candidate:
+            line = candidate
+    return line
+
+
+def _overlay_feed_rows(
+    item: Mapping[str, object],
+    *,
+    spinner_frame: str = "⠙",
+    now: datetime | None = None,
+    max_rows: int = WORK_OVERLAY_BODY_MAX_LINES,
+) -> list[dict[str, str]]:
+    """Build the last few activity feed rows for an active bubble body.
+
+    Row shapes: ``✓/✗`` finished actions, ``▸`` reasoning titles, ``$``
+    commands, ``└`` completed-output tail lines, ``⠙`` live local timing.
+    """
+    if not _overlay_feed_active(item):
+        return []
+    steps = _overlay_activity_steps(item)
+    status = str(item.get("status") or "").strip().lower()
+    current = now or datetime.now().astimezone()
+    spinner = f"{spinner_frame} " if spinner_frame else ""
+    rows: list[dict[str, str]] = []
+    running_seen = False
+    for step in steps:
+        step_status = str(step.get("status") or "").strip().lower()
+        title = str(step.get("title") or "").strip()
+        detail = " ".join(str(step.get("detail") or "").split())
+        prefix = _overlay_activity_step_prefix(step)
+        command_raw = str(step.get("commandRaw") or "").strip() or detail
+        if step_status == "running":
+            running_seen = True
+            if prefix == "等确认":
+                rows.append(
+                    {
+                        "kind": "wait",
+                        "text": f"⏸ 等确认 · {detail}".strip(" ·"),
+                        "tooltip": command_raw,
+                        "action": "peek_output",
+                        "command": "",
+                    }
+                )
+                continue
+            elapsed = _overlay_step_elapsed_seconds(step, current)
+            rows.append(
+                {
+                    "kind": "cmd",
+                    "text": f"$ {detail}".strip(),
+                    "tooltip": f"完整命令（点击复制）：{command_raw}" if command_raw else "",
+                    "action": "copy_command",
+                    "command": command_raw,
+                }
+            )
+            rows.append(
+                {
+                    "kind": "live",
+                    "text": f"{spinner}运行中 {elapsed}s · 回输出",
+                    "tooltip": "点击回到输出视图",
+                    "action": "peek_output",
+                    "command": "",
+                }
+            )
+            continue
+        if title == "思考":
+            rows.append(
+                {
+                    "kind": "title",
+                    "text": f"▸ {detail}".strip(),
+                    "tooltip": detail,
+                    "action": "peek_output",
+                    "command": "",
+                }
+            )
+            continue
+        if step_status == "failed":
+            exit_code = step.get("exitCode")
+            text = f"✗ {prefix}：{detail}".strip("：")
+            if exit_code not in (None, ""):
+                text = f"{text} · 退出码 {exit_code}"
+            rows.append(
+                {
+                    "kind": "fail",
+                    "text": text,
+                    "tooltip": " ".join(str(step.get("output") or "").split()),
+                    "action": "peek_output",
+                    "command": "",
+                }
+            )
+        else:
+            duration = str(step.get("durationText") or "").strip()
+            text = f"✓ {prefix}：{detail}".strip("：")
+            if duration:
+                text = f"{text} · {duration}"
+            rows.append(
+                {
+                    "kind": "done",
+                    "text": text,
+                    "tooltip": " ".join(str(step.get("output") or "").split()),
+                    "action": "peek_output",
+                    "command": "",
+                }
+            )
+        tail_line = _overlay_feed_tail_line(step)
+        if tail_line:
+            rows.append(
+                {
+                    "kind": "out",
+                    "text": f"└ {tail_line}",
+                    "tooltip": str(step.get("activeTail") or ""),
+                    "action": "peek_output",
+                    "command": "",
+                }
+            )
+    last_step = steps[-1] if steps else None
+    if not running_seen and status in _FEED_ACTIVE_STATUSES | {"waiting_user"}:
+        if last_step is None or str(last_step.get("status") or "").lower() != "failed":
+            anchor_step = last_step or {}
+            anchor_ts = parse_timestamp(
+                str(anchor_step.get("timestamp") or "").strip()
+            ) or parse_timestamp(
+                str(item.get("taskStartedAt") or item.get("startedAt") or "").strip()
+            )
+            elapsed = 0
+            if anchor_ts is not None:
+                anchor = (
+                    anchor_ts
+                    if anchor_ts.tzinfo is not None
+                    else anchor_ts
+                )
+                try:
+                    elapsed = max(0, int((current - anchor).total_seconds()))
+                except TypeError:
+                    elapsed = 0
+            rows.append(
+                {
+                    "kind": "live",
+                    "text": f"{spinner}思考中 {elapsed}s…",
+                    "tooltip": "",
+                    "action": "peek_output",
+                    "command": "",
+                }
+            )
+    return rows[-max(1, int(max_rows)) :]
+
+
+def _overlay_footer_selection(item: Mapping[str, object]) -> tuple[str, str]:
+    """Pick the footer text by priority: running > 等确认 > 失败 > 思考 > 末条.
+
+    Returns ``(kind, base_text)`` where kind drives the spinner/seconds suffix
+    and the footer color; the base text carries no spinner or elapsed yet.
+    """
+    texts = _overlay_activity_step_texts(item)
+    if not texts:
+        return "", ""
+    status = str(item.get("status") or "").strip().lower()
+    if status not in _FEED_ACTIVE_STATUSES | {"waiting_user"}:
+        return "plain", texts[-1]
+    steps = _overlay_activity_steps(item)
+    running = [
+        step
+        for step in steps
+        if str(step.get("status") or "").strip().lower() == "running"
+    ]
+    if running:
+        step = running[-1]
+        if _overlay_activity_step_prefix(step) == "等确认":
+            detail = " ".join(str(step.get("detail") or "").split())
+            return "wait", f"等确认 · {detail}".strip(" ·")
+        return "running", _overlay_activity_step_text(step)
+    last = steps[-1] if steps else None
+    if last is not None:
+        if str(last.get("status") or "").strip().lower() == "failed":
+            text = f"✗ {_overlay_activity_step_text(last)}"
+            exit_code = last.get("exitCode")
+            if exit_code not in (None, ""):
+                text = f"{text} · 退出码 {exit_code}"
+            return "failed", text
+        if str(last.get("title") or "") == "思考":
+            detail = " ".join(str(last.get("detail") or "").split())
+            return "thinking", f"思考中 · {detail}".strip(" ·")
+    return "plain", texts[-1]
+
+
 def _workdir_clickable_for_item(item: Mapping[str, object]) -> bool:
     if _item_is_cli(item):
         return False
@@ -657,6 +915,13 @@ __all__ = [
     "_overlay_activity_steps",
     "_overlay_activity_step_texts",
     "_overlay_activity_tooltip",
+    "_overlay_feed_active",
+    "_overlay_feed_rows",
+    "_overlay_feed_spinner_frame",
+    "_overlay_feed_tail_line",
+    "_overlay_footer_selection",
+    "_overlay_output_is_stale",
+    "_overlay_step_elapsed_seconds",
     "_workdir_clickable_for_item",
     "_workdir_link_hover_visible_for_item",
     "_workdir_external_link_for_item",

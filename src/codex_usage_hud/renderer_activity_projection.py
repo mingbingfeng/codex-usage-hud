@@ -10,6 +10,7 @@ payload envelope.  All formatting and snapshot access are explicit through
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections.abc import Mapping
 from datetime import datetime
 import re
 from typing import Any, Callable
@@ -81,6 +82,39 @@ def task_aborted(snapshot: ParsedSession) -> bool:
     )
 
 
+def _step_field(step: Any, name: str, alt: str = "") -> Any:
+    """Read a field from an ActivityStep object or its payload Mapping form."""
+    value = getattr(step, name, None)
+    if value is None and isinstance(step, Mapping):
+        value = step.get(alt or name)
+    return value
+
+
+def _running_step_detail(steps: Any) -> str:
+    """Return the active step's shell-stripped command, if one is running."""
+    for step in reversed(list(steps or ())):
+        status = str(_step_field(step, "status") or "").strip().lower()
+        if status != "running":
+            continue
+        tool = str(_step_field(step, "tool_name", "toolName") or "").lower()
+        text = " ".join(str(_step_field(step, "detail") or "").split())
+        if "request_user_input" in tool:
+            return f"等确认 · {text}".strip(" ·")
+        return text
+    return ""
+
+
+def _latest_thinking_title(steps: Any) -> str:
+    """Return the newest reasoning summary heading, de-markdowned upstream."""
+    for step in reversed(list(steps or ())):
+        if str(_step_field(step, "title") or "").strip() != "思考":
+            continue
+        title = " ".join(str(_step_field(step, "detail") or "").split())
+        if title:
+            return title
+    return ""
+
+
 def activity_state(
     snapshot: ParsedSession,
     *,
@@ -117,6 +151,17 @@ def activity_main(
 ) -> str:
     activity = context.activity_label(snapshot.activity.kind)
     detail = context.compact(snapshot.activity.detail, limit)
+    # 活跃步优先: prefer the running step's shell-stripped command and the
+    # de-markdowned reasoning heading over the raw activity record text, so
+    # the renderer copy matches the desktop bubble footer.
+    running_detail = _running_step_detail(snapshot.activity_steps)
+    if running_detail:
+        activity = context.activity_label("tool call")
+        detail = context.compact(running_detail, limit)
+    elif snapshot.activity.kind == "reasoning":
+        title = _latest_thinking_title(snapshot.activity_steps)
+        if title:
+            detail = context.compact(title, limit)
     if not detail:
         detail = context.request_status_label(snapshot.request.status or snapshot.status)
     # Safety net: when the last JSONL record is an unrecognized bookkeeping
@@ -172,8 +217,11 @@ def executing_text(
             snapshot,
             context=context,
         )
+        steps = getattr(item, "activity_steps", ())
         detail = (
-            getattr(item, "status_text", "")
+            _running_step_detail(steps)
+            or _latest_thinking_title(steps)
+            or getattr(item, "status_text", "")
             or getattr(item, "detail", "")
             or getattr(item, "last_text", "")
             or getattr(item, "progress", "")

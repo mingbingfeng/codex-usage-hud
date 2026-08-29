@@ -190,13 +190,19 @@ class OverlayWindow(OverlayTransitionsMixin, OverlayRenderingMixin, QWidget):
             self._completed_check_windows: list[ClickHotspotWindow] = []
             self._system_action_windows: list[ClickHotspotWindow] = []
             self._rest_action_windows: list[ClickHotspotWindow] = []
+            self._feed_windows: list[ClickHotspotWindow] = []
             self._close_anchors: list[tuple[QWidget, Mapping[str, object], str, str, str]] = []
             self._workdir_anchors: list[tuple[QWidget, Mapping[str, object]]] = []
             self._completed_check_anchors: list[tuple[QWidget, Mapping[str, object]]] = []
             self._system_action_anchors: list[tuple[QWidget, Mapping[str, object]]] = []
             self._rest_action_anchors: list[tuple[QWidget, Mapping[str, object]]] = []
+            self._feed_row_anchors: list[tuple[QWidget, Mapping[str, object]]] = []
             self._card_hover_anchors: list[QWidget] = []
             self._completed_hover_anchors: list[QWidget] = []
+            # Items whose body is temporarily switched back to the output view
+            # from the activity feed ("回输出" affordance).
+            self._feed_peek_item_ids: set[str] = set()
+            self._feed_spinner_tick = 0
             self._system_action: dict[str, object] | None = None
             self._system_notice: dict[str, object] | None = None
             self._rest_reminder: dict[str, object] | None = None
@@ -238,6 +244,9 @@ class OverlayWindow(OverlayTransitionsMixin, OverlayRenderingMixin, QWidget):
             self._elapsed_text_timer = QTimer(self)
             self._elapsed_text_timer.setInterval(WORK_OVERLAY_ELAPSED_TEXT_TIMER_MS)
             self._elapsed_text_timer.timeout.connect(self._refresh_live_elapsed_text)
+            self._feed_spinner_timer = QTimer(self)
+            self._feed_spinner_timer.setInterval(WORK_OVERLAY_FEED_SPINNER_TIMER_MS)
+            self._feed_spinner_timer.timeout.connect(self._tick_feed_spinner)
             self.setAttribute(widget_attrs.WA_TranslucentBackground, True)
             self.setAttribute(widget_attrs.WA_ShowWithoutActivating, True)
             self.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
@@ -280,6 +289,29 @@ class OverlayWindow(OverlayTransitionsMixin, OverlayRenderingMixin, QWidget):
             self._last_payload_signature = ""
             self._last_structure_signature = ""
             self.render_items(self._raw_items)
+
+        def activate_feed_row(self, item: Mapping[str, object]) -> None:
+            """Dispatch an activity-feed row click (copy command / peek output)."""
+            action = str(item.get("feedAction") or "").strip()
+            if action == "copy_command":
+                command = str(item.get("command") or "")
+                if command:
+                    clipboard = self._qt_app.clipboard()
+                    if clipboard is not None:
+                        clipboard.setText(command)
+                return
+            if action in {"peek_output", "resume_feed"}:
+                item_id = str(item.get("id") or "")
+                if not item_id:
+                    return
+                if item_id in self._feed_peek_item_ids:
+                    self._feed_peek_item_ids.discard(item_id)
+                else:
+                    self._feed_peek_item_ids.add(item_id)
+                # Force the payload pass to re-render this item's body even
+                # though the payload signature itself is unchanged.
+                self._last_payload_signature = ""
+                self.render_items(self._raw_items)
 
         def _switch_pending_active_for_item(self, item: Mapping[str, object]) -> bool:
             if not self._switch_pending_key or self._switch_pending_started_at <= 0.0:
@@ -978,6 +1010,47 @@ class OverlayWindow(OverlayTransitionsMixin, OverlayRenderingMixin, QWidget):
                 len(self._rest_action_anchors) :
             ]:
                 action_window.hide()
+
+            feed_row_color = _color_for("tool", self._theme_tokens)[0]
+            # Refresh feed anchor rects now that card layout has settled, then
+            # place one click hotspot per visible feed row.
+            for record in self._item_widgets:
+                if record.get("feed_rows_meta"):
+                    self._sync_feed_anchor_geometry(record)
+
+            while len(self._feed_windows) < len(self._feed_row_anchors):
+                self._feed_windows.append(
+                    ClickHotspotWindow(
+                        self.activate_feed_row,
+                        circle=False,
+                        hover_color=feed_row_color,
+                    )
+                )
+
+            for index, (anchor, action_item) in enumerate(self._feed_row_anchors):
+                feed_window = self._feed_windows[index]
+                anchor_top_left = anchor.mapToGlobal(QPoint(0, 0))
+                action = str(action_item.get("feedAction") or "")
+                tooltip = "复制完整命令" if action == "copy_command" else "回到输出视图"
+                if action == "resume_feed":
+                    tooltip = "返回活动视图"
+                feed_window.configure(
+                    action_item,
+                    opacity=current_opacity,
+                    tooltip=tooltip,
+                    hover_color=feed_row_color,
+                )
+                feed_window.setGeometry(
+                    anchor_top_left.x(),
+                    anchor_top_left.y(),
+                    max(1, anchor.width()),
+                    max(1, anchor.height()),
+                )
+                feed_window.show()
+                feed_window.raise_()
+
+            for feed_window in self._feed_windows[len(self._feed_row_anchors) :]:
+                feed_window.hide()
 
 
 def _work_overlay_command_path(state_path: Path) -> Path:

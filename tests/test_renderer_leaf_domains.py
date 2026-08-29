@@ -1169,6 +1169,395 @@ console.log("session-view-activity-expand-ok");
     assert "session-view-activity-expand-ok" in completed.stdout
 
 
+def test_session_view_activity_scroll_round_aware_selection() -> None:
+    session_view_factory = SESSION_VIEW.split(
+        "  const sessionViewDomain = ctx.domains.register(",
+        1,
+    )[0]
+    script = """
+const assert = require("node:assert/strict");
+const rootId = "codex-usage-hud-root";
+const warningClass = "warning";
+const errorClass = "error";
+const runningTimerName = "__running";
+const payload = {
+  rendererSessionId: "session-test",
+  topDetails: {
+    activityTaskIndex: 1,
+    activityTasks: [{ index: 1, count: 1, turnId: "t1", currentTask: "测试需求" }],
+  },
+};
+const events = [];
+const timers = new Set();
+const timeline = {
+  scrollHeight: 2000,
+  clientHeight: 300,
+  _scrollTop: 0,
+  get scrollTop() { return this._scrollTop; },
+  set scrollTop(value) { this._scrollTop = Number(value); },
+  getBoundingClientRect() { return { top: 0, bottom: 300, height: 300, width: 800 }; },
+  addEventListener() {},
+  removeEventListener() {},
+};
+const makeNode = ({ key = "", text = "", user = false, round = 0 }) => {
+  const node = {
+    dataset: {},
+    isConnected: true,
+    innerText: text,
+    textContent: text,
+    round,
+    getAttribute(name) {
+      if (name === "data-content-search-unit-key") return key;
+      if (name === "data-content-search-turn-key") return "t1";
+      return null;
+    },
+    matches(selector) {
+      if (selector.includes("data-local-conversation-user-anchor")) return user;
+      if (selector.includes("data-content-search-unit-key")) return !!key;
+      return false;
+    },
+    querySelector(selector) {
+      return selector.includes("data-local-conversation-user-anchor") && user ? {} : null;
+    },
+    querySelectorAll() { return []; },
+    closest(selector) {
+      if (selector.includes("data-content-search-unit-key") && key) return node;
+      if (selector.includes("data-content-search-turn-key")) return turn;
+      return null;
+    },
+    contains() { return false; },
+    compareDocumentPosition(other) {
+      const mine = Number(node.round || 0);
+      const theirs = Number(other?.round || 0);
+      if (mine === theirs) return 0;
+      return mine > theirs ? 4 : 2;
+    },
+    scrollIntoView(options = {}) { events.push({ kind: "scroll", node, behavior: options.behavior || "auto" }); },
+    animate() { events.push({ kind: "animate", node }); return { cancel() {} }; },
+    getBoundingClientRect() {
+      return user
+        ? { top: 10, bottom: 30, height: 20, width: 100 }
+        : { top: 100, bottom: 140, height: 40, width: 100 };
+    },
+  };
+  return node;
+};
+const makeToggle = (label, round) => ({
+  dataset: {},
+  isConnected: true,
+  innerText: label,
+  textContent: label,
+  parentElement: null,
+  round,
+  getAttribute(name) { return name === "aria-expanded" ? "true" : null; },
+  contains() { return false; },
+  click() { this.clicked = true; },
+  scrollIntoView(options = {}) { events.push({ kind: "scroll", node: this, behavior: options.behavior || "auto" }); },
+  animate() { events.push({ kind: "animate", node: this }); return { cancel() {} }; },
+  getBoundingClientRect() { return { top: 80, bottom: 100, height: 20, width: 100 }; },
+});
+const turn = {
+  turnId: "t1",
+  units: [],
+  buttons: [],
+  isConnected: true,
+  innerText: "",
+  textContent: "",
+  getAttribute(name) { return name === "data-content-search-turn-key" ? "t1" : null; },
+  querySelectorAll(selector) {
+    if (selector.includes("data-content-search-unit-key")) return turn.units;
+    if (selector === "button, [role='button']") return turn.buttons;
+    return [];
+  },
+  closest() { return null; },
+};
+const user = makeNode({ key: "t1:user", user: true, text: "你说：测试需求详细内容" });
+const roundOne = makeNode({ key: "t1:round-1", text: "重复输出内容 ABCDEFGH", round: 1 });
+const roundTwo = makeNode({ key: "t1:round-2", text: "重复输出内容 ABCDEFGH", round: 2 });
+turn.units = [user, roundOne, roundTwo];
+turn.buttons = [
+  makeToggle("已处理 1m 00s", 1),
+  makeToggle("已处理 2m 00s", 2),
+];
+const root = { dataset: { activityTaskIndex: "1" }, contains: () => false, querySelectorAll: () => [] };
+const document = {
+  body: {},
+  documentElement: {},
+  getElementById: (id) => id === rootId ? root : null,
+  querySelector(selector) {
+    return selector === "[data-app-action-timeline-scroll]" ? timeline : null;
+  },
+  querySelectorAll(selector) {
+    if (selector === "[data-content-search-turn-key]") return [turn];
+    if (selector === "[data-content-search-unit-key]") return turn.units;
+    if (selector === "[data-turn-key]") return [];
+    return [];
+  },
+};
+global.window = {
+  requestAnimationFrame(callback) { callback(0); return 0; },
+  cancelAnimationFrame() {},
+  setTimeout,
+  clearTimeout,
+};
+global.document = document;
+global.currentPayload = () => payload;
+global.clamp = (value, min, max) => Math.max(min, Math.min(max, value));
+global.budgetDomain = { refreshProgressRailLabel() {}, refreshCollapsedProgressStrip() {} };
+global.diagnosticsDomain = { applyConnectionHealth() {} };
+const ctx = {
+  lifecycle: {
+    active: () => true,
+    frame: (_owner, callback) => window.requestAnimationFrame(callback),
+    clearFrame() {},
+    timeout: (_owner, callback, ms = 0) => setTimeout(callback, Math.min(Number(ms) || 0, 8)),
+    clearTimeout: (id) => clearTimeout(id),
+    interval: () => 0,
+    clearInterval() {},
+  },
+};
+const shared = {};
+""" + session_view_factory + r"""
+const domain = createSessionViewDomain(ctx, shared);
+
+(async () => {
+// The same output text appears in two rounds of the same task. The tightest
+// text match alone would land on round 1; the requested round index must win.
+events.length = 0;
+let result = await domain.scrollToActivityRound(
+  "输出：\n重复输出内容 ABCDEFGH",
+  "测试需求",
+  2,
+  "t1",
+);
+assert.equal(result, true, JSON.stringify({ result, events }));
+const animated = events.filter((event) => event.kind === "animate").map((event) => event.node);
+assert.ok(animated.includes(roundTwo), JSON.stringify(events));
+assert.ok(!animated.includes(roundOne), JSON.stringify(events));
+assert.equal(roundTwo.dataset.codexHudLocateRound, "2");
+assert.equal(roundOne.dataset.codexHudLocateRound, undefined);
+// The precise scroll lands on round 2's output, never round 1's.
+const roundScrolls = events
+  .filter((event) => event.kind === "scroll" && (event.node === roundOne || event.node === roundTwo))
+  .map((event) => event.node);
+assert.deepEqual(roundScrolls, [roundTwo], JSON.stringify(events));
+console.log("session-view-activity-round-aware-ok");
+})().catch((error) => {
+  console.error(error.stack || error);
+  process.exitCode = 1;
+});
+"""
+    completed = subprocess.run(
+        ["node", "--input-type=commonjs"],
+        input=script,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+    assert "session-view-activity-round-aware-ok" in completed.stdout
+
+
+def test_session_view_activity_scroll_corrects_viewport_after_virtualization() -> None:
+    session_view_factory = SESSION_VIEW.split(
+        "  const sessionViewDomain = ctx.domains.register(",
+        1,
+    )[0]
+    script = """
+const assert = require("node:assert/strict");
+const rootId = "codex-usage-hud-root";
+const warningClass = "warning";
+const errorClass = "error";
+const runningTimerName = "__running";
+const payload = {
+  rendererSessionId: "session-test",
+  topDetails: {
+    activityTaskIndex: 1,
+    activityTasks: [{ index: 1, count: 1, turnId: "t1", currentTask: "测试需求" }],
+  },
+};
+const events = [];
+const timers = new Set();
+const timeline = {
+  scrollHeight: 2000,
+  clientHeight: 300,
+  _scrollTop: 0,
+  get scrollTop() { return this._scrollTop; },
+  set scrollTop(value) { this._scrollTop = Number(value); },
+  getBoundingClientRect() { return { top: 0, bottom: 300, height: 300, width: 800 }; },
+  addEventListener() {},
+  removeEventListener() {},
+};
+const makeNode = ({ key = "", text = "", user = false, round = 0, drift = false }) => {
+  const node = {
+    dataset: {},
+    isConnected: true,
+    innerText: text,
+    textContent: text,
+    round,
+    getAttribute(name) {
+      if (name === "data-content-search-unit-key") return key;
+      if (name === "data-content-search-turn-key") return "t1";
+      return null;
+    },
+    matches(selector) {
+      if (selector.includes("data-local-conversation-user-anchor")) return user;
+      if (selector.includes("data-content-search-unit-key")) return !!key;
+      return false;
+    },
+    querySelector(selector) {
+      return selector.includes("data-local-conversation-user-anchor") && user ? {} : null;
+    },
+    querySelectorAll() { return []; },
+    closest(selector) {
+      if (selector.includes("data-content-search-unit-key") && key) return node;
+      if (selector.includes("data-content-search-turn-key")) return turn;
+      return null;
+    },
+    contains() { return false; },
+    compareDocumentPosition(other) {
+      const mine = Number(node.round || 0);
+      const theirs = Number(other?.round || 0);
+      if (mine === theirs) return 0;
+      return mine > theirs ? 4 : 2;
+    },
+    scrollIntoView(options = {}) {
+      events.push({ kind: "scroll", node, behavior: options.behavior || "auto" });
+      // Simulate virtualization re-mounting the turn elsewhere after the smooth
+      // scroll: only an explicit auto scroll actually lands the node in view.
+      if (options.behavior === "auto") node.viewportLanded = true;
+    },
+    animate() { events.push({ kind: "animate", node }); return { cancel() {} }; },
+    getBoundingClientRect() {
+      if (user) return { top: 10, bottom: 30, height: 20, width: 100 };
+      if (!drift) return { top: 100, bottom: 140, height: 40, width: 100 };
+      return node.viewportLanded
+        ? { top: 100, bottom: 140, height: 40, width: 100 }
+        : { top: -500, bottom: -460, height: 40, width: 100 };
+    },
+  };
+  return node;
+};
+const makeToggle = (label, round) => ({
+  dataset: {},
+  isConnected: true,
+  innerText: label,
+  textContent: label,
+  parentElement: null,
+  round,
+  getAttribute(name) { return name === "aria-expanded" ? "true" : null; },
+  contains() { return false; },
+  click() { this.clicked = true; },
+  scrollIntoView(options = {}) { events.push({ kind: "scroll", node: this, behavior: options.behavior || "auto" }); },
+  animate() { events.push({ kind: "animate", node: this }); return { cancel() {} }; },
+  getBoundingClientRect() { return { top: 80, bottom: 100, height: 20, width: 100 }; },
+});
+const turn = {
+  turnId: "t1",
+  units: [],
+  buttons: [],
+  isConnected: true,
+  innerText: "",
+  textContent: "",
+  getAttribute(name) { return name === "data-content-search-turn-key" ? "t1" : null; },
+  querySelectorAll(selector) {
+    if (selector.includes("data-content-search-unit-key")) return turn.units;
+    if (selector === "button, [role='button']") return turn.buttons;
+    return [];
+  },
+  closest() { return null; },
+};
+const user = makeNode({ key: "t1:user", user: true, text: "你说：测试需求详细内容" });
+const roundOne = makeNode({ key: "t1:round-1", text: "唯一输出内容 XYZABC", round: 1, drift: true });
+turn.units = [user, roundOne];
+turn.buttons = [makeToggle("已处理 1m 00s", 1)];
+const root = { dataset: { activityTaskIndex: "1" }, contains: () => false, querySelectorAll: () => [] };
+const document = {
+  body: {},
+  documentElement: {},
+  getElementById: (id) => id === rootId ? root : null,
+  querySelector(selector) {
+    return selector === "[data-app-action-timeline-scroll]" ? timeline : null;
+  },
+  querySelectorAll(selector) {
+    if (selector === "[data-content-search-turn-key]") return [turn];
+    if (selector === "[data-content-search-unit-key]") return turn.units;
+    if (selector === "[data-turn-key]") return [];
+    return [];
+  },
+};
+global.window = {
+  requestAnimationFrame(callback) { callback(0); return 0; },
+  cancelAnimationFrame() {},
+  setTimeout,
+  clearTimeout,
+};
+global.document = document;
+global.currentPayload = () => payload;
+global.clamp = (value, min, max) => Math.max(min, Math.min(max, value));
+global.budgetDomain = { refreshProgressRailLabel() {}, refreshCollapsedProgressStrip() {} };
+global.diagnosticsDomain = { applyConnectionHealth() {} };
+const ctx = {
+  lifecycle: {
+    active: () => true,
+    frame: (_owner, callback) => window.requestAnimationFrame(callback),
+    clearFrame() {},
+    timeout: (_owner, callback, ms = 0) => setTimeout(callback, Math.min(Number(ms) || 0, 8)),
+    clearTimeout: (id) => clearTimeout(id),
+    interval: () => 0,
+    clearInterval() {},
+  },
+};
+const shared = {};
+""" + session_view_factory + r"""
+const domain = createSessionViewDomain(ctx, shared);
+
+(async () => {
+// The smooth scroll alone leaves the round output out of the timeline viewport
+// (virtualization re-mount shifted it). The locate flow must detect it and run
+// one corrective auto scroll before pulsing.
+events.length = 0;
+let result = await domain.scrollToActivityRound(
+  "输出：\n唯一输出内容 XYZABC",
+  "测试需求",
+  1,
+  "t1",
+);
+assert.equal(result, true, JSON.stringify({ result, events }));
+const roundScrolls = events
+  .filter((event) => event.kind === "scroll" && event.node === roundOne)
+  .map((event) => event.behavior);
+assert.ok(roundScrolls.includes("smooth"), JSON.stringify(events));
+assert.ok(roundScrolls.includes("auto"), JSON.stringify(events));
+assert.equal(roundScrolls[roundScrolls.length - 1], "auto",
+  "应在平滑滚动后补一次自动滚动把轮次拉回视口 " + JSON.stringify(events));
+const scrollIndex = events.findIndex(
+  (event) => event.kind === "scroll" && event.node === roundOne && event.behavior === "auto",
+);
+const animateIndex = events.findIndex(
+  (event) => event.kind === "animate" && event.node === roundOne,
+);
+assert.ok(animateIndex > scrollIndex, JSON.stringify(events));
+assert.equal(roundOne.dataset.codexHudLocateRound, "1");
+console.log("session-view-activity-viewport-ok");
+})().catch((error) => {
+  console.error(error.stack || error);
+  process.exitCode = 1;
+});
+"""
+    completed = subprocess.run(
+        ["node", "--input-type=commonjs"],
+        input=script,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+    assert "session-view-activity-viewport-ok" in completed.stdout
+
+
 def test_leaf_bundle_keeps_one_iife_and_one_boot_placeholder() -> None:
     script = manifest.RENDERER_HUD_SCRIPT_TEMPLATE
     assert script.lstrip().startswith("(() => {")

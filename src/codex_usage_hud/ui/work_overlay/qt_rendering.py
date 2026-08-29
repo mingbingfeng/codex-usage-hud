@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Mapping, Sequence
+from datetime import datetime
 from typing import Any
 
 from PySide6.QtCore import (
@@ -25,6 +26,7 @@ from PySide6.QtWidgets import (
 )
 
 from .constants import (
+    WORK_OVERLAY_BODY_MAX_LINES,
     WORK_OVERLAY_CARD_SPACING,
     WORK_OVERLAY_CARD_X_PADDING,
     WORK_OVERLAY_CARD_Y_PADDING,
@@ -32,6 +34,8 @@ from .constants import (
     WORK_OVERLAY_COMPLETED_BADGE_ROW_HEIGHT,
     WORK_OVERLAY_COMPLETED_BADGE_SIZE,
     WORK_OVERLAY_EMPTY_GRACE_SECONDS,
+    WORK_OVERLAY_FEED_SPINNER_ENABLED,
+    WORK_OVERLAY_FEED_SPINNER_TIMER_MS,
     WORK_OVERLAY_MARGIN,
     WORK_OVERLAY_QT_TRANSITION_ANIMATIONS_ENABLED,
     WORK_OVERLAY_TEXT_WRAP_WIDTH,
@@ -63,7 +67,13 @@ from .model import (
     _item_is_system_notice,
     _matched_overlay_item_records,
     _overlay_activity_step_texts,
+    _overlay_activity_steps,
     _overlay_activity_tooltip,
+    _overlay_feed_active,
+    _overlay_feed_rows,
+    _overlay_feed_spinner_frame,
+    _overlay_footer_selection,
+    _overlay_step_elapsed_seconds,
     _normalized_rest_reminder,
     _normalized_system_action,
     _normalized_system_notice,
@@ -127,6 +137,9 @@ class OverlayRenderingMixin:
         self._rest_action_anchors.clear()
         self._card_hover_anchors.clear()
         self._completed_hover_anchors.clear()
+        feed_row_anchors = getattr(self, "_feed_row_anchors", None)
+        if isinstance(feed_row_anchors, list):
+            feed_row_anchors.clear()
         self._item_widgets.clear()
         self.circles.clear()
         self.rects.clear()
@@ -138,11 +151,21 @@ class OverlayRenderingMixin:
         self,
         items: Sequence[Mapping[str, object]],
     ) -> None:
-        if any(_work_overlay_live_elapsed_text(item) is not None for item in items):
+        feed_active = any(_overlay_feed_active(item) for item in items)
+        if feed_active or any(
+            _work_overlay_live_elapsed_text(item) is not None for item in items
+        ):
             if not self._elapsed_text_timer.isActive():
                 self._elapsed_text_timer.start()
-            return
-        self._elapsed_text_timer.stop()
+        else:
+            self._elapsed_text_timer.stop()
+        spinner_timer = getattr(self, "_feed_spinner_timer", None)
+        if isinstance(spinner_timer, QTimer):
+            if feed_active and WORK_OVERLAY_FEED_SPINNER_ENABLED:
+                if not spinner_timer.isActive():
+                    spinner_timer.start()
+            else:
+                spinner_timer.stop()
 
     def _activity_step_display_text(
         self,
@@ -153,16 +176,176 @@ class OverlayRenderingMixin:
     ) -> tuple[str, str]:
         """Show the newest parsed action as soon as the payload refreshes.
 
-        The activity-step list remains available in the tooltip, while the
-        footer represents the action Codex most recently emitted.  A timer-
-        driven 1.5-second rotation could show stale commands after Codex had
-        already moved on to the next tool action.
+        The footer picks its row by priority (running > 等确认 > 失败 > 思考
+        标题 > 末条). Running rows carry the local elapsed seconds that share
+        the 1s elapsed tick, and thinking rows carry the rotating spinner;
+        the full step list stays available in the tooltip.
         """
         del record, now
         texts = _overlay_activity_step_texts(item)
         if not texts:
             return "", ""
-        return texts[-1], _overlay_activity_tooltip(item)
+        kind, text = _overlay_footer_selection(item)
+        if not text:
+            return "", ""
+        if kind == "running":
+            steps = _overlay_activity_steps(item)
+            running = [
+                step
+                for step in steps
+                if str(step.get("status") or "").strip().lower() == "running"
+            ]
+            elapsed = (
+                _overlay_step_elapsed_seconds(
+                    running[-1],
+                    datetime.now().astimezone(),
+                )
+                if running
+                else 0
+            )
+            spinner = self._feed_spinner_glyph()
+            prefix = f"{spinner} " if spinner else ""
+            text = f"{prefix}{text} · {elapsed}s"
+        elif kind == "thinking":
+            spinner = self._feed_spinner_glyph()
+            prefix = f"{spinner} " if spinner else ""
+            text = f"{prefix}{text}"
+        return text, _overlay_activity_tooltip(item)
+
+    def _feed_spinner_glyph(self) -> str:
+        if not WORK_OVERLAY_FEED_SPINNER_ENABLED:
+            return ""
+        return _overlay_feed_spinner_frame(getattr(self, "_feed_spinner_tick", 0))
+
+    def _footer_elide_width(self, label: QLabel) -> int:
+        # Reserve room for the local-seconds suffix and the workdir leaf that
+        # share the footer row; commands keep head and tail via middle elision.
+        return max(60, WORK_OVERLAY_TEXT_WRAP_WIDTH - 96)
+
+    def _footer_display_text(self, label: QLabel, text: str) -> str:
+        return QFontMetrics(label.font()).elidedText(
+            text,
+            Qt.TextElideMode.ElideMiddle,
+            self._footer_elide_width(label),
+        )
+
+    def _feed_rows_for_item(
+        self,
+        record: dict[str, Any],
+        item: Mapping[str, object],
+    ) -> list[dict[str, str]]:
+        """Build width-elided feed rows, or the single peek row when reviewing."""
+        if str(record.get("kind") or "") != "card":
+            return []
+        detail = record.get("detail")
+        if not isinstance(detail, QLabel):
+            return []
+        if not _overlay_feed_active(item):
+            peek_ids = getattr(self, "_feed_peek_item_ids", None)
+            if isinstance(peek_ids, set):
+                peek_ids.discard(_item_id(item))
+            return []
+        item_id = _item_id(item)
+        peek_ids = getattr(self, "_feed_peek_item_ids", None)
+        if (
+            isinstance(peek_ids, set)
+            and item_id
+            and item_id in peek_ids
+            and str(item.get("lastText") or "").strip()
+        ):
+            return [
+                {
+                    "kind": "peek",
+                    "text": "",
+                    "tooltip": "回看输出（临时） · 点击返回活动",
+                    "action": "resume_feed",
+                    "command": "",
+                }
+            ]
+        rows = _overlay_feed_rows(
+            item,
+            spinner_frame=self._feed_spinner_glyph(),
+            now=datetime.now().astimezone(),
+        )
+        if not rows:
+            return []
+        metrics = QFontMetrics(detail.font())
+        width = WORK_OVERLAY_TEXT_WRAP_WIDTH
+        for row in rows:
+            text = str(row.get("text") or "")
+            if row.get("kind") == "cmd" and row.get("command"):
+                command = str(row["command"])
+                row["text"] = metrics.elidedText(
+                    f"$ {command}",
+                    Qt.TextElideMode.ElideMiddle,
+                    width,
+                )
+            elif text:
+                row["text"] = metrics.elidedText(
+                    text,
+                    Qt.TextElideMode.ElideRight,
+                    width,
+                )
+        return rows
+
+    def _refresh_feed_body(
+        self,
+        record: dict[str, Any],
+        item: Mapping[str, object],
+    ) -> None:
+        """Timer-path refresh of the feed body text (seconds and spinner)."""
+        detail = record.get("detail")
+        if not isinstance(detail, QLabel):
+            return
+        rows = self._feed_rows_for_item(record, item)
+        if not rows or str(rows[0].get("action") or "") == "resume_feed":
+            return
+        text = "\n".join(str(row.get("text") or "") for row in rows)
+        if text == detail.text():
+            return
+        detail.setText(text)
+        detail.setToolTip(
+            "\n".join(
+                str(row.get("tooltip") or "") for row in rows if row.get("tooltip")
+            )
+        )
+
+    def _sync_feed_anchor_geometry(self, record: dict[str, Any]) -> None:
+        """Position one invisible click target over each visible feed row."""
+        rows = record.get("feed_rows_meta") or []
+        anchors = record.get("feed_anchors") or []
+        detail = record.get("detail")
+        if not isinstance(detail, QLabel) or not anchors:
+            return
+        count = max(1, len(rows))
+        row_height = max(1, detail.height() // count) if rows else 0
+        for index, anchor in enumerate(anchors):
+            if index >= len(rows):
+                anchor.hide()
+                continue
+            anchor.setGeometry(
+                detail.x(),
+                detail.y() + index * row_height,
+                detail.width(),
+                row_height,
+            )
+            anchor.show()
+
+    def _tick_feed_spinner(self) -> None:
+        """Rotate the feed spinner glyph; only runs while a feed is active."""
+        if not WORK_OVERLAY_FEED_SPINNER_ENABLED:
+            return
+        self._feed_spinner_tick = int(getattr(self, "_feed_spinner_tick", 0)) + 1
+        for record in self._item_widgets:
+            if record.get("kind") != "card":
+                continue
+            item = record.get("item")
+            if not isinstance(item, Mapping):
+                continue
+            if not _overlay_feed_active(item):
+                continue
+            self._refresh_feed_body(record, item)
+            self._refresh_activity_step_label(record, item)
 
     @staticmethod
     def _workdir_footer_width(label: QLabel, text: str) -> int:
@@ -191,7 +374,7 @@ class OverlayRenderingMixin:
         text, tooltip = self._activity_step_display_text(record, item, now=now)
         if not text:
             return
-        label.setText(text)
+        label.setText(self._footer_display_text(label, text))
         label.setToolTip(tooltip or text)
 
     def _refresh_live_elapsed_text(self) -> None:
@@ -218,6 +401,7 @@ class OverlayRenderingMixin:
                     )
                 item = updated_item
             self._refresh_activity_step_label(record, item, now=now)
+            self._refresh_feed_body(record, item)
 
     def _build_item_widget(self, item: Mapping[str, object]) -> None:
         self._build_item_card(item)
@@ -458,6 +642,16 @@ class OverlayRenderingMixin:
         card_layout.addWidget(rest_actions_row)
         switch_overlay = CardSwitchPendingOverlayWidget(card)
 
+        # Invisible per-row click targets over the activity feed body. Their
+        # geometry tracks the detail label rows and is refreshed in the
+        # interactive-window reposition pass after the layout settles.
+        feed_anchors: list[QWidget] = []
+        for _ in range(WORK_OVERLAY_BODY_MAX_LINES):
+            feed_anchor = QWidget(card)
+            feed_anchor.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
+            feed_anchor.hide()
+            feed_anchors.append(feed_anchor)
+
         record = {
             "kind": "card",
             "item_id": _item_id(item),
@@ -481,6 +675,8 @@ class OverlayRenderingMixin:
             "workdir_label": workdir_label,
             "switch_overlay": switch_overlay,
             "close_anchor": close_anchor,
+            "feed_anchors": feed_anchors,
+            "feed_rows_meta": [],
         }
         self._item_widgets.append(record)
         self._update_item_card(record, item)
@@ -513,6 +709,19 @@ class OverlayRenderingMixin:
             if current
             else border_color
         )
+        feed_rows: list[dict[str, str]] = []
+        peeking = False
+        if not (
+            system_action
+            or system_notice
+            or background_usage
+            or rest_reminder
+            or status == "draft"
+        ):
+            feed_rows = self._feed_rows_for_item(record, item)
+            peeking = bool(feed_rows) and str(
+                feed_rows[0].get("action") or ""
+            ) == "resume_feed"
         theme = self._theme_tokens
         elapsed_text = (
             ""
@@ -548,14 +757,25 @@ class OverlayRenderingMixin:
             )
 
         card = record["card"]
-        card.setStyleSheet(
-            "QFrame {"
-            f"background-color: {card_bg};"
-            f"border: 1px solid {border_color};"
-            f"border-left: {2 if current else 1}px solid {current_border_color};"
-            "border-radius: 10px;"
-            "}"
-        )
+        if peeking:
+            # 回看输出：dashed accent border marks the temporary output view.
+            card.setStyleSheet(
+                "QFrame {"
+                f"background-color: {card_bg};"
+                f"border: 1px dashed {accent};"
+                f"border-left: 1px dashed {accent};"
+                "border-radius: 10px;"
+                "}"
+            )
+        else:
+            card.setStyleSheet(
+                "QFrame {"
+                f"background-color: {card_bg};"
+                f"border: 1px solid {border_color};"
+                f"border-left: {2 if current else 1}px solid {current_border_color};"
+                "border-radius: 10px;"
+                "}"
+            )
 
         header = record["header"]
         header.setText(header_text)
@@ -629,13 +849,30 @@ class OverlayRenderingMixin:
         else:
             body_text = str(item.get("lastText") or item.get("detail") or "").strip()
         detail = record["detail"]
-        detail_text = self._multiline_elided_text(
-            body_text,
-            font=detail.font(),
-            width=WORK_OVERLAY_TEXT_WRAP_WIDTH,
-        )
+        if feed_rows and not peeking:
+            # Live activity feed: pre-elided single lines so each row keeps a
+            # stable click band without touching the body layout constants.
+            detail_text = "\n".join(str(row.get("text") or "") for row in feed_rows)
+            detail.setToolTip(
+                "\n".join(
+                    str(row.get("tooltip") or "")
+                    for row in feed_rows
+                    if row.get("tooltip")
+                )
+            )
+        else:
+            detail_text = self._multiline_elided_text(
+                body_text,
+                font=detail.font(),
+                width=WORK_OVERLAY_TEXT_WRAP_WIDTH,
+            )
+            if peeking:
+                detail.setToolTip("回看输出（临时） · 点击返回活动")
+            else:
+                detail.setToolTip(
+                    body_text if detail_text and detail_text != body_text else ""
+                )
         detail.setText(detail_text)
-        detail.setToolTip(body_text if detail_text and detail_text != body_text else "")
         detail.setFixedHeight(self._wrapped_label_height(detail, WORK_OVERLAY_TEXT_WRAP_WIDTH))
         detail.setStyleSheet(
             "QLabel {"
@@ -644,6 +881,8 @@ class OverlayRenderingMixin:
             "background: transparent;"
             "}"
         )
+        record["feed_rows_meta"] = list(feed_rows)
+        self._sync_feed_anchor_geometry(record)
 
         rest_hint = record["rest_hint"]
         rest_hint_text = (
@@ -681,6 +920,7 @@ class OverlayRenderingMixin:
             else str(item.get("statusText") or item.get("statusLabel") or "").strip()
         )
         activity_text, activity_tooltip = self._activity_step_display_text(record, item)
+        footer_kind = _overlay_footer_selection(item)[0]
         if activity_text and not (
             system_action
             or system_notice
@@ -694,13 +934,16 @@ class OverlayRenderingMixin:
 
         status_label = record["status_label"]
         if status_text and not rest_reminder:
-            status_text_color = (
-                accent
-                if status in {"recent", "error", "background_usage"}
-                else theme["muted"]
-            )
+            if footer_kind == "wait" or status == "waiting_user":
+                status_text_color = _color_for("waiting_user", self._theme_tokens)[0]
+            elif footer_kind == "failed":
+                status_text_color = _color_for("error", self._theme_tokens)[0]
+            elif status in {"recent", "error", "background_usage"}:
+                status_text_color = accent
+            else:
+                status_text_color = theme["muted"]
             footer_status_text = _compact_work_text(status_text, 240)
-            status_label.setText(footer_status_text)
+            status_label.setText(self._footer_display_text(status_label, footer_status_text))
             status_label.setToolTip(activity_tooltip or status_text)
             status_label.setBaseColor(status_text_color)
             status_label.setShimmerEnabled(
@@ -822,6 +1065,34 @@ class OverlayRenderingMixin:
                 and _workdir_external_link_for_item(item)
             ):
                 self._workdir_anchors.append((record["workdir_label"], dict(item)))
+            feed_rows_meta = record.get("feed_rows_meta") or []
+            feed_row_anchors = getattr(self, "_feed_row_anchors", None)
+            if (
+                feed_rows_meta
+                and isinstance(feed_row_anchors, list)
+                and not (
+                    system_action
+                    or system_notice
+                    or background_usage
+                    or rest_reminder
+                    or status == "draft"
+                )
+            ):
+                feed_item_id = _item_id(item)
+                feed_anchors = record.get("feed_anchors") or []
+                for index, row in enumerate(feed_rows_meta):
+                    if index >= len(feed_anchors):
+                        break
+                    feed_row_anchors.append(
+                        (
+                            feed_anchors[index],
+                            {
+                                "id": feed_item_id,
+                                "feedAction": str(row.get("action") or ""),
+                                "command": str(row.get("command") or ""),
+                            },
+                        )
+                    )
         switch_overlay = record.get("switch_overlay")
         if isinstance(switch_overlay, CardSwitchPendingOverlayWidget):
             pending = self._switch_pending_active_for_item(item)
@@ -1385,6 +1656,7 @@ class OverlayRenderingMixin:
         self._rest_action_anchors.clear()
         self._card_hover_anchors.clear()
         self._completed_hover_anchors.clear()
+        self._feed_row_anchors.clear()
         if rebuild:
             self._last_structure_signature = structure_signature
             self._clear_shell()

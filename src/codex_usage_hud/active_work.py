@@ -364,6 +364,10 @@ def _activity_step_payloads(
         if not title and not detail and not output:
             continue
         timestamp = getattr(step, "timestamp", None)
+        # activeTail keeps its real newlines (up to three output tail lines);
+        # flattening it here would undo the parser's line-preserving tail.
+        active_tail = str(getattr(step, "active_tail", "") or "")
+        exit_code = getattr(step, "exit_code", None)
         payloads.append(
             {
                 "timestamp": _iso_or_empty(timestamp),
@@ -375,6 +379,10 @@ def _activity_step_payloads(
                 "line": int(getattr(step, "line", 0) or 0),
                 "toolName": str(getattr(step, "tool_name", "") or "").strip(),
                 "output": output,
+                "activeTail": active_tail,
+                "exitCode": exit_code,
+                "durationText": str(getattr(step, "duration_text", "") or "").strip(),
+                "commandRaw": str(getattr(step, "command_raw", "") or "")[:2000],
             }
         )
     return tuple(payloads)
@@ -834,6 +842,7 @@ def _work_item_from_snapshot(
         task_started_at=snapshot.task_started_at,
         started_at=started_at,
         updated_at=updated_at,
+        last_output_at=getattr(snapshot.last_output, "timestamp", None),
         current=current,
         pending_accounting=pending_accounting,
         draft_text=draft_text,

@@ -6,8 +6,8 @@
   },
   "currentBundle": {
     "phase": "P6.7",
-    "sha256": "d5f78c11c8e9562a73d540d1c260db4e62be0d131aa460c22734d161bd650ccb",
-    "byteLength": 1111651
+    "sha256": "3f693b485bd00c1d84de4fbb96dc581b6a6d4eafc05345af3181e669c6fa2ec8",
+    "byteLength": 1115869
   },
   "sha256": "f83d65265c55143fa775f509f09ce109c2aa75a03946b42cf462cb6cbd4ea637",
   "byteLength": 548705,
@@ -141,7 +141,7 @@
     "codex_cli_launch_timeout", "codex_cli_launch_min_visible", "settings_restart",
     "layout_settle", "layout_settle", "layout_settle", "composer_layout",
     "layout_bootstrap", "layout_bootstrap", "composer_attachments", "layout_report",
-    "active_session", "active_session", "active_session", "active_session_bootstrap",
+    "active_session", "active_session", "active_session", "active_session", "active_session_bootstrap",
     "session_transfer_selection", "session_transfer_select_all",
     "session_transfer_selection", "stale_guard"
   ],
