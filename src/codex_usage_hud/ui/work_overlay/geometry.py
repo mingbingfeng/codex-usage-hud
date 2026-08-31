@@ -25,7 +25,6 @@ from .constants import (
     WORK_OVERLAY_COMPLETED_BADGE_ANIMATION_MS,
     WORK_OVERLAY_STACK_SPACING,
     WORK_OVERLAY_TRANSITION_CARD_HEIGHT,
-    WORK_OVERLAY_REST_CARD_EXTRA_HEIGHT,
     WORK_OVERLAY_TRANSITION_SHRINK_MS,
     WORK_OVERLAY_TRANSITION_PAUSE_MS,
     WORK_OVERLAY_TRANSITION_MOVE_MS,
@@ -60,7 +59,6 @@ from .model import (
     _clamp01,
     _item_id,
     _item_is_completed,
-    _item_is_rest_reminder,
     _item_kind,
 )
 
@@ -328,24 +326,12 @@ def _find_item_rect(
     )
     if active_index < 0:
         return (0.0, 0.0, 0.0, 0.0)
-    rect = _card_slot_rect(
+    return _card_slot_rect(
         active_index,
         len(completed_items),
         layout_width=layout_width,
         side=side,
     )
-    # The rest reminder carries an extra hint line plus its action button row;
-    # reserve the extra slot height for it and shift cards below by the same
-    # amount so nothing at the card bottom is clipped.
-    rest_extra_above = sum(
-        WORK_OVERLAY_REST_CARD_EXTRA_HEIGHT
-        for item in active_items[:active_index]
-        if _item_is_rest_reminder(item)
-    )
-    height = rect[3]
-    if _item_is_rest_reminder(active_items[active_index]):
-        height += WORK_OVERLAY_REST_CARD_EXTRA_HEIGHT
-    return (rect[0], rect[1] + rest_extra_above, rect[2], height)
 
 def _find_item_position(
     items: Sequence[Mapping[str, object]],

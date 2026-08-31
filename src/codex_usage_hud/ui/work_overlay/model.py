@@ -540,6 +540,12 @@ def _overlay_feed_active(item: Mapping[str, object]) -> bool:
             return True
         if not str(item.get("lastText") or "").strip():
             return True
+        # A collapsed Codex tool group remains the active body even during the
+        # short `tool -> active` gaps between commands.  Without this bridge,
+        # the bubble alternates between the purple execution view and the
+        # stale assistant-output view while the group is still running.
+        if _overlay_execution_body_active(item):
+            return True
         return _overlay_output_is_stale(item)
     return False
 
@@ -552,6 +558,258 @@ def _overlay_feed_tail_line(step: Mapping[str, object]) -> str:
         if candidate:
             line = candidate
     return line
+
+
+def _overlay_feed_summary_row(rows: Sequence[Mapping[str, str]]) -> Mapping[str, str] | None:
+    """Return the one-line execution summary used beside persistent output."""
+    for row in reversed(list(rows)):
+        if str(row.get("kind") or "") in {"live", "wait", "fail", "failed", "done"}:
+            return row
+    return rows[-1] if rows else None
+
+
+def _overlay_execution_group_steps(
+    item: Mapping[str, object],
+) -> list[Mapping[str, object]]:
+    """Return action steps belonging to the current collapsed execution block.
+
+    The Codex desktop groups the tool calls that follow an assistant output into
+    one disclosure.  The JSONL feed does not expose that disclosure node, so the
+    HUD reconstructs the same boundary from the newest output timestamp and the
+    ordered action steps.  Reasoning-only rows are intentionally excluded: the
+    group contains the commands/tools a user can act on.
+    """
+    steps = _overlay_activity_steps(item)
+    if not steps:
+        return []
+    last_output_at = parse_timestamp(str(item.get("lastOutputAt") or "").strip())
+
+    def is_action(step: Mapping[str, object]) -> bool:
+        title = str(step.get("title") or "").strip()
+        tool_name = str(step.get("toolName") or step.get("tool_name") or "").strip()
+        detail = " ".join(str(step.get("detail") or "").split())
+        return bool(detail or tool_name) and not (title == "思考" and not tool_name)
+
+    candidates: list[Mapping[str, object]] = []
+    for step in steps:
+        if not is_action(step):
+            continue
+        timestamp = parse_timestamp(str(step.get("timestamp") or "").strip())
+        if last_output_at is not None and timestamp is not None:
+            try:
+                if timestamp <= last_output_at:
+                    continue
+            except TypeError:
+                if timestamp.replace(tzinfo=None) <= last_output_at.replace(tzinfo=None):
+                    continue
+        candidates.append(step)
+
+    # Some legacy records omit timestamps. Keep the newest action window in
+    # that case instead of accidentally presenting the entire task history.
+    if not candidates:
+        candidates = [step for step in steps if is_action(step)][-16:]
+    return candidates[-16:]
+
+
+def _overlay_execution_body_active(item: Mapping[str, object]) -> bool:
+    """Whether the body should show commands instead of stale assistant text."""
+    steps = _overlay_execution_group_steps(item)
+    if not steps:
+        return False
+    if any(str(step.get("status") or "").strip().lower() == "running" for step in steps):
+        return True
+    first_timestamp = next(
+        (
+            timestamp
+            for timestamp in (
+                parse_timestamp(str(step.get("timestamp") or "").strip())
+                for step in steps
+            )
+            if timestamp is not None
+        ),
+        None,
+    )
+    last_output_at = parse_timestamp(str(item.get("lastOutputAt") or "").strip())
+    if first_timestamp is None:
+        return False
+    if last_output_at is None:
+        return True
+    try:
+        return last_output_at < first_timestamp
+    except TypeError:
+        return last_output_at.replace(tzinfo=None) < first_timestamp.replace(tzinfo=None)
+
+
+def _overlay_mcp_provider_label(tool_name: str) -> str:
+    normalized = str(tool_name or "").strip().lower().replace("-", "_")
+    parts = normalized.split("__")
+    if len(parts) < 3 or parts[0] != "mcp":
+        return ""
+    words = []
+    for word in parts[1].split("_"):
+        if not word:
+            continue
+        words.append("MCP" if word == "mcp" else word.capitalize())
+    return " ".join(words)
+
+
+def _overlay_execution_group_title(item: Mapping[str, object]) -> str:
+    """Build the short title shown in the bubble footer for a tool group."""
+    for key in (
+        "executionGroupTitle",
+        "collapsedTitle",
+        "activityGroupTitle",
+        "groupTitle",
+    ):
+        explicit = " ".join(str(item.get(key) or "").split())
+        if explicit:
+            return explicit
+    steps = _overlay_execution_group_steps(item)
+    if len(steps) < 2:
+        return ""
+    command_steps: list[Mapping[str, object]] = []
+    edit_steps: list[Mapping[str, object]] = []
+    read_steps: list[Mapping[str, object]] = []
+    wait_steps: list[Mapping[str, object]] = []
+    providers: list[str] = []
+    for step in steps:
+        title = str(step.get("title") or "").strip()
+        tool_name = str(step.get("toolName") or step.get("tool_name") or "").strip()
+        normalized = tool_name.lower().replace(".", "_").replace("-", "_")
+        prefix = _overlay_activity_step_prefix(step)
+        provider = _overlay_mcp_provider_label(tool_name)
+        if provider and provider not in providers:
+            providers.append(provider)
+        if "request_user_input" in normalized or prefix == "等确认":
+            wait_steps.append(step)
+        if (
+            prefix == "命令"
+            or title in {"执行命令", "命令完成", "命令失败"}
+            or normalized.endswith(("exec", "shell", "shell_command"))
+        ):
+            command_steps.append(step)
+        if (
+            prefix == "编辑"
+            or title == "编辑文件"
+            or any(token in normalized for token in ("edit", "write", "patch", "apply"))
+        ):
+            edit_steps.append(step)
+        if (
+            prefix == "读文件"
+            or any(token in normalized for token in ("read", "open", "cat", "view_file"))
+        ):
+            read_steps.append(step)
+
+    fragments: list[str] = [f"已使用 {provider}" for provider in providers]
+    if edit_steps:
+        fragments.append("集成或编辑了多个文件" if len(edit_steps) > 1 else "编辑了文件")
+    if read_steps:
+        fragments.append("读取了文件")
+    if command_steps:
+        fragments.append("运行了命令")
+    if wait_steps:
+        fragments.append("等待确认")
+    if fragments:
+        # The native Codex disclosure uses a sentence-like heading without
+        # separators. Spaces keep the title readable while allowing the
+        # footer's existing ellipsis to preserve its beginning.
+        return " ".join(fragments)
+    return "执行了一组工具"
+
+
+def _overlay_execution_rows(
+    item: Mapping[str, object],
+    *,
+    max_rows: int = WORK_OVERLAY_BODY_MAX_LINES,
+) -> list[dict[str, str]]:
+    """Render the latest commands/tools inside the current execution group."""
+    rows: list[dict[str, str]] = []
+    for step in _overlay_execution_group_steps(item):
+        title = str(step.get("title") or "").strip()
+        status = str(step.get("status") or "").strip().lower()
+        tool_name = str(step.get("toolName") or step.get("tool_name") or "").strip()
+        detail = " ".join(str(step.get("detail") or "").split()) or tool_name
+        prefix = _overlay_activity_step_prefix(step)
+        output = " ".join(str(step.get("output") or "").split())
+        command_raw = str(step.get("commandRaw") or "").strip() or detail
+        if prefix == "命令":
+            if status == "running":
+                text = f"$ {detail}".strip()
+                action = "copy_command"
+            elif status in {"failed", "error"}:
+                text = f"✗ {detail}".strip()
+                action = "peek_output"
+            else:
+                text = f"✓ {detail}".strip()
+                action = "peek_output"
+            duration = str(step.get("durationText") or "").strip()
+            if duration and status != "running":
+                text = f"{text} · {duration}"
+        elif prefix == "编辑":
+            text = f"✎ {detail}".strip()
+            if output and output != detail:
+                suffix = output.removeprefix(detail).strip(" ·")
+                if suffix:
+                    text = f"{text} · {suffix}"
+            action = "peek_output"
+        elif prefix == "读文件":
+            text = f"▣ {detail}".strip()
+            action = "peek_output"
+        elif prefix == "等确认":
+            text = f"⏸ {detail}".strip()
+            action = "peek_output"
+        else:
+            text = f"• {detail}".strip()
+            action = "peek_output"
+        if status in {"failed", "error"} and step.get("exitCode") not in (None, ""):
+            text = f"{text} · 退出码 {step.get('exitCode')}"
+        rows.append(
+            {
+                "kind": "execution",
+                "mode": "execution",
+                "text": text,
+                "tooltip": (
+                    f"完整命令（点击复制）：{command_raw}"
+                    if action == "copy_command"
+                    else output
+                ),
+                "action": action,
+                "command": command_raw if action == "copy_command" else "",
+            }
+        )
+    return rows[-max(1, int(max_rows)) :]
+
+
+def _overlay_execution_live_summary(item: Mapping[str, object]) -> str:
+    """Return the single live line shown beside the scheme-B expand button."""
+    steps = _overlay_execution_group_steps(item)
+    if not steps:
+        return "执行中"
+    running = next(
+        (
+            step
+            for step in reversed(steps)
+            if str(step.get("status") or "").strip().lower() == "running"
+        ),
+        None,
+    )
+    if running is not None:
+        detail = " ".join(str(running.get("detail") or "").split())
+        elapsed = _overlay_step_elapsed_seconds(running, datetime.now().astimezone())
+        return f"运行中 {elapsed}s" + (f" · {detail}" if detail else "")
+    failed = sum(
+        1
+        for step in steps
+        if str(step.get("status") or "").strip().lower() in {"failed", "error"}
+    )
+    completed = sum(
+        1
+        for step in steps
+        if str(step.get("status") or "").strip().lower() == "completed"
+    )
+    if failed:
+        return f"执行结果 · 完成 {completed} · 失败 {failed}"
+    return f"执行中 · 已完成 {completed} 项"
 
 
 def _overlay_feed_rows(
@@ -917,6 +1175,11 @@ __all__ = [
     "_overlay_activity_tooltip",
     "_overlay_feed_active",
     "_overlay_feed_rows",
+    "_overlay_execution_group_steps",
+    "_overlay_execution_body_active",
+    "_overlay_execution_group_title",
+    "_overlay_execution_live_summary",
+    "_overlay_execution_rows",
     "_overlay_feed_spinner_frame",
     "_overlay_feed_tail_line",
     "_overlay_footer_selection",

@@ -167,6 +167,36 @@ def _tool_call_name(payload: Mapping[str, Any]) -> str:
     return str(payload.get("name") or payload.get("tool_name") or "").strip()
 
 
+def _mcp_tool_name(item: Mapping[str, Any]) -> str:
+    """Normalize an event-level McpToolCall to the activity tool namespace."""
+    server = (
+        str(item.get("server") or "")
+        .strip()
+        .replace(".", "_")
+        .replace("-", "_")
+    )
+    tool = str(item.get("tool") or item.get("name") or "").strip()
+    if server and tool:
+        return f"mcp__{server}__{tool}"
+    return tool or server
+
+
+def _mcp_tool_detail(item: Mapping[str, Any]) -> str:
+    """Return a compact MCP action detail without embedding its result payload."""
+    tool_name = str(item.get("tool") or item.get("name") or "MCP 工具").strip()
+    arguments = item.get("arguments")
+    if arguments in (None, "", {}, []):
+        return tool_name
+    if isinstance(arguments, str):
+        text = arguments.strip()
+    else:
+        try:
+            text = json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
+        except (TypeError, ValueError):
+            text = str(arguments)
+    return f"{tool_name} {compact_text(text, 160)}".strip()
+
+
 def _command_parts(value: Any) -> list[str]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         return []
@@ -2790,6 +2820,49 @@ class JsonlSessionParser:
                                     line=_as_int(record.get("_line")),
                                 )
                             )
+                    continue
+                if item_type == "mcptoolcall":
+                    tool_name = _mcp_tool_name(item)
+                    detail = _mcp_tool_detail(item)
+                    call_id = str(item.get("id") or "").strip()
+                    failed = str(item.get("status") or "").casefold() in {
+                        "failed",
+                        "error",
+                    }
+                    existing_index = find_step_by_call_id(call_id)
+                    if payload_type != "item_completed":
+                        if existing_index is None:
+                            add_open_step(
+                                record,
+                                title="调用工具",
+                                detail=detail,
+                                call_id=call_id,
+                                tool_name=tool_name,
+                            )
+                        else:
+                            steps[existing_index].detail = detail or steps[existing_index].detail
+                            steps[existing_index].timestamp = record.get("_dt") or steps[existing_index].timestamp
+                        continue
+                    if existing_index is not None:
+                        step = steps[existing_index]
+                        step.timestamp = record.get("_dt") or step.timestamp
+                        step.detail = detail or step.detail
+                        step.status = "failed" if failed else "completed"
+                        step.title = "工具失败" if failed else "工具完成"
+                        step.line = _as_int(record.get("_line"), step.line)
+                        close_open_step(existing_index)
+                        continue
+                    steps.append(
+                        ActivityStep(
+                            timestamp=record.get("_dt"),
+                            title="工具失败" if failed else "工具完成",
+                            detail=detail,
+                            status="failed" if failed else "completed",
+                            call_id=call_id,
+                            line=_as_int(record.get("_line")),
+                            tool_name=tool_name,
+                        )
+                    )
                     continue
                 if item_type == "filechange":
                     if payload_type == "item_completed":

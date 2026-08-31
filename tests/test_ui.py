@@ -137,7 +137,6 @@ from codex_usage_hud.core.parser import (
 )
 from codex_usage_hud.ui.work_overlay_qt import (
     WORK_OVERLAY_QT_TRANSITION_ANIMATIONS_ENABLED,
-    WORK_OVERLAY_REST_CARD_EXTRA_HEIGHT,
     WORK_OVERLAY_STACK_SPACING,
     WORK_OVERLAY_STATE_READ_FAILURE_GRACE_SECONDS,
     WORK_OVERLAY_STATE_READ_RETRY_MS,
@@ -177,6 +176,9 @@ from codex_usage_hud.ui.work_overlay_qt import (
     _overlay_payload_signature,
     _overlay_activity_step_texts,
     _overlay_activity_tooltip,
+    _overlay_execution_body_active,
+    _overlay_execution_group_title,
+    _overlay_execution_rows,
     _overlay_hover_hit_test,
     _ordered_overlay_items,
     _overlay_items_required_height,
@@ -9013,16 +9015,95 @@ class WorkOverlayTransitionTests(unittest.TestCase):
         rest = _find_item_rect(items, "rest", "card", layout_width=430)
         next_card = _find_item_rect(items, "next", "card", layout_width=430)
 
-        # The rest card reserves extra slot height so its action button row is
-        # never clipped by the shared transition card height.
-        self.assertEqual(
-            rest[3],
-            110.0 + float(WORK_OVERLAY_REST_CARD_EXTRA_HEIGHT),
-        )
+        # The rest reminder must keep the shared compact card slot height; the
+        # button row fits via the card's tightened internal layout instead.
+        self.assertEqual(rest[3], 110.0)
         self.assertEqual(
             next_card[1],
             rest[1] + rest[3] + float(WORK_OVERLAY_STACK_SPACING),
         )
+    def test_rest_reminder_buttons_fit_inside_shared_card_slot(self) -> None:
+        try:
+            from PySide6.QtWidgets import QApplication, QWidget
+            from codex_usage_hud.ui.work_overlay.qt_visuals import ShimmerTextLabel
+            from codex_usage_hud.ui.work_overlay.constants import (
+                DEFAULT_WORK_OVERLAY_THEME,
+                WORK_OVERLAY_TRANSITION_CARD_HEIGHT,
+            )
+        except Exception as exc:
+            self.skipTest(f"PySide6 unavailable: {exc}")
+
+        previous_platform = os.environ.get("QT_QPA_PLATFORM")
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        shell = None
+        try:
+            app = QApplication.instance() or QApplication(sys.argv[:1])
+            app.setQuitOnLastWindowClosed(False)
+            shell = QWidget()
+            shell.resize(430, 220)
+            rendering = object.__new__(OverlayRenderingMixin)
+            rendering._shell = shell
+            rendering._theme_tokens = dict(DEFAULT_WORK_OVERLAY_THEME)
+            rendering._header_title_limit = 28
+            rendering._multiline_elided_text = _multiline_elided_text
+            rendering._item_widgets = []
+            rendering._card_hover_anchors = []
+            rendering._system_action_anchors = []
+            rendering._rest_action_anchors = []
+            rendering._close_anchors = []
+            rendering._workdir_anchors = []
+            rendering._completed_check_anchors = []
+            rendering._feed_row_anchors = []
+            rendering._feed_peek_item_ids = set()
+            rendering._feed_spinner_tick = 0
+            rendering._switch_pending_active_for_item = lambda _item: False
+            rendering._switch_pending_completed_for_item = lambda _item: False
+            item = {
+                "id": "rest-reminder",
+                "kind": "rest_reminder",
+                "phase": "prompt",
+                "title": "☕ 该休息一下了",
+                "headerMeta": "今日已休息 00:00",
+                "headerElapsed": "已等待 00:18",
+                "status": "waiting_user",
+                "statusText": "等待你的选择 · 不会自动跳过",
+                "lastText": "把视线移到远处，放松眼睛，再起身活动一下。",
+                "restHint": "如果您已提前休息过了，可以点击下方分钟数按钮标记已休息",
+                "elapsedText": "",
+                "restActions": [
+                    {"action": "restReminderPostpone", "label": "延迟 10 分钟"},
+                    {"action": "restCredit", "label": "3分钟"},
+                    {"action": "restCredit", "label": "5分钟"},
+                    {"action": "restCredit", "label": "10分钟"},
+                    {"action": "restReminderStart", "label": "开始休息", "primary": True},
+                ],
+            }
+
+            rendering._build_item_card(item)
+            record = rendering._item_widgets[-1]
+            card = record["card"]
+            card.setGeometry(0, 0, 430, WORK_OVERLAY_TRANSITION_CARD_HEIGHT)
+            shell.show()
+            app.processEvents()
+            card.layout().activate()
+
+            # 紧凑布局：按钮行必须完整落在共享 110px 卡片槽内，且底部状态行让位。
+            self.assertFalse(record["footer_container"].isVisible())
+            self.assertFalse(record["live_line"].isVisible())
+            self.assertFalse(record["feed_action_label"].isVisible())
+            self.assertFalse(record["feed_action_anchor"].isVisible())
+            self.assertLessEqual(
+                record["rest_actions_row"].geometry().bottom(),
+                WORK_OVERLAY_TRANSITION_CARD_HEIGHT,
+            )
+        finally:
+            if previous_platform is None:
+                os.environ.pop("QT_QPA_PLATFORM", None)
+            else:
+                os.environ["QT_QPA_PLATFORM"] = previous_platform
+            if shell is not None:
+                shell.deleteLater()
+
 
 
 @unittest.skip("legacy standalone HUD removed")
@@ -21176,6 +21257,24 @@ class WorkOverlayFeedProjectionTests(unittest.TestCase):
         )
         self.assertTrue(_overlay_feed_active(thinking))
 
+    def test_feed_stays_active_between_commands_when_output_is_unchanged(self) -> None:
+        item = self._item(
+            status="active",
+            lastText="上一条回答",
+            lastOutputAt=self._iso(0.6),
+            activitySteps=(
+                self._step(
+                    "命令完成",
+                    "rg first",
+                    "completed",
+                    minutes_ago=0.4,
+                ),
+            ),
+        )
+
+        self.assertTrue(_overlay_execution_body_active(item))
+        self.assertTrue(_overlay_feed_active(item))
+
     def test_feed_inactive_after_fresh_output_without_running_step(self) -> None:
         done = self._item(
             status="recent",
@@ -21275,6 +21374,70 @@ class WorkOverlayFeedProjectionTests(unittest.TestCase):
         )
 
         self.assertEqual(len(_overlay_feed_rows(item)), 3)
+
+    def test_execution_group_title_summarizes_collapsed_tool_block(self) -> None:
+        item = self._item(
+            lastOutputAt=self._iso(6.0),
+            activitySteps=(
+                self._step(
+                    "调用工具",
+                    "search_graph activitySteps",
+                    "completed",
+                    toolName="mcp__codebase_memory_mcp__search_graph",
+                    minutes_ago=4.0,
+                ),
+                self._step(
+                    "编辑文件",
+                    "qt_rendering.py",
+                    "completed",
+                    toolName="apply_patch",
+                    minutes_ago=3.0,
+                    output="qt_rendering.py +20/-4",
+                ),
+                self._step(
+                    "执行命令",
+                    "pytest tests/test_ui.py -q",
+                    "running",
+                    minutes_ago=0.2,
+                ),
+            ),
+        )
+
+        title = _overlay_execution_group_title(item)
+
+        self.assertIn("Codebase Memory MCP", title)
+        self.assertIn("编辑", title)
+        self.assertIn("运行了命令", title)
+        self.assertTrue(_overlay_execution_body_active(item))
+
+    def test_execution_group_rows_show_latest_instructions(self) -> None:
+        item = self._item(
+            lastOutputAt=self._iso(6.0),
+            activitySteps=(
+                self._step("执行命令", "rg first", "completed", minutes_ago=4.0),
+                self._step("执行命令", "rg second", "completed", minutes_ago=3.0),
+                self._step("执行命令", "pytest third", "running", minutes_ago=0.2),
+                self._step("执行命令", "hidden older", "completed", minutes_ago=7.0),
+            ),
+        )
+
+        rows = _overlay_execution_rows(item)
+
+        self.assertEqual(len(rows), 3)
+        self.assertEqual([row["mode"] for row in rows], ["execution"] * 3)
+        self.assertIn("rg first", rows[0]["text"])
+        self.assertIn("pytest third", rows[-1]["text"])
+        self.assertEqual(rows[-1]["action"], "copy_command")
+
+    def test_execution_body_returns_to_output_after_fresh_assistant_message(self) -> None:
+        item = self._item(
+            lastOutputAt=self._iso(0.1),
+            activitySteps=(
+                self._step("命令完成", "pytest -q", "completed", minutes_ago=0.2),
+            ),
+        )
+
+        self.assertFalse(_overlay_execution_body_active(item))
 
     def test_footer_selection_priority(self) -> None:
         running = self._item()

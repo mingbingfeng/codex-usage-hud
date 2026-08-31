@@ -10,12 +10,15 @@ from typing import Any
 
 from PySide6.QtCore import (
     QPoint,
+    Property,
     QRect,
     QRectF,
     Qt,
+    QEasingCurve,
+    QPropertyAnimation,
     QTimer,
 )
-from PySide6.QtGui import QFont, QFontMetrics
+from PySide6.QtGui import QFont, QFontMetrics, QPainter
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -71,8 +74,13 @@ from .model import (
     _overlay_activity_tooltip,
     _overlay_feed_active,
     _overlay_feed_rows,
+    _overlay_feed_summary_row,
     _overlay_feed_spinner_frame,
     _overlay_footer_selection,
+    _overlay_execution_body_active,
+    _overlay_execution_group_title,
+    _overlay_execution_live_summary,
+    _overlay_execution_rows,
     _overlay_step_elapsed_seconds,
     _normalized_rest_reminder,
     _normalized_system_action,
@@ -102,6 +110,81 @@ focus_policy = Qt.FocusPolicy
 alignment = Qt.AlignmentFlag
 text_format = Qt.TextFormat
 window_type = Qt.WindowType
+
+
+class ScrollingFeedLabel(QLabel):
+    """Three-line label that rolls the execution window upward on updates."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._scroll_lines: list[str] = []
+        self._old_scroll_lines: list[str] = []
+        self._scroll_offset = 0.0
+        self._scroll_animation = QPropertyAnimation(self, b"scrollOffset", self)
+        self._scroll_animation.setDuration(180)
+        self._scroll_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self.setAttribute(widget_attrs.WA_OpaquePaintEvent, False)
+
+    def _get_scroll_offset(self) -> float:
+        return float(self._scroll_offset)
+
+    def _set_scroll_offset(self, value: float) -> None:
+        self._scroll_offset = max(0.0, min(1.0, float(value)))
+        self.update()
+
+    scrollOffset = Property(float, _get_scroll_offset, _set_scroll_offset)
+
+    def clear_scrolling_lines(self) -> None:
+        self._scroll_animation.stop()
+        self._scroll_lines = []
+        self._old_scroll_lines = []
+        self._scroll_offset = 0.0
+        self.update()
+
+    def set_scrolling_lines(self, lines: Sequence[str]) -> None:
+        normalized = [str(line or "") for line in lines if str(line or "")]
+        if normalized == self._scroll_lines:
+            return
+        old = list(self._scroll_lines)
+        self._scroll_animation.stop()
+        self._old_scroll_lines = old
+        self._scroll_lines = normalized
+        self.setText("\n".join(normalized))
+        if old and normalized:
+            self._scroll_offset = 0.0
+            self._scroll_animation.setStartValue(0.0)
+            self._scroll_animation.setEndValue(1.0)
+            self._scroll_animation.start()
+        else:
+            self._scroll_offset = 1.0
+        self.update()
+
+    def paintEvent(self, event: object) -> None:
+        if not self._old_scroll_lines or self._scroll_offset >= 1.0:
+            super().paintEvent(event)
+            return
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        painter.setClipRect(self.rect())
+        painter.setFont(self.font())
+        painter.setPen(self.palette().color(self.foregroundRole()))
+        line_height = max(1, self.fontMetrics().height())
+        progress = self._scroll_offset
+        old_y = -progress * line_height
+        new_y = (1.0 - progress) * line_height
+        for index, line in enumerate(self._old_scroll_lines):
+            painter.drawText(
+                QRect(0, int(old_y + index * line_height), self.width(), line_height),
+                int(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft),
+                line,
+            )
+        for index, line in enumerate(self._scroll_lines):
+            painter.drawText(
+                QRect(0, int(new_y + index * line_height), self.width(), line_height),
+                int(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft),
+                line,
+            )
 
 
 class OverlayRenderingMixin:
@@ -185,6 +268,13 @@ class OverlayRenderingMixin:
         texts = _overlay_activity_step_texts(item)
         if not texts:
             return "", ""
+        group_title = _overlay_execution_group_title(item)
+        if group_title and _overlay_feed_active(item) and _overlay_execution_body_active(item):
+            tooltip = group_title
+            activity_tooltip = _overlay_activity_tooltip(item)
+            if activity_tooltip:
+                tooltip = f"{tooltip}\n{activity_tooltip}"
+            return group_title, tooltip
         kind, text = _overlay_footer_selection(item)
         if not text:
             return "", ""
@@ -234,7 +324,7 @@ class OverlayRenderingMixin:
         record: dict[str, Any],
         item: Mapping[str, object],
     ) -> list[dict[str, str]]:
-        """Build width-elided feed rows, or the single peek row when reviewing."""
+        """Build the compact execution summary, or expanded activity rows."""
         if str(record.get("kind") or "") != "card":
             return []
         detail = record.get("detail")
@@ -247,21 +337,6 @@ class OverlayRenderingMixin:
             return []
         item_id = _item_id(item)
         peek_ids = getattr(self, "_feed_peek_item_ids", None)
-        if (
-            isinstance(peek_ids, set)
-            and item_id
-            and item_id in peek_ids
-            and str(item.get("lastText") or "").strip()
-        ):
-            return [
-                {
-                    "kind": "peek",
-                    "text": "",
-                    "tooltip": "回看输出（临时） · 点击返回活动",
-                    "action": "resume_feed",
-                    "command": "",
-                }
-            ]
         rows = _overlay_feed_rows(
             item,
             spinner_frame=self._feed_spinner_glyph(),
@@ -269,6 +344,24 @@ class OverlayRenderingMixin:
         )
         if not rows:
             return []
+        expanded = isinstance(peek_ids, set) and item_id and item_id in peek_ids
+        if not expanded and _overlay_execution_body_active(item):
+            rows = _overlay_execution_rows(item)
+        elif not expanded:
+            summary = _overlay_feed_summary_row(rows)
+            rows = [dict(summary)] if summary else rows[-1:]
+            if rows:
+                rows[0]["action"] = "peek_output"
+                rows[0]["tooltip"] = "展开执行详情"
+        else:
+            rows = [dict(row) for row in rows]
+            if rows:
+                rows[-1]["action"] = "resume_feed"
+                rows[-1]["tooltip"] = "收起执行详情"
+        if rows:
+            mode = "expanded" if expanded else str(rows[0].get("mode") or "summary")
+            for row in rows:
+                row.setdefault("mode", mode)
         metrics = QFontMetrics(detail.font())
         width = WORK_OVERLAY_TEXT_WRAP_WIDTH
         for row in rows:
@@ -298,38 +391,296 @@ class OverlayRenderingMixin:
         if not isinstance(detail, QLabel):
             return
         rows = self._feed_rows_for_item(record, item)
-        if not rows or str(rows[0].get("action") or "") == "resume_feed":
+        if not rows:
             return
-        text = "\n".join(str(row.get("text") or "") for row in rows)
-        if text == detail.text():
+        expanded = _item_id(item) in getattr(self, "_feed_peek_item_ids", set())
+        mode = str(rows[0].get("mode") or "summary")
+        if expanded or mode == "expanded" or mode == "execution":
+            text = "\n".join(str(row.get("text") or "") for row in rows)
+        else:
+            body_text = str(item.get("lastText") or item.get("detail") or "").strip()
+            output_text = self._multiline_elided_text(
+                body_text,
+                font=detail.font(),
+                width=WORK_OVERLAY_TEXT_WRAP_WIDTH,
+                max_lines=2,
+            )
+            summary_text = str(rows[0].get("text") or "")
+            summary_text = self._multiline_elided_text(
+                summary_text,
+                font=detail.font(),
+                width=max(1, WORK_OVERLAY_TEXT_WRAP_WIDTH - 52),
+                max_lines=1,
+            )
+            text = "\n".join(part for part in (output_text, summary_text) if part)
+        record["feed_rows_meta"] = list(rows)
+        if not expanded and mode in {"summary", "execution"}:
+            live_symbol = record.get("live_symbol")
+            if isinstance(live_symbol, QLabel):
+                live_symbol.setText(
+                    "!"
+                    if any(str(row.get("kind") or "") == "wait" for row in rows)
+                    else "×"
+                    if any(str(row.get("kind") or "") in {"fail", "failed"} for row in rows)
+                    else "…"
+                )
+            self._sync_scheme_b_body(
+                record,
+                mode=mode,
+                expanded=False,
+                body_text=str(item.get("lastText") or item.get("detail") or "").strip(),
+                live_text=str(rows[-1].get("text") or ""),
+                detail_text=text,
+            )
+            self._sync_feed_action_label(record, expanded=False)
+            self._sync_feed_anchor_geometry(record)
             return
+        if text == detail.text() and mode != "expanded":
+            return
+        if isinstance(detail, ScrollingFeedLabel):
+            detail.clear_scrolling_lines()
         detail.setText(text)
+        detail.setFixedHeight(
+            self._wrapped_label_height(detail, WORK_OVERLAY_TEXT_WRAP_WIDTH)
+        )
         detail.setToolTip(
             "\n".join(
                 str(row.get("tooltip") or "") for row in rows if row.get("tooltip")
             )
         )
+        self._sync_scheme_b_body(
+            record,
+            mode="expanded",
+            expanded=True,
+            body_text="",
+            live_text="",
+            detail_text=text,
+        )
+        self._sync_feed_action_label(record, expanded=True)
+        self._sync_feed_anchor_geometry(record)
 
     def _sync_feed_anchor_geometry(self, record: dict[str, Any]) -> None:
         """Position one invisible click target over each visible feed row."""
         rows = record.get("feed_rows_meta") or []
         anchors = record.get("feed_anchors") or []
         detail = record.get("detail")
+        body_host = record.get("body_host")
         if not isinstance(detail, QLabel) or not anchors:
             return
         count = max(1, len(rows))
-        row_height = max(1, detail.height() // count) if rows else 0
+        source = body_host if isinstance(body_host, QWidget) else detail
+        row_height = max(1, source.height() // count) if rows else 0
+        expanded = _item_id(record.get("item") or {}) in getattr(
+            self, "_feed_peek_item_ids", set()
+        )
         for index, anchor in enumerate(anchors):
-            if index >= len(rows):
+            if (
+                index >= len(rows)
+                or str(rows[index].get("action") or "") != "copy_command"
+                or (not expanded and str(rows[index].get("mode") or "") == "execution")
+            ):
                 anchor.hide()
                 continue
             anchor.setGeometry(
-                detail.x(),
-                detail.y() + index * row_height,
-                detail.width(),
+                0 if source is body_host else detail.x(),
+                index * row_height if source is body_host else detail.y() + index * row_height,
+                min(
+                    source.width(),
+                    max(
+                        24,
+                        QFontMetrics(detail.font()).horizontalAdvance(
+                            str(rows[index].get("text") or "")
+                        )
+                        + 12,
+                    ),
+                ),
                 row_height,
             )
             anchor.show()
+        action_anchor = record.get("feed_action_anchor")
+        action_label = record.get("feed_action_label")
+        if (
+            isinstance(action_anchor, QWidget)
+            and isinstance(action_label, QLabel)
+            and action_label.isVisible()
+        ):
+            action_anchor.setGeometry(action_label.geometry())
+            action_anchor.show()
+        elif isinstance(action_anchor, QWidget):
+            action_anchor.hide()
+
+    def _sync_feed_action_label(
+        self,
+        record: dict[str, Any],
+        *,
+        expanded: bool,
+    ) -> None:
+        """Place the visible scheme-B expand/collapse affordance in the body."""
+        label = record.get("feed_action_label")
+        detail = record.get("detail")
+        body_host = record.get("body_host")
+        rows = record.get("feed_rows_meta") or []
+        if (
+            not isinstance(label, QLabel)
+            or not isinstance(detail, QLabel)
+            or not isinstance(body_host, QWidget)
+            or not rows
+        ):
+            if isinstance(label, QLabel):
+                label.hide()
+            action_anchor = record.get("feed_action_anchor")
+            if isinstance(action_anchor, QWidget):
+                action_anchor.hide()
+            return
+        control_width = 22 if expanded else 48
+        row_height = max(18, detail.fontMetrics().height() + 4)
+        pinned_height = max(26, detail.fontMetrics().height() * 2 + 2)
+        label.setText("↓" if expanded else "展开")
+        label.setToolTip("收起执行详情" if expanded else "展开执行详情")
+        label.setFixedWidth(control_width)
+        label.setFixedHeight(row_height)
+        label.setGeometry(
+            max(0, body_host.width() - control_width),
+            0
+            if expanded
+            else max(0, pinned_height - 1),
+            control_width,
+            row_height,
+        )
+        info = "#76B8F6"
+        divider = str(self._theme_tokens.get("panelBorder") or "#323232")
+        label.setStyleSheet(
+            "QLabel {"
+            f"color: {info};"
+            "background-color: #212121;"
+            f"border: 1px solid {divider};"
+            "border-radius: 5px;"
+            "padding: 0 4px;"
+            "}"
+        )
+        label.show()
+        label.raise_()
+        action_anchor = record.get("feed_action_anchor")
+        if isinstance(action_anchor, QWidget):
+            action_anchor.setGeometry(label.geometry())
+            action_anchor.show()
+
+    def _sync_scheme_b_body(
+        self,
+        record: dict[str, Any],
+        *,
+        mode: str,
+        expanded: bool,
+        body_text: str,
+        live_text: str,
+        detail_text: str,
+    ) -> None:
+        """Apply the HTML scheme-B pinned/output/feed layout inside one card."""
+        host = record.get("body_host")
+        detail = record.get("detail")
+        pinned = record.get("pinned_output")
+        live_line = record.get("live_line")
+        live_symbol = record.get("live_symbol")
+        live = record.get("live_text")
+        action = record.get("feed_action_label")
+        if not isinstance(host, QWidget) or not isinstance(detail, QLabel):
+            return
+        width = max(
+            WORK_OVERLAY_TEXT_WRAP_WIDTH,
+            int(host.width() or WORK_OVERLAY_TEXT_WRAP_WIDTH),
+        )
+        line_height = max(1, detail.fontMetrics().height())
+        pinned_height = max(26, line_height * 2 + 2)
+        body_height = max(48, pinned_height + 22)
+
+        if mode == "legacy":
+            # Special cards (rest reminders, system notices/actions, and
+            # background-usage notices) never participate in scheme B. Keep
+            # their original body/detail path and hide every execution-only
+            # child so a reminder cannot inherit an expand affordance.
+            if isinstance(pinned, QLabel):
+                pinned.hide()
+            if isinstance(live_line, QWidget):
+                live_line.hide()
+            if isinstance(live_symbol, QLabel):
+                live_symbol.hide()
+            if isinstance(live, QLabel):
+                live.hide()
+            if isinstance(action, QLabel):
+                action.hide()
+            action_anchor = record.get("feed_action_anchor")
+            if isinstance(action_anchor, QWidget):
+                action_anchor.hide()
+            host.setFixedHeight(
+                max(1, self._wrapped_label_height(detail, width))
+            )
+            detail.show()
+            detail.setGeometry(0, 0, width, host.height())
+            detail.setFixedHeight(host.height())
+            if isinstance(detail, ScrollingFeedLabel):
+                detail.clear_scrolling_lines()
+            detail.setText(detail_text)
+            return
+
+        if mode in {"summary", "execution"} and not expanded:
+            host.setFixedHeight(body_height)
+            detail.hide()
+            if isinstance(pinned, QLabel):
+                pinned_text = self._multiline_elided_text(
+                    body_text or "等待输出",
+                    font=pinned.font(),
+                    width=width,
+                    max_lines=2,
+                )
+                pinned.setText(pinned_text)
+                pinned.setGeometry(0, 0, width, pinned_height)
+                pinned.setStyleSheet(
+                    "QLabel { color: #B9B9B9; border: none; background: transparent; opacity: 0.72; }"
+                )
+                pinned.show()
+            if isinstance(live_line, QWidget):
+                live_line.setGeometry(0, pinned_height, width, body_height - pinned_height)
+                live_line.show()
+            if isinstance(live_symbol, QLabel):
+                live_symbol.setGeometry(0, 0, 16, max(1, body_height - pinned_height))
+                live_symbol.show()
+            if isinstance(live, QLabel):
+                live.setGeometry(18, 0, max(1, width - 70), max(1, body_height - pinned_height))
+                live.setText(
+                    self._multiline_elided_text(
+                        live_text or "执行中",
+                        font=live.font(),
+                        width=max(1, width - 70),
+                        max_lines=1,
+                    )
+                )
+                live.show()
+            if isinstance(action, QLabel):
+                action.show()
+            if isinstance(action, QLabel):
+                action.raise_()
+            return
+
+        if isinstance(pinned, QLabel):
+            pinned.hide()
+        if isinstance(live_line, QWidget):
+            live_line.hide()
+        if isinstance(live_symbol, QLabel):
+            live_symbol.hide()
+        if isinstance(live, QLabel):
+            live.hide()
+        host.setFixedHeight(body_height if expanded else max(1, detail_text.count("\n") + 1) * line_height)
+        detail.show()
+        if isinstance(detail, ScrollingFeedLabel):
+            detail.set_scrolling_lines(detail_text.splitlines())
+        else:
+            detail.setText(detail_text)
+        detail.setGeometry(0, 0, width, host.height())
+        detail.setFixedHeight(host.height())
+        if isinstance(action, QLabel):
+            action.setVisible(bool(expanded and record.get("feed_rows_meta")))
+            if expanded:
+                action.raise_()
 
     def _tick_feed_spinner(self) -> None:
         """Rotate the feed spinner glyph; only runs while a feed is active."""
@@ -497,7 +848,13 @@ class OverlayRenderingMixin:
             WORK_OVERLAY_CARD_X_PADDING,
             WORK_OVERLAY_CARD_Y_PADDING,
         )
-        card_layout.setSpacing(WORK_OVERLAY_CARD_SPACING)
+        if _item_is_rest_reminder(item):
+            # The rest card stacks hint text and an action row on top of the
+            # normal body; tighten the row spacing so everything stays inside
+            # the shared 110px card slot instead of growing the bubble.
+            card_layout.setSpacing(max(0, WORK_OVERLAY_CARD_SPACING - 2))
+        else:
+            card_layout.setSpacing(WORK_OVERLAY_CARD_SPACING)
 
         head_layout = QHBoxLayout()
         head_layout.setContentsMargins(0, 0, 0, 0)
@@ -528,15 +885,66 @@ class OverlayRenderingMixin:
         head_layout.addWidget(close_anchor, 0)
         card_layout.addLayout(head_layout)
 
-        detail = QLabel("", card)
+        body_host = QWidget(card)
+        body_host.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
+        # Match the existing footer content width. The card's frame/margins
+        # leave six extra pixels beyond WORK_OVERLAY_TEXT_WRAP_WIDTH; using the
+        # same inner width keeps the scheme-B right control aligned with the
+        # workdir/round slot.
+        body_width = WORK_OVERLAY_TEXT_WRAP_WIDTH + 6
+        body_host.setFixedWidth(body_width)
+        body_host.setFixedHeight(1)
+        body_host.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+
+        detail = ScrollingFeedLabel(body_host)
         detail.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
         detail.setWordWrap(True)
         detail.setTextFormat(text_format.PlainText)
         detail.setAlignment(alignment.AlignTop | alignment.AlignLeft)
         detail.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Minimum)
         detail.setFont(QFont("Microsoft YaHei UI", 8))
-        detail.setFixedWidth(WORK_OVERLAY_TEXT_WRAP_WIDTH)
-        card_layout.addWidget(detail)
+        detail.setFixedWidth(body_width)
+
+        pinned_output = QLabel("", body_host)
+        pinned_output.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
+        pinned_output.setWordWrap(True)
+        pinned_output.setTextFormat(text_format.PlainText)
+        pinned_output.setAlignment(alignment.AlignTop | alignment.AlignLeft)
+        pinned_output.setFont(QFont("Microsoft YaHei UI", 8))
+        pinned_output.setFixedWidth(body_width)
+        pinned_output.hide()
+
+        live_line = QWidget(body_host)
+        live_line.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
+        live_line.setStyleSheet("QWidget { border-top: 1px solid #263241; background: transparent; }")
+        live_line.hide()
+
+        live_symbol = QLabel("", live_line)
+        live_symbol.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
+        live_symbol.setAlignment(alignment.AlignCenter)
+        live_symbol.setFont(QFont("Microsoft YaHei UI", 8))
+        live_symbol.setStyleSheet("QLabel { border: none; background: transparent; color: #9CCBFF; }")
+
+        live_text = QLabel("", live_line)
+        live_text.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
+        live_text.setWordWrap(False)
+        live_text.setTextFormat(text_format.PlainText)
+        live_text.setAlignment(alignment.AlignVCenter | alignment.AlignLeft)
+        live_text.setFont(QFont("Microsoft YaHei UI", 8))
+        live_text.setStyleSheet("QLabel { border: none; background: transparent; color: #8492A6; }")
+
+        feed_action_label = QLabel("", body_host)
+        feed_action_label.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
+        feed_action_label.setAlignment(alignment.AlignCenter)
+        feed_action_label.setFont(QFont("Microsoft YaHei UI", 8, QFont.Weight.DemiBold))
+        feed_action_label.hide()
+
+        feed_action_anchor = QWidget(body_host)
+        feed_action_anchor.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
+        feed_action_anchor.hide()
+
+        body_host.setFixedHeight(1)
+        card_layout.addWidget(body_host)
 
         rest_hint = QLabel("", card)
         rest_hint.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
@@ -647,7 +1055,7 @@ class OverlayRenderingMixin:
         # interactive-window reposition pass after the layout settles.
         feed_anchors: list[QWidget] = []
         for _ in range(WORK_OVERLAY_BODY_MAX_LINES):
-            feed_anchor = QWidget(card)
+            feed_anchor = QWidget(body_host)
             feed_anchor.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
             feed_anchor.hide()
             feed_anchors.append(feed_anchor)
@@ -659,6 +1067,11 @@ class OverlayRenderingMixin:
             "header": header,
             "header_meta": header_meta,
             "detail": detail,
+            "body_host": body_host,
+            "pinned_output": pinned_output,
+            "live_line": live_line,
+            "live_symbol": live_symbol,
+            "live_text": live_text,
             "rest_hint": rest_hint,
             "footer_container": footer_container,
             "rest_actions_row": rest_actions_row,
@@ -676,6 +1089,8 @@ class OverlayRenderingMixin:
             "switch_overlay": switch_overlay,
             "close_anchor": close_anchor,
             "feed_anchors": feed_anchors,
+            "feed_action_anchor": feed_action_anchor,
+            "feed_action_label": feed_action_label,
             "feed_rows_meta": [],
         }
         self._item_widgets.append(record)
@@ -711,6 +1126,7 @@ class OverlayRenderingMixin:
         )
         feed_rows: list[dict[str, str]] = []
         peeking = False
+        item_id = _item_id(item)
         if not (
             system_action
             or system_notice
@@ -719,9 +1135,7 @@ class OverlayRenderingMixin:
             or status == "draft"
         ):
             feed_rows = self._feed_rows_for_item(record, item)
-            peeking = bool(feed_rows) and str(
-                feed_rows[0].get("action") or ""
-            ) == "resume_feed"
+            peeking = bool(feed_rows) and item_id in getattr(self, "_feed_peek_item_ids", set())
         theme = self._theme_tokens
         elapsed_text = (
             ""
@@ -849,10 +1263,65 @@ class OverlayRenderingMixin:
         else:
             body_text = str(item.get("lastText") or item.get("detail") or "").strip()
         detail = record["detail"]
-        if feed_rows and not peeking:
+        feed_mode = str(feed_rows[0].get("mode") or "summary") if feed_rows else ""
+        if feed_rows and peeking:
             # Live activity feed: pre-elided single lines so each row keeps a
             # stable click band without touching the body layout constants.
+            action_width = 22
+            metrics = QFontMetrics(detail.font())
+            detail_lines = [
+                metrics.elidedText(
+                    str(row.get("text") or ""),
+                    Qt.TextElideMode.ElideRight,
+                    max(
+                        1,
+                        WORK_OVERLAY_TEXT_WRAP_WIDTH
+                        - (action_width if index == len(feed_rows) - 1 else 0),
+                    ),
+                )
+                for index, row in enumerate(feed_rows)
+            ]
+            detail_text = "\n".join(detail_lines)
+            detail.setToolTip(
+                "\n".join(
+                    str(row.get("tooltip") or "")
+                    for row in feed_rows
+                    if row.get("tooltip")
+                )
+            )
+        elif feed_rows and feed_mode == "execution":
+            # When the Codex turn is inside a collapsed tool group, show the
+            # group's latest concrete instructions in the body. The footer
+            # carries the group heading; stale assistant text stays hidden
+            # until a fresh assistant message arrives.
             detail_text = "\n".join(str(row.get("text") or "") for row in feed_rows)
+            detail.setToolTip(
+                "\n".join(
+                    str(row.get("tooltip") or "")
+                    for row in feed_rows
+                    if row.get("tooltip")
+                )
+            )
+        elif feed_rows:
+            # Scheme B: preserve the latest assistant output and append one
+            # truthful execution summary line. Full rows appear only after
+            # the user activates that summary.
+            summary_text = str(feed_rows[0].get("text") or "")
+            output_text = self._multiline_elided_text(
+                body_text,
+                font=detail.font(),
+                width=WORK_OVERLAY_TEXT_WRAP_WIDTH,
+                max_lines=2,
+            )
+            summary_text = self._multiline_elided_text(
+                summary_text,
+                font=detail.font(),
+                width=max(1, WORK_OVERLAY_TEXT_WRAP_WIDTH - 52),
+                max_lines=1,
+            )
+            detail_text = "\n".join(
+                part for part in (output_text, summary_text) if part
+            )
             detail.setToolTip(
                 "\n".join(
                     str(row.get("tooltip") or "")
@@ -867,13 +1336,76 @@ class OverlayRenderingMixin:
                 width=WORK_OVERLAY_TEXT_WRAP_WIDTH,
             )
             if peeking:
-                detail.setToolTip("回看输出（临时） · 点击返回活动")
+                detail.setToolTip("执行详情 · 点击收起")
             else:
                 detail.setToolTip(
                     body_text if detail_text and detail_text != body_text else ""
                 )
-        detail.setText(detail_text)
-        detail.setFixedHeight(self._wrapped_label_height(detail, WORK_OVERLAY_TEXT_WRAP_WIDTH))
+        if isinstance(detail, ScrollingFeedLabel):
+            if peeking:
+                detail.set_scrolling_lines(detail_text.splitlines())
+            else:
+                detail.clear_scrolling_lines()
+                detail.setText(detail_text)
+        else:
+            detail.setText(detail_text)
+        detail_height = self._wrapped_label_height(detail, WORK_OVERLAY_TEXT_WRAP_WIDTH)
+        detail.setFixedHeight(detail_height)
+        record["feed_rows_meta"] = list(feed_rows)
+        live_body_text = _overlay_execution_live_summary(item) if feed_rows else ""
+        scheme_b_enabled = not (
+            system_action
+            or system_notice
+            or background_usage
+            or rest_reminder
+            or status == "draft"
+        )
+        if not scheme_b_enabled:
+            record["feed_rows_meta"] = []
+            self._sync_scheme_b_body(
+                record,
+                mode="legacy",
+                expanded=False,
+                body_text=body_text,
+                live_text="",
+                detail_text=detail_text,
+            )
+        elif feed_rows and not peeking:
+            live_symbol = record.get("live_symbol")
+            if isinstance(live_symbol, QLabel):
+                live_symbol.setText(
+                    "!"
+                    if any(str(row.get("kind") or "") == "wait" for row in feed_rows)
+                    else "×"
+                    if any(str(row.get("kind") or "") in {"fail", "failed"} for row in feed_rows)
+                    else "…"
+                )
+            self._sync_scheme_b_body(
+                record,
+                mode=feed_mode or "summary",
+                expanded=False,
+                body_text=body_text,
+                live_text=live_body_text,
+                detail_text=detail_text,
+            )
+        elif feed_rows and peeking:
+            self._sync_scheme_b_body(
+                record,
+                mode="expanded",
+                expanded=True,
+                body_text=body_text,
+                live_text="",
+                detail_text=detail_text,
+            )
+        else:
+            self._sync_scheme_b_body(
+                record,
+                mode="output",
+                expanded=False,
+                body_text=body_text,
+                live_text="",
+                detail_text=detail_text,
+            )
         detail.setStyleSheet(
             "QLabel {"
             f"color: {theme['requestText']};"
@@ -881,7 +1413,7 @@ class OverlayRenderingMixin:
             "background: transparent;"
             "}"
         )
-        record["feed_rows_meta"] = list(feed_rows)
+        self._sync_feed_action_label(record, expanded=peeking)
         self._sync_feed_anchor_geometry(record)
 
         rest_hint = record["rest_hint"]
@@ -929,8 +1461,12 @@ class OverlayRenderingMixin:
             or status == "draft"
         ):
             status_text = activity_text
+        # 紧凑休息档：提示行 + 按钮行已占满共享的 110px 卡片槽，底部状态行让位，
+        # 按钮因此完整可见，气泡高度也与普通会话气泡保持一致。
+        if rest_reminder and rest_hint_text:
+            status_text = ""
         footer_container = record["footer_container"]
-        footer_container.setVisible(bool(status_text or workdir_footer_text or rest_reminder))
+        footer_container.setVisible(bool(status_text or workdir_footer_text))
 
         status_label = record["status_label"]
         if status_text and not rest_reminder:
@@ -1083,6 +1619,15 @@ class OverlayRenderingMixin:
                 for index, row in enumerate(feed_rows_meta):
                     if index >= len(feed_anchors):
                         break
+                    if (
+                        str(row.get("action") or "") != "copy_command"
+                        or (
+                            _item_id(item) not in getattr(self, "_feed_peek_item_ids", set())
+                            and str(row.get("mode") or "") == "execution"
+                        )
+                    ):
+                        feed_anchors[index].hide()
+                        continue
                     feed_row_anchors.append(
                         (
                             feed_anchors[index],
@@ -1090,6 +1635,27 @@ class OverlayRenderingMixin:
                                 "id": feed_item_id,
                                 "feedAction": str(row.get("action") or ""),
                                 "command": str(row.get("command") or ""),
+                            },
+                        )
+                    )
+                action_anchor = record.get("feed_action_anchor")
+                action_label = record.get("feed_action_label")
+                if (
+                    isinstance(action_anchor, QWidget)
+                    and isinstance(action_label, QLabel)
+                    and not action_label.isHidden()
+                ):
+                    feed_row_anchors.append(
+                        (
+                            action_anchor,
+                            {
+                                "id": feed_item_id,
+                                "feedAction": (
+                                    "resume_feed"
+                                    if feed_item_id in getattr(self, "_feed_peek_item_ids", set())
+                                    else "peek_output"
+                                ),
+                                "command": "",
                             },
                         )
                     )

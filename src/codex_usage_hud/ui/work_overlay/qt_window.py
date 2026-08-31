@@ -768,8 +768,29 @@ class OverlayWindow(OverlayTransitionsMixin, OverlayRenderingMixin, QWidget):
                         if (bounds := self._widget_global_bounds(anchor)) is not None
                     ],
                 )
+                action_hover = False
+                for record in self._item_widgets:
+                    action_anchor = record.get("feed_action_anchor")
+                    if (
+                        isinstance(action_anchor, QWidget)
+                        and action_anchor.isVisible()
+                        and (bounds := self._widget_global_bounds(action_anchor)) is not None
+                        and _overlay_hover_hit_test(
+                            cursor_pos.x(),
+                            cursor_pos.y(),
+                            rects=[bounds],
+                        )
+                    ):
+                        action_hover = True
+                        break
+                # The normal bubble intentionally fades while the pointer is
+                # over its card. Scheme B's expand/collapse control is the
+                # exception: keep the card readable while the pointer is on
+                # that small, explicit action target.
                 target = (
-                    self._hover_alpha
+                    self._overlay_alpha
+                    if action_hover
+                    else self._hover_alpha
                     if inside_overlay
                     else self._overlay_alpha
                 )
@@ -1016,6 +1037,13 @@ class OverlayWindow(OverlayTransitionsMixin, OverlayRenderingMixin, QWidget):
             # place one click hotspot per visible feed row.
             for record in self._item_widgets:
                 if record.get("feed_rows_meta"):
+                    self._sync_feed_action_label(
+                        record,
+                        expanded=(
+                            _item_id(record.get("item") or {})
+                            in getattr(self, "_feed_peek_item_ids", set())
+                        ),
+                    )
                     self._sync_feed_anchor_geometry(record)
 
             while len(self._feed_windows) < len(self._feed_row_anchors):
@@ -1031,9 +1059,9 @@ class OverlayWindow(OverlayTransitionsMixin, OverlayRenderingMixin, QWidget):
                 feed_window = self._feed_windows[index]
                 anchor_top_left = anchor.mapToGlobal(QPoint(0, 0))
                 action = str(action_item.get("feedAction") or "")
-                tooltip = "复制完整命令" if action == "copy_command" else "回到输出视图"
+                tooltip = "复制完整命令" if action == "copy_command" else "展开执行详情"
                 if action == "resume_feed":
-                    tooltip = "返回活动视图"
+                    tooltip = "收起执行详情"
                 feed_window.configure(
                     action_item,
                     opacity=current_opacity,

@@ -254,6 +254,37 @@ class JsonlSessionParserTests(unittest.TestCase):
         self.assertEqual(steps[0].detail, "git status --short")
         self.assertEqual(steps[0].output, "working tree clean")
 
+    def test_activity_steps_include_event_level_mcp_tool_calls(self) -> None:
+        parser = JsonlSessionParser()
+        records = [
+            record("2026-08-29T02:00:00Z", "event_msg", {"type": "task_started"}),
+            record(
+                "2026-08-29T02:00:01Z",
+                "event_msg",
+                {
+                    "type": "item_completed",
+                    "item": {
+                        "type": "McpToolCall",
+                        "id": "mcp-1",
+                        "server": "codebase-memory-mcp",
+                        "tool": "search_graph",
+                        "arguments": {"query": "activity steps"},
+                        "status": "completed",
+                    },
+                },
+            ),
+        ]
+        for index, item in enumerate(records, 1):
+            item["_line"] = index
+            item["_dt"] = parse_timestamp(item["timestamp"])
+
+        steps = parser.activity_steps(records, task_started_index=0)
+
+        self.assertEqual(len(steps), 1)
+        self.assertEqual(steps[0].tool_name, "mcp__codebase_memory_mcp__search_graph")
+        self.assertEqual(steps[0].title, "工具完成")
+        self.assertIn("search_graph", steps[0].detail)
+
     def test_command_execution_text_only_strips_shell_launcher_wrapper(self) -> None:
         # A real shell wrapper is normalised to the inner command.
         self.assertEqual(
