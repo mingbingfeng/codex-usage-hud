@@ -568,6 +568,56 @@ def test_active_session_container_prefers_thread_role_list() -> None:
     )
 
 
+def test_active_session_reports_native_current_work_disclosure_title() -> None:
+    script = renderer_script._RENDERER_HUD_SCRIPT_TEMPLATE
+
+    assert "function activeSessionCollapsedWorkTitle()" in script
+    assert "function activeSessionCollapsedWorkState()" in script
+    assert "function activeSessionDisclosureTitleLine(value)" in script
+    assert "const collapsedWork = (newSession || pendingSession)" in script
+    assert "const collapsedDisclosureAmbiguous = !!collapsedWork.ambiguous;" in script
+    assert "collapsedTitle," in script
+    observer_start = script.index("function refreshActiveSessionObserver()")
+    observer_end = script.index("function startActiveSessionBootstrapObserver()", observer_start)
+    observer = script[observer_start:observer_end]
+    assert "const conversation = activeSessionConversationScope();" in observer
+    assert "aria-expanded" in observer
+
+
+def test_active_session_groups_disclosures_per_turn_and_picks_latest() -> None:
+    script = renderer_script._RENDERER_HUD_SCRIPT_TEMPLATE
+
+    groups_start = script.index("function activeSessionCollapsedDisclosureGroups(")
+    state_start = script.index("function activeSessionCollapsedWorkState()")
+    groups_body = script[groups_start:state_start]
+    state_end = script.index("function activeSessionCollapsedWorkTitle()", state_start)
+    state = script[state_start:state_end]
+
+    # Toggles are grouped by their innermost turn node, so a running turn
+    # without a disclosure cannot wipe the previous turn's collapsed title.
+    assert 'node.closest?.("[data-content-search-turn-key], [data-turn-key]")' in groups_body
+    assert "const latest = groups[groups.length - 1];" in state
+    assert "latest.entries.length !== 1" in state
+    assert "ambiguous: latest.entries.length > 1" in state
+    assert "return { title: latest.entries[0].title, ambiguous: false };" in state
+    # Multiple matching disclosures inside the same latest turn still fail closed.
+    assert "return { title: \"\", ambiguous: latest.entries.length > 1 };" in state
+
+
+def test_active_session_conversation_scope_does_not_depend_on_zero_size_turn() -> None:
+    script = renderer_script._RENDERER_HUD_SCRIPT_TEMPLATE
+
+    scope_start = script.index("function activeSessionConversationScope()")
+    scope_end = script.index("function activeSessionTurnKeyOf(", scope_start)
+    scope = script[scope_start:scope_end]
+
+    # Per-turn nodes use display:contents (zero-size); scope must prefer main and
+    # must never filter turn nodes by visibility.
+    assert 'header?.closest?.("main, [role=\'main\']")' in scope
+    assert ".filter((node) => visible(node)" not in scope
+    assert ".filter((node) => node.isConnected" in scope
+
+
 def test_active_session_container_uses_selected_identity_row_list() -> None:
     script = renderer_script._RENDERER_HUD_SCRIPT_TEMPLATE
     container_start = script.index("function activeSessionContainer()")

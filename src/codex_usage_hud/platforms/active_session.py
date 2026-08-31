@@ -24,6 +24,7 @@ _THREAD_PATH_NEGATIVE_CACHE_SECONDS = 2.0
 _TITLE_PREFIX_MATCH_MIN_CHARS = 8
 _PROVISIONAL_RENDERER_THREAD_PREFIX = "client-new-thread:"
 _RENDERER_DRAFT_MAX_CHARS = 8000
+_RENDERER_COLLAPSED_TITLE_MAX_CHARS = 512
 
 
 def _session_search_roots(sessions_root: Path) -> tuple[Path, ...]:
@@ -447,6 +448,8 @@ class ActiveSessionTracker:
         self._renderer_draft_text = ""
         self._renderer_draft_updated_at_ms = 0
         self._renderer_send_requested = False
+        self._renderer_collapsed_title = ""
+        self._renderer_collapsed_disclosure_ambiguous = False
         self._renderer_match_candidates: list[dict[str, object]] = []
         self._renderer_manual_candidate_id = ""
         self._selection_seq = 0
@@ -538,6 +541,18 @@ class ActiveSessionTracker:
         """Whether the latest Renderer composer event requested a send."""
         with self._lock:
             return bool(self._renderer_send_requested)
+
+    @property
+    def renderer_collapsed_title(self) -> str:
+        """Return the native current-session work-disclosure label."""
+        with self._lock:
+            return self._renderer_collapsed_title
+
+    @property
+    def renderer_collapsed_disclosure_ambiguous(self) -> bool:
+        """Return whether the current turn has multiple work disclosures."""
+        with self._lock:
+            return bool(self._renderer_collapsed_disclosure_ambiguous)
 
     @property
     def match_candidates(self) -> list[dict[str, object]]:
@@ -810,6 +825,8 @@ class ActiveSessionTracker:
         observed_at_ms: int = 0,
         draft_text: str | None = None,
         send_requested: bool = False,
+        collapsed_title: str | None = None,
+        collapsed_disclosure_ambiguous: bool | None = None,
     ) -> bool:
         """Accept an active conversation ref pushed by the renderer bridge."""
         if not self.enabled:
@@ -823,6 +840,12 @@ class ActiveSessionTracker:
             if len(incoming_draft) > _RENDERER_DRAFT_MAX_CHARS:
                 incoming_draft = incoming_draft[:_RENDERER_DRAFT_MAX_CHARS]
         incoming_send_requested = bool(send_requested)
+        incoming_collapsed_title = None
+        if collapsed_title is not None:
+            incoming_collapsed_title = compact_text(
+                str(collapsed_title or "").replace("\x00", ""),
+                _RENDERER_COLLAPSED_TITLE_MAX_CHARS,
+            )
         provisional_renderer_id = is_provisional_renderer_session_id(
             renderer_session_id
         )
@@ -988,6 +1011,10 @@ class ActiveSessionTracker:
             previous_renderer_draft = self._renderer_draft_text
             previous_renderer_draft_updated_at_ms = self._renderer_draft_updated_at_ms
             previous_renderer_send_requested = self._renderer_send_requested
+            previous_renderer_collapsed_title = self._renderer_collapsed_title
+            previous_renderer_collapsed_disclosure_ambiguous = (
+                self._renderer_collapsed_disclosure_ambiguous
+            )
             previous_match_candidates = [
                 dict(item) for item in self._renderer_match_candidates
             ]
@@ -1078,6 +1105,23 @@ class ActiveSessionTracker:
                 or new_session != previous_renderer_new_session
                 or pending_session != previous_renderer_pending_session
             )
+            if new_session or pending_session:
+                next_collapsed_title = ""
+                next_collapsed_disclosure_ambiguous = False
+            elif incoming_collapsed_title is not None:
+                next_collapsed_title = incoming_collapsed_title
+                next_collapsed_disclosure_ambiguous = bool(
+                    collapsed_disclosure_ambiguous
+                )
+            elif selection_changed:
+                # Do not carry a native DOM label across a real selection.
+                next_collapsed_title = ""
+                next_collapsed_disclosure_ambiguous = False
+            else:
+                next_collapsed_title = previous_renderer_collapsed_title
+                next_collapsed_disclosure_ambiguous = (
+                    previous_renderer_collapsed_disclosure_ambiguous
+                )
             next_draft = (
                 incoming_draft
                 if incoming_draft is not None
@@ -1126,6 +1170,10 @@ class ActiveSessionTracker:
             self._renderer_draft_text = next_draft
             self._renderer_draft_updated_at_ms = next_draft_updated_at_ms
             self._renderer_send_requested = next_send_requested
+            self._renderer_collapsed_title = next_collapsed_title
+            self._renderer_collapsed_disclosure_ambiguous = (
+                next_collapsed_disclosure_ambiguous
+            )
             self._renderer_match_candidates = (
                 []
                 if new_session or path is not None or not provisional_renderer_id
@@ -1173,6 +1221,9 @@ class ActiveSessionTracker:
             or self._renderer_draft_updated_at_ms
             != previous_renderer_draft_updated_at_ms
             or self._renderer_send_requested != previous_renderer_send_requested
+            or self._renderer_collapsed_title != previous_renderer_collapsed_title
+            or self._renderer_collapsed_disclosure_ambiguous
+            != previous_renderer_collapsed_disclosure_ambiguous
         )
         if changed:
             _LOGGER.info(

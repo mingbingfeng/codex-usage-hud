@@ -38,9 +38,10 @@ def _active_session_observation_key(payload: Mapping[str, object]) -> tuple[obje
         bool(payload.get("newSession") or payload.get("new_session")),
         bool(payload.get("pendingSession") or payload.get("pending_session")),
     )
-    # Draft/send metadata was added after the original six-field observation
-    # key. Keep old payloads six fields wide for compatibility with external
-    # callback fakes, while making real composer changes refresh the snapshot.
+    # Optional renderer-only metadata extends the original six-field key only
+    # when present, preserving compatibility with older callback fakes while
+    # allowing a native disclosure-title mutation to refresh the same session.
+    extra: list[object] = []
     if any(
         key in payload
         for key in (
@@ -52,8 +53,7 @@ def _active_session_observation_key(payload: Mapping[str, object]) -> tuple[obje
             "send_requested",
         )
     ):
-        return (
-            *base,
+        extra.extend((
             str(
                 payload.get("draftText")
                 or payload.get("draft_text")
@@ -62,8 +62,34 @@ def _active_session_observation_key(payload: Mapping[str, object]) -> tuple[obje
                 or ""
             ),
             bool(payload.get("sendRequested") or payload.get("send_requested")),
+        ))
+    if any(
+        key in payload
+        for key in (
+            "collapsedTitle",
+            "collapsed_title",
+            "nativeCollapsedTitle",
+            "collapsedDisclosureAmbiguous",
+            "collapsed_disclosure_ambiguous",
         )
-    return base
+    ):
+        collapsed_value = (
+            payload.get("collapsedTitle")
+            if "collapsedTitle" in payload
+            else payload.get("collapsed_title")
+            if "collapsed_title" in payload
+            else payload.get("nativeCollapsedTitle")
+        )
+        extra.extend(
+            (
+                str(collapsed_value or ""),
+                bool(
+                    payload.get("collapsedDisclosureAmbiguous")
+                    or payload.get("collapsed_disclosure_ambiguous")
+                ),
+            )
+        )
+    return (*base, *extra) if extra else base
 
 
 def _observation_key_sequence(observation_key: object | None) -> int:
@@ -430,6 +456,31 @@ class RendererBridgeCallbacks:
             )
         if bool(payload.get("sendRequested") or payload.get("send_requested")):
             observer_kwargs["send_requested"] = True
+        if any(
+            key in payload
+            for key in ("collapsedTitle", "collapsed_title", "nativeCollapsedTitle")
+        ):
+            collapsed_value = (
+                payload.get("collapsedTitle")
+                if "collapsedTitle" in payload
+                else payload.get("collapsed_title")
+                if "collapsed_title" in payload
+                else payload.get("nativeCollapsedTitle")
+            )
+            observer_kwargs["collapsed_title"] = (
+                collapsed_value
+            )
+        if any(
+            key in payload
+            for key in (
+                "collapsedDisclosureAmbiguous",
+                "collapsed_disclosure_ambiguous",
+            )
+        ):
+            observer_kwargs["collapsed_disclosure_ambiguous"] = bool(
+                payload.get("collapsedDisclosureAmbiguous")
+                or payload.get("collapsed_disclosure_ambiguous")
+            )
 
         observation_key = _active_session_observation_key(payload)
         try:

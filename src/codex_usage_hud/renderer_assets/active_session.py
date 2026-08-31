@@ -204,6 +204,118 @@ TEXT = r"""
         }
       }
 
+      function activeSessionConversationScope() {
+        // Stable container for the disclosure lookup and the mutation observer.
+        // Per-turn nodes use `display: contents` (zero-size rect) and therefore
+        // fail a plain visibility check; they must never be used as the scope
+        // boundary because the newest (running) turn has no collapsed-work
+        // disclosure yet.
+        const hudRoot = document.getElementById(rootId);
+        try {
+          const header = conversationHeaderElement();
+          const scope = header?.closest?.("main, [role='main']");
+          if (scope && !hudRoot?.contains(scope)) return scope;
+        } catch (_) {}
+        const main = Array.from(document.querySelectorAll("main, [role='main']"))
+          .find((node) => visible(node) && !hudRoot?.contains(node));
+        if (main) return main;
+        const turns = Array.from(document.querySelectorAll(
+          "[data-content-search-turn-key], [data-turn-key]",
+        )).filter((node) => node.isConnected && !hudRoot?.contains(node));
+        return turns[turns.length - 1] || null;
+      }
+
+      function activeSessionTurnKeyOf(node) {
+        return normalize(
+          node?.getAttribute?.("data-content-search-turn-key")
+          || node?.getAttribute?.("data-turn-key")
+          || "",
+        );
+      }
+
+      function activeSessionCollapsedDisclosureGroups(scope) {
+        // Group native collapsed-work toggles by their innermost turn node.
+        // querySelectorAll walks document order, so the resulting groups follow
+        // turn chronology; a still-running turn simply contributes no group.
+        const root = scope || activeSessionConversationScope();
+        if (!root || !root.querySelectorAll) return [];
+        const groups = new Map();
+        const buttons = Array.from(root.querySelectorAll(
+          "button[aria-expanded], [role='button'][aria-expanded]",
+        ));
+        for (const node of buttons) {
+          if (activeSessionNodeOwnedByHud(node)) continue;
+          const title = activeSessionWorkDisclosureTitle(node);
+          if (!title) continue;
+          // closest() returns the innermost turn boundary, which is the
+          // display:contents per-turn node keyed by the turn id. Virtualized
+          // "history-content:*" chunks wrap turns but never merge distinct
+          // groups together.
+          const turnNode = node.closest?.("[data-content-search-turn-key], [data-turn-key]") || root;
+          const key = turnNode === root ? "__conversation__" : activeSessionTurnKeyOf(turnNode);
+          if (!groups.has(key)) groups.set(key, { key, turnNode, entries: [] });
+          groups.get(key).entries.push({ node, title });
+        }
+        return Array.from(groups.values());
+      }
+
+      function activeSessionDisclosureTitleLine(value) {
+        for (const rawLine of String(value || "").split(/\r?\n/)) {
+          const line = normalize(rawLine);
+          if (/^(?:已处理|处理了|用时|耗时|历时|worked(?:\s+for)?\s|duration\b|processed\b|took\b)/i.test(line)) {
+            return line.slice(0, 512);
+          }
+        }
+        return "";
+      }
+
+      function activeSessionWorkDisclosureTitle(node) {
+        if (!node || activeSessionNodeOwnedByHud(node) || !visible(node)) return "";
+        // A time/disclosure button is the only native control that carries
+        // the collapsed-work heading. Generic buttons may contain the same
+        // text in an ancestor and are unsafe to associate with the turn.
+        if (node.tagName?.toLowerCase() !== "button" && node.getAttribute?.("role") !== "button") return "";
+        if (!node.hasAttribute?.("aria-expanded")) return "";
+        const candidates = [
+          node.getAttribute?.("aria-label"),
+          node.getAttribute?.("title"),
+          node.innerText,
+          node.textContent,
+          node.parentElement?.getAttribute?.("aria-label"),
+          node.parentElement?.getAttribute?.("title"),
+          node.parentElement?.innerText,
+          node.parentElement?.textContent,
+        ];
+        for (const candidate of candidates) {
+          const title = activeSessionDisclosureTitleLine(candidate);
+          if (title) return title;
+        }
+        return "";
+      }
+
+      function activeSessionCollapsedWorkState() {
+        let groups;
+        try {
+          groups = activeSessionCollapsedDisclosureGroups();
+        } catch (_) {
+          return { title: "", ambiguous: false };
+        }
+        if (!groups.length) return { title: "", ambiguous: false };
+        // The last group is the most recently materialized turn that already
+        // has a collapsed-work disclosure. Selecting it (instead of the newest
+        // running turn) keeps the bubble title on the latest finished block and
+        // follows Codex when the next turn collapses.
+        const latest = groups[groups.length - 1];
+        if (latest.entries.length !== 1) {
+          return { title: "", ambiguous: latest.entries.length > 1 };
+        }
+        return { title: latest.entries[0].title, ambiguous: false };
+      }
+
+      function activeSessionCollapsedWorkTitle() {
+        return activeSessionCollapsedWorkState().title;
+      }
+
       function activeSessionHeaderLooksNewSession(rows) {
         const header = activeSessionHeaderElement();
         if (!visible(header)) return false;
@@ -395,6 +507,11 @@ TEXT = r"""
         const draftText = Object.prototype.hasOwnProperty.call(ref, "draftText")
           ? String(ref.draftText || "")
           : activeSessionComposerDraftText();
+        const collapsedWork = (newSession || pendingSession)
+          ? { title: "", ambiguous: false }
+          : activeSessionCollapsedWorkState();
+        const collapsedTitle = collapsedWork.title;
+        const collapsedDisclosureAmbiguous = !!collapsedWork.ambiguous;
         const sendRequested = /^(composer-send|composer-send-click|composer-enter|composer-submit)$/i.test(
           String(reason || ""),
         );
@@ -462,6 +579,8 @@ TEXT = r"""
           pendingSession,
           draftText,
           sendRequested,
+          collapsedTitle,
+          collapsedDisclosureAmbiguous,
         ]);
         if (window[activeSessionLastSignatureName] === signature && appliedSeq >= selectionSeq) return;
         const payload = {
@@ -475,6 +594,8 @@ TEXT = r"""
           pendingSession,
           draftText,
           sendRequested,
+          collapsedTitle,
+          collapsedDisclosureAmbiguous,
           matchedBy: ref.matchedBy || "",
           observedAt: Number(ref.observedAt || 0) || Date.now(),
         };
@@ -671,8 +792,9 @@ TEXT = r"""
       function refreshActiveSessionObserver() {
         const container = activeSessionContainer();
         const header = activeSessionHeaderElement();
+        const conversation = activeSessionConversationScope();
         ctx.observers.clear("active_session");
-        if (!container && !header) return false;
+        if (!container && !header && !conversation) return false;
         window[activeSessionObserverName] = ctx.observers.set("active_session", new MutationObserver(() => {
           scheduleActiveSessionReport("active-session-dom");
         }));
@@ -704,6 +826,15 @@ TEXT = r"""
               "data-testid",
               "title",
             ],
+          });
+        }
+        if (conversation && conversation !== container && conversation !== header) {
+          window[activeSessionObserverName].observe(conversation, {
+            subtree: true,
+            childList: true,
+            characterData: true,
+            attributes: true,
+            attributeFilter: ["aria-expanded", "aria-label", "title", "data-state"],
           });
         }
         return true;
@@ -880,6 +1011,9 @@ TEXT = r"""
         ensureActiveSessionWatchers();
         const reportReason = String(reason || "manual");
         const ref = readActiveSessionRef();
+        const collapsedWork = (ref.newSession || ref.pendingSession)
+          ? { title: "", ambiguous: false }
+          : activeSessionCollapsedWorkState();
         postActiveSession(reportReason, ref);
         // Return the same renderer-observed reference through Runtime.evaluate.
         // CDP bindings still keep it live afterwards, but this synchronous result
@@ -890,6 +1024,8 @@ TEXT = r"""
           rendererSessionId: ref.rendererSessionId || "",
           title: ref.title || "",
           draftText: ref.draftText || "",
+          collapsedTitle: collapsedWork.title,
+          collapsedDisclosureAmbiguous: !!collapsedWork.ambiguous,
           sendRequested: /^(composer-send|composer-send-click|composer-enter|composer-submit)$/i.test(reportReason),
           newSession: !!ref.newSession,
           pendingSession: !!ref.pendingSession,

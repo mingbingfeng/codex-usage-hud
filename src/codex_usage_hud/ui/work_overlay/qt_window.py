@@ -175,6 +175,7 @@ class OverlayWindow(OverlayTransitionsMixin, OverlayRenderingMixin, QWidget):
             )
             self._last_payload_signature = ""
             self._last_structure_signature = ""
+            self._stable_current_session_id = ""
             self._raw_items: list[Mapping[str, object]] = []
             self._previous_visible_items: list[Mapping[str, object]] = []
             self._command_path = _work_overlay_command_path(path)

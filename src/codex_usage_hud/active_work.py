@@ -48,6 +48,9 @@ ActiveWorkBuilder = Callable[[object, object, Path | None, tuple[Path, ...]], li
 ACTIVE_WORK_CANDIDATE_LIMIT = 16
 ACTIVE_WORK_STALE_SECONDS = 4 * 60 * 60
 ACTIVE_WORK_MODEL_STARTUP_STALE_SECONDS = 90.0
+# The renderer owns visible three-line truncation.  Keep enough source text
+# here for that layout decision while still bounding the state-file payload.
+ACTIVE_WORK_LAST_OUTPUT_MAX_CHARS = 4096
 FINAL_ANSWER_COMPLETION_GRACE_SECONDS = 1.0
 
 
@@ -820,7 +823,7 @@ def _work_item_from_snapshot(
         status_label=status_label,
         detail=_compact_work_text(detail, 120),
         status_text=_compact_work_text(status_text, 80),
-        last_text=_compact_work_text(last_text, 180),
+        last_text=_compact_work_text(last_text, ACTIVE_WORK_LAST_OUTPUT_MAX_CHARS),
         elapsed_text=elapsed_text,
         progress=progress,
         tokens_text=_format_tokens(tokens),
@@ -846,6 +849,13 @@ def _work_item_from_snapshot(
         current=current,
         pending_accounting=pending_accounting,
         draft_text=draft_text,
+        collapsed_title=_compact_work_text(
+            getattr(snapshot, "renderer_collapsed_title", ""),
+            512,
+        ),
+        collapsed_disclosure_ambiguous=bool(
+            getattr(snapshot, "renderer_collapsed_disclosure_ambiguous", False)
+        ),
         activity_steps=_activity_step_payloads(snapshot),
     )
 

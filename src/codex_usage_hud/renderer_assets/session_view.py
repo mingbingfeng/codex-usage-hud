@@ -1406,13 +1406,13 @@ TEXT = r"""
       || node.innerText
       || node.textContent,
     );
-    if (/^(?:已处理|处理了|worked(?:\s+for)?\s)/i.test(label)) return true;
+    if (/^(?:已处理|处理了|用时|耗时|历时|worked(?:\s+for)?\s|duration\b|processed\b|took\b)/i.test(label)) return true;
     // Chevron-only buttons carry no text; accept them when the header row
     // they sit in is the work summary itself.
     const rowText = normalizedActivityText(
       node.parentElement?.innerText || node.parentElement?.textContent,
     );
-    return /^(?:已处理|处理了|worked(?:\s+for)?\s)/i.test(rowText);
+    return /^(?:已处理|处理了|用时|耗时|历时|worked(?:\s+for)?\s|duration\b|processed\b|took\b)/i.test(rowText);
   }
 
   function activityWorkDisclosureToggles(scope) {

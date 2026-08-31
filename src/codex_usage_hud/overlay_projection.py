@@ -68,6 +68,10 @@ def work_item_to_overlay_dict(item: WorkStatusItem) -> dict[str, object]:
         "current": item.current,
         "pendingAccounting": item.pending_accounting,
         "draftText": getattr(item, "draft_text", ""),
+        "collapsedTitle": getattr(item, "collapsed_title", ""),
+        "collapsedDisclosureAmbiguous": bool(
+            getattr(item, "collapsed_disclosure_ambiguous", False)
+        ),
         "activitySteps": [
             dict(step)
             for step in activity_steps
@@ -417,7 +421,15 @@ def stabilize_published_items(
         if cached_item is not None:
             item = _merge_stable_item_metadata(cached_item, item)
             if item_updated_seconds(item) < item_updated_seconds(cached_item):
-                item = replace(cached_item, current=item.current)
+                # A renderer-observed disclosure title, including an explicit
+                # empty value, is current DOM state rather than durable cache
+                # metadata.  Do not resurrect a prior title when an older
+                # JSONL refresh arrives after that DOM observation.
+                item = replace(
+                    cached_item,
+                    current=item.current,
+                    collapsed_title=item.collapsed_title,
+                )
             merged[item_id] = item
         if cached_item is not None and cached_item.session_started_at is not None:
             stable_start = cached_item.session_started_at

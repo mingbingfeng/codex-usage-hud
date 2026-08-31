@@ -69,6 +69,7 @@ from .model import (
     _item_is_system_action,
     _item_is_system_notice,
     _matched_overlay_item_records,
+    _next_stable_current_session_id,
     _overlay_activity_step_texts,
     _overlay_activity_steps,
     _overlay_activity_tooltip,
@@ -81,6 +82,7 @@ from .model import (
     _overlay_execution_group_title,
     _overlay_execution_live_summary,
     _overlay_execution_rows,
+    _overlay_item_is_stably_current,
     _overlay_step_elapsed_seconds,
     _normalized_rest_reminder,
     _normalized_system_action,
@@ -265,6 +267,16 @@ class OverlayRenderingMixin:
         the full step list stays available in the tooltip.
         """
         del record, now
+        native_title = _compact_work_text(
+            item.get("nativeCollapsedTitle") or item.get("collapsedTitle"),
+            240,
+        )
+        if native_title:
+            tooltip = native_title
+            activity_tooltip = _overlay_activity_tooltip(item)
+            if activity_tooltip:
+                tooltip = f"{tooltip}\n{activity_tooltip}"
+            return native_title, tooltip
         texts = _overlay_activity_step_texts(item)
         if not texts:
             return "", ""
@@ -345,8 +357,15 @@ class OverlayRenderingMixin:
         if not rows:
             return []
         expanded = isinstance(peek_ids, set) and item_id and item_id in peek_ids
-        if not expanded and _overlay_execution_body_active(item):
-            rows = _overlay_execution_rows(item)
+        if _overlay_execution_body_active(item):
+            rows = _overlay_execution_rows(
+                item,
+                max_rows=WORK_OVERLAY_BODY_MAX_LINES if expanded else 1,
+            )
+            if expanded and rows:
+                rows = [dict(row) for row in rows]
+                rows[-1]["action"] = "resume_feed"
+                rows[-1]["tooltip"] = "收起执行详情"
         elif not expanded:
             summary = _overlay_feed_summary_row(rows)
             rows = [dict(summary)] if summary else rows[-1:]
@@ -538,8 +557,10 @@ class OverlayRenderingMixin:
                 action_anchor.hide()
             return
         control_width = 22 if expanded else 48
-        row_height = max(18, detail.fontMetrics().height() + 4)
-        pinned_height = max(26, detail.fontMetrics().height() * 2 + 2)
+        line_height = max(1, detail.fontMetrics().height())
+        row_height = max(18, line_height + 4)
+        body_height = max(44, (line_height * 2) + row_height)
+        live_y = max(0, body_height - row_height)
         label.setText("↓" if expanded else "展开")
         label.setToolTip("收起执行详情" if expanded else "展开执行详情")
         label.setFixedWidth(control_width)
@@ -548,7 +569,7 @@ class OverlayRenderingMixin:
             max(0, body_host.width() - control_width),
             0
             if expanded
-            else max(0, pinned_height - 1),
+            else live_y,
             control_width,
             row_height,
         )
@@ -595,8 +616,10 @@ class OverlayRenderingMixin:
             int(host.width() or WORK_OVERLAY_TEXT_WRAP_WIDTH),
         )
         line_height = max(1, detail.fontMetrics().height())
-        pinned_height = max(26, line_height * 2 + 2)
-        body_height = max(48, pinned_height + 22)
+        live_row_height = max(18, line_height + 4)
+        body_height = max(44, (line_height * 2) + live_row_height)
+        pinned_height = body_height - live_row_height
+        live_y = pinned_height
 
         if mode == "legacy":
             # Special cards (rest reminders, system notices/actions, and
@@ -644,13 +667,13 @@ class OverlayRenderingMixin:
                 )
                 pinned.show()
             if isinstance(live_line, QWidget):
-                live_line.setGeometry(0, pinned_height, width, body_height - pinned_height)
+                live_line.setGeometry(0, live_y, width, body_height - live_y)
                 live_line.show()
             if isinstance(live_symbol, QLabel):
-                live_symbol.setGeometry(0, 0, 16, max(1, body_height - pinned_height))
+                live_symbol.setGeometry(0, 0, 16, max(1, body_height - live_y))
                 live_symbol.show()
             if isinstance(live, QLabel):
-                live.setGeometry(18, 0, max(1, width - 70), max(1, body_height - pinned_height))
+                live.setGeometry(18, 0, max(1, width - 70), max(1, body_height - live_y))
                 live.setText(
                     self._multiline_elided_text(
                         live_text or "执行中",
@@ -674,7 +697,10 @@ class OverlayRenderingMixin:
             live_symbol.hide()
         if isinstance(live, QLabel):
             live.hide()
-        host.setFixedHeight(body_height if expanded else max(1, detail_text.count("\n") + 1) * line_height)
+        # The compact body is a stable three-line slot.  Short output must not
+        # collapse the card; when execution is active the last slot is used by
+        # the live execution row, leaving two output lines above it.
+        host.setFixedHeight(body_height)
         detail.show()
         if isinstance(detail, ScrollingFeedLabel):
             detail.set_scrolling_lines(detail_text.splitlines())
@@ -859,7 +885,9 @@ class OverlayRenderingMixin:
             # the shared 110px card slot instead of growing the bubble.
             card_layout.setSpacing(max(0, WORK_OVERLAY_CARD_SPACING - 2))
         else:
-            card_layout.setSpacing(WORK_OVERLAY_CARD_SPACING)
+            # Keep the three-line body closer to the header while preserving
+            # the same gap on both sides of the body and footer.
+            card_layout.setSpacing(max(0, WORK_OVERLAY_CARD_SPACING - 2))
 
         head_layout = QHBoxLayout()
         head_layout.setContentsMargins(0, 0, 0, 0)
@@ -882,12 +910,12 @@ class OverlayRenderingMixin:
         header_meta.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         header_meta.setFont(QFont("Microsoft YaHei UI", 7, QFont.Weight.DemiBold))
         header_meta.setVisible(False)
-        head_layout.addWidget(header_meta, 0)
+        head_layout.addWidget(header_meta, 0, alignment.AlignVCenter)
 
         close_anchor = QWidget(card)
         close_anchor.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
         close_anchor.setFixedSize(WORK_OVERLAY_CLOSE_SIZE, WORK_OVERLAY_CLOSE_SIZE)
-        head_layout.addWidget(close_anchor, 0)
+        head_layout.addWidget(close_anchor, 0, alignment.AlignVCenter)
         card_layout.addLayout(head_layout)
 
         body_host = QWidget(card)
@@ -921,7 +949,7 @@ class OverlayRenderingMixin:
 
         live_line = QWidget(body_host)
         live_line.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
-        live_line.setStyleSheet("QWidget { border-top: 1px solid #263241; background: transparent; }")
+        live_line.setStyleSheet("QWidget { border: none; background: transparent; }")
         live_line.hide()
 
         live_symbol = QLabel("", live_line)
@@ -1115,17 +1143,19 @@ class OverlayRenderingMixin:
         system_notice = _item_is_system_notice(item)
         background_usage = _item_is_background_usage(item)
         rest_reminder = _item_is_rest_reminder(item)
-        # Renderer selection is a visual hint only; ordering is owned by the
-        # payload projection and must not be inferred from this flag.
-        current = bool(item.get("current")) and not (
-            system_action or system_notice or background_usage or rest_reminder
+        # Partial same-session refreshes can omit ``current``. Keep the blue
+        # left accent attached to the established session identity until an
+        # explicit selection replaces it or its card disappears.
+        current = _overlay_item_is_stably_current(
+            item,
+            getattr(self, "_stable_current_session_id", ""),
         )
         accent, pill_bg, card_bg, border_color = _color_for(
             status,
             self._theme_tokens,
         )
         current_border_color = (
-            _theme_mix(border_color, accent, 0.78, fallback=border_color)
+            str(self._theme_tokens.get("accent") or accent)
             if current
             else border_color
         )
@@ -1145,7 +1175,7 @@ class OverlayRenderingMixin:
         elapsed_text = (
             ""
             if system_action or system_notice or background_usage or rest_reminder
-            else str(item.get("elapsedText") or "").strip() or "已处理 --"
+            else str(item.get("elapsedText") or "").strip() or "--"
         )
         header_text = (
             str(item.get("title") or "Codex HUD")
@@ -1182,7 +1212,7 @@ class OverlayRenderingMixin:
                 "QFrame {"
                 f"background-color: {card_bg};"
                 f"border: 1px dashed {accent};"
-                f"border-left: 1px dashed {accent};"
+                f"border-left: {2 if current else 1}px solid {current_border_color};"
                 "border-radius: 10px;"
                 "}"
             )
@@ -1210,9 +1240,13 @@ class OverlayRenderingMixin:
         close_anchor.setVisible(not rest_reminder)
 
         header_meta = record.get("header_meta")
-        header_meta_text = (
-            str(item.get("headerMeta") or "").strip() if rest_reminder else ""
-        )
+        if rest_reminder:
+            header_meta_text = str(item.get("headerMeta") or "").strip()
+        else:
+            incoming_model_name = _compact_work_text(item.get("modelName"), 48)
+            if incoming_model_name:
+                record["stable_model_name"] = incoming_model_name
+            header_meta_text = str(record.get("stable_model_name") or "").strip()
         if isinstance(header_meta, QLabel) and header_meta_text:
             header_meta.setText(header_meta_text)
             header_meta.setStyleSheet(
@@ -1225,9 +1259,11 @@ class OverlayRenderingMixin:
             )
             header_meta.adjustSize()
             header_meta.setFixedWidth(header_meta.sizeHint().width())
+            header_meta.setToolTip(header_meta_text if not rest_reminder else "")
             header_meta.setVisible(True)
         elif isinstance(header_meta, QLabel):
             header_meta.setText("")
+            header_meta.setToolTip("")
             header_meta.setVisible(False)
 
         round_badge = record["round_badge"]
@@ -2124,8 +2160,13 @@ class OverlayRenderingMixin:
             self._clear_shell()
             self.hide_overlay()
             self._previous_visible_items = []
+            self._stable_current_session_id = ""
             return
         self._empty_since = 0.0
+        self._stable_current_session_id = _next_stable_current_session_id(
+            visible_items,
+            getattr(self, "_stable_current_session_id", ""),
+        )
         completed_count = sum(1 for item in visible_items if _item_is_completed(item))
         self._layout_width = max(
             WORK_OVERLAY_WIDTH,

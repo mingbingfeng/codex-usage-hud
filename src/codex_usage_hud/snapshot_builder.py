@@ -178,6 +178,12 @@ def _enrich_tracker(
     snapshot.composer_send_requested = bool(
         getattr(tracker, "renderer_send_requested", False)
     )
+    snapshot.renderer_collapsed_title = str(
+        getattr(tracker, "renderer_collapsed_title", "") or ""
+    )
+    snapshot.renderer_collapsed_disclosure_ambiguous = bool(
+        getattr(tracker, "renderer_collapsed_disclosure_ambiguous", False)
+    )
     # The page can briefly lose its header/sidebar nodes while a blank chat is
     # being mounted. Reassert the tracker's sticky provisional state so that a
     # transient renderer-waiting source cannot remove the draft bubble.

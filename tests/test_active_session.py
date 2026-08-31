@@ -624,6 +624,58 @@ class ActiveSessionTrackerTests(unittest.TestCase):
             self.assertEqual(tracker.current_path(), session_path)
             self.assertEqual(tracker.latest_source, "renderer:Renderer Selected Thread")
 
+    def test_renderer_collapsed_title_tracks_same_session_and_clears_on_switch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            tracker = ActiveSessionTracker(
+                platform=FakePlatform(),
+                state_db=root / "state_5.sqlite",
+                sessions_root=root,
+                session_index_path=root / "session_index.jsonl",
+                poll_ms=250,
+                enabled=True,
+                start_background_watcher=False,
+            )
+
+            self.assertTrue(
+                tracker.observe_conversation_ref(
+                    "thread-a",
+                    "Thread A",
+                    selection_seq=1,
+                    collapsed_title="已处理 44s",
+                )
+            )
+            self.assertEqual(tracker.renderer_collapsed_title, "已处理 44s")
+
+            self.assertTrue(
+                tracker.observe_conversation_ref(
+                    "thread-a",
+                    "Thread A",
+                    selection_seq=1,
+                    collapsed_title="已处理 45s",
+                )
+            )
+            self.assertEqual(tracker.renderer_collapsed_title, "已处理 45s")
+
+            self.assertTrue(
+                tracker.observe_conversation_ref(
+                    "thread-a",
+                    "Thread A",
+                    selection_seq=1,
+                    collapsed_title="",
+                )
+            )
+            self.assertEqual(tracker.renderer_collapsed_title, "")
+
+            self.assertTrue(
+                tracker.observe_conversation_ref(
+                    source="renderer",
+                    new_session=True,
+                    selection_seq=2,
+                )
+            )
+            self.assertEqual(tracker.renderer_collapsed_title, "")
+
     def test_start_prefers_event_stream_over_polling(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

@@ -322,6 +322,44 @@ OverlayRect = tuple[float, float, float, float]
 def _item_id(item: Mapping[str, object]) -> str:
     return str(item.get("id") or "").strip()
 
+
+def _overlay_session_identity(item: Mapping[str, object]) -> str:
+    """Return the stable identity used by the current-session treatment."""
+    if (
+        _item_is_background_usage(item)
+        or _item_is_rest_reminder(item)
+        or _item_is_system_action(item)
+        or _item_is_system_notice(item)
+    ):
+        return ""
+    return str(item.get("sessionId") or item.get("id") or "").strip()
+
+
+def _next_stable_current_session_id(
+    items: Sequence[Mapping[str, object]],
+    previous: object = "",
+) -> str:
+    """Keep the selected card marked through partial same-session refreshes."""
+    for item in items:
+        identity = _overlay_session_identity(item)
+        if identity and bool(item.get("current")) and not _item_is_completed(item):
+            return identity
+    prior = str(previous or "").strip()
+    if prior and any(_overlay_session_identity(item) == prior for item in items):
+        return prior
+    return ""
+
+
+def _overlay_item_is_stably_current(
+    item: Mapping[str, object],
+    current_session_id: object = "",
+) -> bool:
+    identity = _overlay_session_identity(item)
+    stable = str(current_session_id or "").strip()
+    if stable:
+        return bool(identity and identity == stable and not _item_is_completed(item))
+    return bool(item.get("current")) and bool(identity) and not _item_is_completed(item)
+
 def _switch_item_key(item: Mapping[str, object]) -> str:
     session_id = str(item.get("sessionId") or item.get("id") or "").strip()
     title = str(item.get("targetTitle") or item.get("title") or "").strip()
@@ -586,6 +624,11 @@ def _overlay_execution_group_steps(
     ordered action steps.  Reasoning-only rows are intentionally excluded: the
     group contains the commands/tools a user can act on.
     """
+    # The renderer explicitly reports multiple native work disclosures in the
+    # current turn. The JSONL timeline cannot identify which disclosure owns
+    # each action, so suppress execution rows rather than mixing groups.
+    if bool(item.get("collapsedDisclosureAmbiguous")):
+        return []
     steps = _overlay_activity_steps(item)
     if not steps:
         return []
@@ -663,6 +706,7 @@ def _overlay_mcp_provider_label(tool_name: str) -> str:
 def _overlay_execution_group_title(item: Mapping[str, object]) -> str:
     """Build the short title shown in the bubble footer for a tool group."""
     for key in (
+        "nativeCollapsedTitle",
         "executionGroupTitle",
         "collapsedTitle",
         "activityGroupTitle",
@@ -804,6 +848,9 @@ def _overlay_execution_live_summary(item: Mapping[str, object]) -> str:
         detail = " ".join(str(running.get("detail") or "").split())
         elapsed = _overlay_step_elapsed_seconds(running, datetime.now().astimezone())
         return f"运行中 {elapsed}s" + (f" · {detail}" if detail else "")
+    latest_rows = _overlay_execution_rows(item, max_rows=1)
+    if latest_rows:
+        return str(latest_rows[-1].get("text") or "执行中")
     failed = sum(
         1
         for step in steps
@@ -1060,8 +1107,16 @@ def _work_overlay_header_text(
             if timestamp.tzinfo is not None
             else timestamp.strftime("%H:%M:%S")
         )
+    elapsed = str(elapsed_text or "").strip()
+    # The Chinese label is the normal local UI copy, but the renderer can
+    # surface the equivalent English label while Codex is in an English locale.
+    # Keep the header to the elapsed value in either case.
+    for prefix in ("已处理", "Worked for", "Worked", "Processed"):
+        if elapsed.casefold().startswith(prefix.casefold()):
+            elapsed = elapsed[len(prefix) :].lstrip(" ：:")
+            break
     title_text = _compact_work_text(title, title_limit)
-    parts = [part for part in (start_text, elapsed_text.strip(), title_text) if part]
+    parts = [part for part in (start_text, elapsed, title_text) if part]
     return " | ".join(parts) if parts else "Codex 工作"
 
 def _work_overlay_live_elapsed_text(
@@ -1169,6 +1224,9 @@ __all__ = [
     "_workdir_display_name",
     "_item_is_completed",
     "_item_id",
+    "_overlay_session_identity",
+    "_next_stable_current_session_id",
+    "_overlay_item_is_stably_current",
     "_switch_item_key",
     "_item_kind",
     "_clamp01",

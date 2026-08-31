@@ -214,6 +214,33 @@ def test_renderer_bridge_forwards_composer_draft_and_send_state() -> None:
     )
 
 
+def test_renderer_bridge_forwards_native_collapsed_title_for_same_session() -> None:
+    tracker = SimpleNamespace(
+        selection_seq=4,
+        observe_conversation_ref=MagicMock(return_value=True),
+    )
+    callbacks = _callbacks(active_session_tracker=tracker)
+
+    callbacks.observe_active_session(
+        {
+            "sessionId": "session-1",
+            "rendererSessionId": "renderer-1",
+            "title": "Session",
+            "selectionSeq": 4,
+            "collapsedTitle": "已处理 58s",
+        }
+    )
+
+    tracker.observe_conversation_ref.assert_called_once_with(
+        session_id="session-1",
+        title="Session",
+        source="renderer",
+        renderer_session_id="renderer-1",
+        selection_seq=4,
+        collapsed_title="已处理 58s",
+    )
+
+
 def test_renderer_bridge_suppresses_identical_observation_after_successful_ack() -> None:
     tracker = SimpleNamespace(
         selection_seq=7,

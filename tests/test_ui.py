@@ -169,6 +169,8 @@ from codex_usage_hud.ui.work_overlay_qt import (
     _interactive_hotspot_opacity,
     _item_is_background_usage,
     _item_is_completed,
+    _next_stable_current_session_id,
+    _overlay_item_is_stably_current,
     _item_dismiss_key,
     _matched_overlay_item_records,
     _mark_item_dismissed,
@@ -7902,7 +7904,8 @@ with tempfile.TemporaryDirectory() as temp_dir:
             "这是一个很长很长很长很长很长很长很长很长很长很长的会话标题",
         )
 
-        self.assertTrue(text.startswith("09:08:07 | 已处理 42s | "))
+        self.assertTrue(text.startswith("09:08:07 | 42s | "))
+        self.assertNotIn("已处理", text)
         self.assertIn("...", text)
 
     def test_work_overlay_live_elapsed_text_ticks_only_while_active(self) -> None:
@@ -7945,6 +7948,38 @@ with tempfile.TemporaryDirectory() as temp_dir:
                 now=started_at + timedelta(minutes=1, seconds=3),
             )
         )
+
+    def test_work_overlay_current_marker_survives_same_session_partial_refresh(self) -> None:
+        initial = [{"id": "session-a", "sessionId": "session-a", "status": "running", "current": True}]
+        stable_id = _next_stable_current_session_id(initial)
+
+        self.assertEqual(stable_id, "session-a")
+        self.assertTrue(_overlay_item_is_stably_current(initial[0], stable_id))
+
+        partial = [{"id": "session-a", "sessionId": "session-a", "status": "tool", "current": False}]
+        stable_id = _next_stable_current_session_id(partial, stable_id)
+        self.assertEqual(stable_id, "session-a")
+        self.assertTrue(_overlay_item_is_stably_current(partial[0], stable_id))
+
+        switched = [{"id": "session-b", "sessionId": "session-b", "status": "running", "current": True}]
+        stable_id = _next_stable_current_session_id(switched, stable_id)
+        self.assertEqual(stable_id, "session-b")
+        self.assertFalse(_overlay_item_is_stably_current(partial[0], stable_id))
+        self.assertTrue(_overlay_item_is_stably_current(switched[0], stable_id))
+
+    def test_work_overlay_native_collapsed_title_overrides_reconstructed_title(self) -> None:
+        item = {
+            "collapsedTitle": "已处理 1m 12s",
+            "status": "tool",
+            "activitySteps": [{"title": "执行命令", "detail": "git status", "status": "running"}],
+        }
+
+        title, tooltip = OverlayRenderingMixin._activity_step_display_text(
+            object(), {}, item, now=0.0
+        )
+
+        self.assertEqual(title, "已处理 1m 12s")
+        self.assertIn("已处理 1m 12s", tooltip)
 
     def test_work_overlay_activity_steps_keep_desktop_style_command_content(self) -> None:
         item = {

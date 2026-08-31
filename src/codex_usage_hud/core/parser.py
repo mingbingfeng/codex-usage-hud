@@ -865,6 +865,10 @@ class WorkStatusItem:
     current: bool = False
     pending_accounting: bool = False
     draft_text: str = ""
+    # Native Codex disclosure title observed for the currently selected
+    # renderer session. It is not reconstructed from JSONL activity steps.
+    collapsed_title: str = ""
+    collapsed_disclosure_ambiguous: bool = False
     activity_steps: tuple[Mapping[str, object], ...] = ()
     kind: str = "session"
     event_id: str = ""
@@ -998,6 +1002,13 @@ class ParsedSession:
     composer_draft: str = ""
     composer_draft_updated_at_ms: int = 0
     composer_send_requested: bool = False
+    # Renderer-observed label of the current Codex work disclosure.  This is
+    # deliberately separate from the durable JSONL timeline because it mirrors
+    # the title the user can currently see in the Codex UI.
+    renderer_collapsed_title: str = ""
+    # Multiple native work disclosures in the current materialized turn are
+    # ambiguous; consumers must not mix their title and activity rows.
+    renderer_collapsed_disclosure_ambiguous: bool = False
     follow_state: str = ""
     follow_reason: str = ""
     follow_timing: dict[str, int] = field(default_factory=dict)
