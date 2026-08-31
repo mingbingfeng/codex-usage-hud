@@ -524,7 +524,14 @@ def _overlay_feed_active(item: Mapping[str, object]) -> bool:
     Execution windows emit zero rollout events, so the feed is the only
     surface that can show local progress; the output view returns as soon as
     a fresh agent message lands and no step is left open.
+
+    Rest-reminder cards never participate in the session activity feed: their
+    ``waiting_user`` status must not be mistaken for a Codex turn waiting on
+    the user, which would otherwise inject a "思考中" row and an "展开"
+    affordance into the reminder bubble.
     """
+    if _item_is_rest_reminder(item):
+        return False
     status = str(item.get("status") or "").strip().lower()
     steps = _overlay_activity_steps(item)
     if any(

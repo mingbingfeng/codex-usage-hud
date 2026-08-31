@@ -387,6 +387,11 @@ class OverlayRenderingMixin:
         item: Mapping[str, object],
     ) -> None:
         """Timer-path refresh of the feed body text (seconds and spinner)."""
+        # Rest-reminder cards never show the session activity feed; skip them
+        # here so a stale record cannot inherit a "思考中" row or "展开"
+        # affordance from the timer tick.
+        if _item_is_rest_reminder(item):
+            return
         detail = record.get("detail")
         if not isinstance(detail, QLabel):
             return
