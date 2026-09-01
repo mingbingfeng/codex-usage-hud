@@ -1,0 +1,63 @@
+name: CI
+
+# Informational cross-platform test run.
+#
+# This workflow is intentionally NOT wired into branch protection as a
+# required status check. Several renderer contract tests are sensitive to
+# line endings on Windows, and platform-specific failures are best fixed by
+# whoever owns that platform. A red run is a signal, never a merge blocker.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python-version: "3.10"
+          - os: ubuntu-latest
+            python-version: "3.11"
+          - os: ubuntu-latest
+            python-version: "3.12"
+          - os: windows-latest
+            python-version: "3.11"
+          - os: macos-latest
+            python-version: "3.11"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install Linux system dependencies for Qt
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1 libglib2.0-0 libegl1 libxkbcommon0 libdbus-1-3 libxcb-cursor0
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest
+          python -m pip install -e ".[desktop-overlay]"
+
+      - name: Compile sources
+        run: python -m compileall -q src tests tools
+
+      - name: Run test suite
+        run: python -m pytest -q

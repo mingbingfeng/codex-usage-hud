@@ -1,0 +1,9 @@
+# Default owners for the whole repository.
+#
+# Add per-area owners as the team grows, for example:
+#   /src/codex_usage_hud/renderer_assets/ @fengbuming @some-contributor
+#   /docs/                                @fengbuming @docs-helper
+#
+# Replace @fengbuming with the GitHub handles you want to route reviews to.
+
+* @fengbuming
