@@ -1435,6 +1435,18 @@ class RendererHudPayloadTests(unittest.TestCase):
             script,
         )
         self.assertIn(
+            '<span aria-hidden="true"></span><span>最后活动</span>',
+            script,
+        )
+        self.assertIn(
+            'codex-usage-hud-session-workdir-filter"><select data-session-cleanup-filter="workdirId"',
+            script,
+        )
+        self.assertNotIn(
+            'codex-usage-hud-session-workdir-filter"><label><span>工作目录</span>',
+            script,
+        )
+        self.assertIn(
             'const sessionCleanupRow = event.target?.closest?.(".codex-usage-hud-session-row");',
             script,
         )
@@ -1504,6 +1516,24 @@ class RendererHudPayloadTests(unittest.TestCase):
         input_script = script[input_start:input_end]
         self.assertNotIn('renderSettingsModal("storage");', input_script)
         self.assertIn("IME composition emits input events before the final text is committed.", input_script)
+        self.assertIn("requestSessionCleanupSearch(search);", input_script)
+        self.assertIn('"session_cleanup_search"', input_script)
+        self.assertIn('data-session-cleanup-filter="workdirId"', script)
+        self.assertIn("function sessionCleanupWorkdirOptionHtml", script)
+        self.assertIn("const SESSION_CLEANUP_PAGE_SIZE = 30;", script)
+        self.assertIn("function sessionCleanupPageRows", script)
+        self.assertIn('data-action="session-cleanup-page"', script)
+        self.assertIn("第 ${pageIndex + 1} / ${pageCount} 页", script)
+        self.assertNotIn("rows.slice(0, 180)", script)
+        self.assertNotIn("仅显示前 180 项", script)
+        self.assertIn('action: "sessionCleanupSearch"', script)
+        self.assertIn("Inventory mutations invalidate opaque match ids.", script)
+        self.assertIn("requestDetailedWorkdirs", script)
+        self.assertIn("workdirOptionsRetryBlocked", script)
+        self.assertIn("const responseReady = !responseError", script)
+        self.assertIn("function resetSessionCleanupPendingRequests()", script)
+        self.assertIn("resetSessionCleanupPendingRequests();", script)
+        self.assertIn("an empty/mismatched request id is a", script)
 
     def test_session_cleanup_filters_survive_renderer_reinject(self) -> None:
         script = renderer_hud.RENDERER_HUD_SCRIPT
@@ -2042,7 +2072,7 @@ class RendererHudPayloadTests(unittest.TestCase):
     def test_renderer_top_redesign_styles_are_theme_tokenized(self) -> None:
         script = renderer_hud.RENDERER_HUD_SCRIPT
 
-        self.assertIn('const version = "67";', script)
+        self.assertIn('const version = "69";', script)
         self.assertIn("function refreshProgressRailBadge", script)
         self.assertIn("function progressBadgeCandidates", script)
         self.assertIn("function progressRailLeftLabelFits", script)

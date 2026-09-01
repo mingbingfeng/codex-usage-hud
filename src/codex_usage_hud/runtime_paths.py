@@ -14,6 +14,7 @@ RENDERER_DIAGNOSTIC_FILENAME = "renderer_fallback.log"
 RENDERER_CDP_STATE_FILENAME = "renderer_cdp_state.json"
 CRASH_DIAGNOSTIC_FILENAME = "crash.log"
 DAEMON_LOG_FILENAME = "daemon.log"
+SESSION_SEARCH_DATABASE_FILENAME = "session-search.sqlite"
 DAEMON_LOG_ENV = "CODEX_USAGE_HUD_DAEMON_LOG"
 CODEX_APP_PATH_ENV = "CODEX_USAGE_HUD_CODEX_APP"
 CODEX_APP_ID_ENV = "CODEX_USAGE_HUD_CODEX_APP_ID"
@@ -227,6 +228,7 @@ __all__ = [
     "hud_lock_path",
     "hud_program_root",
     "hud_runtime_dir",
+    "SESSION_SEARCH_DATABASE_FILENAME",
     "renderer_cdp_state_path",
     "renderer_diagnostic_path",
     "runtime_file_path",

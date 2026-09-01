@@ -10,6 +10,8 @@ BACKGROUND_USAGE_RESPONSE_RETRY_DELAYS_SECONDS = (0.15, 0.35, 0.75)
 SESSION_CLEANUP_COMMANDS = frozenset(
     {
         "sessionCleanupScan",
+        "sessionCleanupSearch",
+        "sessionCleanupWorkdirOptions",
         "sessionCleanupPreview",
         "sessionCleanupExecute",
         "sessionCleanupCancel",

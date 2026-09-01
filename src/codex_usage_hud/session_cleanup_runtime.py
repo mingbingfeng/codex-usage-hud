@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 import logging
 import queue
 from pathlib import Path
 import sqlite3
-from threading import Event, Lock, Thread, current_thread
+from threading import Event, Lock, Thread, Timer, current_thread
 import time
 import uuid
 
@@ -20,12 +21,21 @@ from .core.session_cleanup import (
 from .core.session_transfer import CodexAppServerClient
 from .core.deleted_usage import DeletedUsageLedger, DeletedUsageLedgerError
 from .platforms.codex_desktop_threads import CodexDesktopThreadLifecycle
-from .runtime_paths import hud_runtime_dir
+from .platforms.file_watcher import FileChangeWatcher, FileWatchSpec
+from .runtime_paths import SESSION_SEARCH_DATABASE_FILENAME, hud_runtime_dir
 
 
 _LOGGER = logging.getLogger("codex_usage_hud.session_cleanup_runtime")
 
 MIGRATED_SESSION_SOURCES_FILENAME = "migrated_session_sources.json"
+
+
+@dataclass(frozen=True)
+class _SearchIndexJob:
+    revision: str
+    generation: int
+    entries: tuple[tuple[str, tuple[Path, ...], str, str, str, str], ...]
+    prune_missing: bool
 
 
 class DeletedUsageTransactions:
@@ -143,6 +153,7 @@ def _load_transfer_inherited_session_ids(state_db_path: object) -> set[str]:
 class SessionCleanupWorker:
     _ACTIONS = {
         "sessionCleanupScan",
+        "sessionCleanupSearch",
         "sessionCleanupPreview",
         "sessionCleanupExecute",
         "sessionCleanupCancel",
@@ -170,13 +181,26 @@ class SessionCleanupWorker:
         # phase after the target has been fully verified.
         self._desktop_thread_lifecycle = CodexDesktopThreadLifecycle()
         self._queue: queue.Queue[dict[str, object] | None] = queue.Queue()
+        self._index_queue: queue.Queue[_SearchIndexJob | None] = queue.Queue()
         self._closed = Event()
+        self._index_closed = Event()
+        self._index_schedule_lock = Lock()
+        self._pending_search_paths: set[Path] = set()
+        self._pending_search_full = False
+        self._search_change_timer: Timer | None = None
+        self._search_watcher = FileChangeWatcher(self._on_search_files_changed)
         self._worker = Thread(
             target=self._run,
             name="codex-usage-hud-session-cleanup",
             daemon=True,
         )
+        self._index_worker = Thread(
+            target=self._run_search_indexer,
+            name="codex-usage-hud-session-search-index",
+            daemon=True,
+        )
         self._worker.start()
+        self._index_worker.start()
 
     def enqueue(self, command: Mapping[str, object]) -> dict[str, object]:
         action = str(command.get("action") or "").strip()
@@ -221,20 +245,240 @@ class SessionCleanupWorker:
                     action=action,
                     state="scanning" if action == "sessionCleanupScan" else "accepted",
                     progress=0,
+                    include_sessions=action != "sessionCleanupSearch",
                     **accepted_values,
                 )
             )
             self._queue.put_nowait(payload)
         return {"status": "accepted", "requestId": request_id, "action": action}
 
+    def _real_search_manager(self) -> SessionCleanupManager | None:
+        return self.manager if isinstance(self.manager, SessionCleanupManager) else None
+
+    def _start_search_watcher(self) -> None:
+        manager = self._real_search_manager()
+        if manager is None:
+            return
+        roots = [manager.sessions_root]
+        if manager.sessions_root.name == "sessions":
+            roots.append(manager.sessions_root.parent / "archived_sessions")
+        specs = [
+            FileWatchSpec.tree(root, "session-search-rollout", suffixes=(".jsonl",))
+            for root in roots
+        ]
+        specs.append(FileWatchSpec.file(manager.session_index_path, "session-search-metadata"))
+        try:
+            self._search_watcher.update(specs)
+        except Exception:
+            _LOGGER.debug("session_search_watcher_start_failed", exc_info=True)
+
+    def _on_search_files_changed(
+        self,
+        reasons: set[str],
+        changed_paths: set[Path],
+    ) -> None:
+        if self._closed.is_set():
+            return
+        with self._index_schedule_lock:
+            self._pending_search_paths.update(changed_paths)
+            self._pending_search_full = self._pending_search_full or (
+                "session-search-metadata" in reasons or not changed_paths
+            )
+            if self._search_change_timer is None:
+                self._search_change_timer = Timer(
+                    0.15,
+                    self._flush_search_file_changes,
+                )
+                self._search_change_timer.daemon = True
+                self._search_change_timer.start()
+
+    def _flush_search_file_changes(self) -> None:
+        with self._index_schedule_lock:
+            self._search_change_timer = None
+            changed_paths = set(self._pending_search_paths)
+            full = self._pending_search_full
+            self._pending_search_paths.clear()
+            self._pending_search_full = False
+        if self._closed.is_set():
+            return
+        manager = self._real_search_manager()
+        if manager is None:
+            return
+        snapshot = manager.snapshot(include_sessions=False)
+        scheduled = self._schedule_search_index(
+            snapshot,
+            changed_paths=() if full else changed_paths,
+            prune_missing=full,
+        )
+        if scheduled is not None:
+            self._publish(scheduled)
+
+    def _schedule_search_index(
+        self,
+        snapshot: Mapping[str, object],
+        *,
+        changed_paths: Sequence[Path] = (),
+        prune_missing: bool = False,
+    ) -> Mapping[str, object] | None:
+        manager = self._real_search_manager()
+        if manager is None:
+            return None
+        revision = str(snapshot.get("revision") or "").strip()
+        if not revision:
+            return None
+        entries = manager.search_index_entries(changed_paths)
+        if changed_paths and not entries:
+            return None
+        started = manager.begin_search_index(revision, len(entries))
+        search = started.get("search")
+        if not isinstance(search, Mapping):
+            return None
+        generation = int(search.get("generation") or 0)
+        if generation <= 0:
+            return None
+        with self._index_schedule_lock:
+            self._index_generation = generation
+        self._index_queue.put_nowait(
+            _SearchIndexJob(
+                revision=revision,
+                generation=generation,
+                entries=entries,
+                prune_missing=bool(prune_missing),
+            )
+        )
+        return manager.snapshot()
+
+    def _search_index_job_current(self, job: _SearchIndexJob) -> bool:
+        with self._index_schedule_lock:
+            return (
+                not self._closed.is_set()
+                and not self._index_closed.is_set()
+                and self._index_generation == job.generation
+            )
+
+    def _run_search_indexer(self) -> None:
+        manager = self._real_search_manager()
+        if manager is None:
+            while not self._index_closed.is_set():
+                job = self._index_queue.get()
+                if job is None:
+                    return
+            return
+        while not self._index_closed.is_set():
+            job = self._index_queue.get()
+            if job is None:
+                return
+            if not self._search_index_job_current(job):
+                continue
+            try:
+                loaded = manager._search_index.load()
+                if not self._search_index_job_current(job):
+                    continue
+                self._publish(
+                    manager.update_search_index(
+                        job.revision,
+                        0,
+                        len(job.entries),
+                        int(loaded.get("indexed") or 0),
+                        generation=job.generation,
+                    )
+                )
+
+                def report(processed: int, total: int, indexed: int) -> None:
+                    if not self._search_index_job_current(job):
+                        return
+                    self._publish(
+                        manager.update_search_index(
+                            job.revision,
+                            processed,
+                            total,
+                            indexed,
+                            generation=job.generation,
+                        )
+                    )
+
+                manager._search_index.sync_batches(
+                    job.entries,
+                    total=len(job.entries),
+                    batch_size=64,
+                    progress_callback=report,
+                    cancelled=lambda: not self._search_index_job_current(job),
+                )
+                if not self._search_index_job_current(job):
+                    continue
+                if job.prune_missing:
+                    manager._search_index.remove_missing(
+                        entry[0] for entry in job.entries
+                    )
+                indexed = manager._search_index.count()
+                self._publish(
+                    manager.update_search_index(
+                        job.revision,
+                        len(job.entries),
+                        len(job.entries),
+                        indexed,
+                        state="ready",
+                        generation=job.generation,
+                    )
+                )
+            except Exception as exc:
+                if not self._search_index_job_current(job):
+                    continue
+                _LOGGER.debug("session_search_index_failed", exc_info=True)
+                self._publish(
+                    manager.update_search_index(
+                        job.revision,
+                        0,
+                        len(job.entries),
+                        0,
+                        state="failed",
+                        error=type(exc).__name__,
+                        generation=job.generation,
+                    )
+                )
+
+    def _latest_queued_search(self, command: dict[str, object]) -> dict[str, object]:
+        """Collapse consecutive keystroke searches before doing any work."""
+
+        latest = command
+        deferred: dict[str, object] | None = None
+        while True:
+            try:
+                queued = self._queue.get_nowait()
+            except queue.Empty:
+                break
+            if queued is None:
+                self._queue.put_nowait(None)
+                break
+            if str(queued.get("action") or "") == "sessionCleanupSearch":
+                latest = queued
+                continue
+            deferred = queued
+            break
+        if deferred is not None:
+            self._queue.put_nowait(deferred)
+        return latest
+
     def close(self, timeout_seconds: float = 2.0) -> bool:
         if self._closed.is_set():
-            return not self._worker.is_alive()
+            return not self._worker.is_alive() and not self._index_worker.is_alive()
         self._closed.set()
+        with self._index_schedule_lock:
+            timer = self._search_change_timer
+            self._search_change_timer = None
+            self._pending_search_paths.clear()
+            self._pending_search_full = False
+        if timer is not None:
+            timer.cancel()
+        self._search_watcher.close()
+        self._index_closed.set()
+        self._index_queue.put_nowait(None)
         self._queue.put_nowait(None)
         if self._worker is not current_thread() and self._worker.is_alive():
             self._worker.join(timeout=max(0.0, float(timeout_seconds)))
-        return not self._worker.is_alive()
+        if self._index_worker is not current_thread() and self._index_worker.is_alive():
+            self._index_worker.join(timeout=max(0.0, float(timeout_seconds)))
+        return not self._worker.is_alive() and not self._index_worker.is_alive()
 
     def _run(self) -> None:
         while True:
@@ -242,6 +486,9 @@ class SessionCleanupWorker:
             if command is None:
                 return
             action = str(command.get("action") or "")
+            if action == "sessionCleanupSearch":
+                command = self._latest_queued_search(command)
+                action = str(command.get("action") or "")
             request_id = str(command.get("requestId") or "")
             refresh_after_delete = False
             transfer_values = (
@@ -259,6 +506,21 @@ class SessionCleanupWorker:
                         snapshot = self.manager.scan(request_id=request_id)
                     finally:
                         self.manager.progress_publisher = previous_publisher
+                    indexed_snapshot = self._schedule_search_index(snapshot, prune_missing=True)
+                    if indexed_snapshot is not None:
+                        snapshot = indexed_snapshot
+                    self._start_search_watcher()
+                elif action == "sessionCleanupSearch":
+                    snapshot = self.manager.search(
+                        str(command.get("query") or command.get("search") or ""),
+                        workdir_id=str(
+                            command.get("workdirId")
+                            or command.get("workdir_id")
+                            or ""
+                        ),
+                        request_id=request_id,
+                        include_sessions=False,
+                    )
                 elif action == "sessionCleanupPreview":
                     snapshot = self.manager.preview(
                         cleanup_string_list(
@@ -509,6 +771,22 @@ class SessionCleanupWorker:
                     error=str(exc) or type(exc).__name__,
                     **failure_values,
                 )
+            operation = snapshot.get("operation")
+            operation_state = (
+                str(operation.get("state") or "").casefold()
+                if isinstance(operation, Mapping)
+                else ""
+            )
+            if (
+                action in {"sessionCleanupExecute", "providerDelete", "sessionTransfer"}
+                and operation_state not in {"failed", "cancelled"}
+            ):
+                indexed_snapshot = self._schedule_search_index(
+                    snapshot,
+                    prune_missing=True,
+                )
+                if indexed_snapshot is not None:
+                    snapshot = indexed_snapshot
             self._publish(snapshot)
             if refresh_after_delete:
                 Thread(
@@ -552,6 +830,18 @@ class SessionCleanupWorker:
 
     def _publish(self, payload: Mapping[str, object]) -> None:
         snapshot = dict(payload)
+        previous = getattr(self._context, "session_cleanup_payload", {})
+        setattr(self._context, "session_cleanup_delta", snapshot)
+        if (
+            "sessions" not in snapshot
+            and isinstance(previous, Mapping)
+            and isinstance(previous.get("sessions"), list)
+        ):
+            stored = {**previous, **snapshot}
+            stored["sessions"] = previous["sessions"]
+            if "workdirs" not in snapshot and "workdirs" in previous:
+                stored["workdirs"] = previous["workdirs"]
+            snapshot = stored
         setattr(self._context, "session_cleanup_payload", snapshot)
         operation = snapshot.get("operation")
         values = operation if isinstance(operation, Mapping) else {}
@@ -652,5 +942,8 @@ def _build_session_cleanup_manager(context: object) -> SessionCleanupManager:
         # Desktop's state-db deletion lags behind its confirmed notification.
         migrated_source_store=(
             hud_runtime_dir() / MIGRATED_SESSION_SOURCES_FILENAME
+        ),
+        search_index_path=(
+            hud_runtime_dir() / SESSION_SEARCH_DATABASE_FILENAME
         ),
     )

@@ -1,6 +1,6 @@
 HEAD = r"""
 (() => {
-  const version = "67";
+  const version = "69";
   const rootId = "codex-usage-hud-root";
   // Reinstalling the same Renderer bundle in a live document must be
   // idempotent.  In particular, do not tear down the old runtime while a
@@ -124,6 +124,7 @@ SHARED_HEAD = r"""
       search: "",
       dateStart: "",
       dateEnd: "",
+      workdirId: "",
       archive: "all",
       availability: "all",
       clientKind: "all",
@@ -144,6 +145,7 @@ SHARED_HEAD = r"""
       search: String(value.search || ""),
       dateStart: String(value.dateStart || ""),
       dateEnd: String(value.dateEnd || ""),
+      workdirId: String(value.workdirId || ""),
       archive: valid(String(value.archive || ""), ["all", "archived", "unarchived"], "all"),
       availability: valid(String(value.availability || ""), ["all", "selectable", "protected", "current", "running", "unresolved", "unavailable"], "all"),
       clientKind: valid(String(value.clientKind || ""), ["all", "app", "cli", "unknown"], "all"),
@@ -157,6 +159,7 @@ SHARED_HEAD = r"""
       search: String(sessionCleanupState.search || ""),
       dateStart: String(sessionCleanupState.dateStart || ""),
       dateEnd: String(sessionCleanupState.dateEnd || ""),
+      workdirId: String(sessionCleanupState.workdirId || ""),
       archive: String(sessionCleanupState.archive || "all"),
       availability: String(sessionCleanupState.availability || "all"),
       clientKind: String(sessionCleanupState.clientKind || "all"),
@@ -183,11 +186,23 @@ SHARED_HEAD = r"""
   let storageRefreshLastAt = 0;
   let sessionCleanupElapsedTimer = 0;
   let sessionCleanupScanWatchdogTimer = 0;
+  let sessionCleanupSearchTimer = 0;
   let restReminderCountdownTimer = 0;
   let restReminderSavedRequestId = "";
 const sessionCleanupState = {
 data: null,
 pendingRequestId: "",
+searchRequestId: "",
+searchResultQuery: "",
+searchResultRevision: "",
+searchResultState: "idle",
+searchResultGeneration: 0,
+searchResultMatches: new Set(),
+searchResultDetails: new Map(),
+page: 0,
+workdirOptions: [],
+workdirOptionsRequestId: "",
+workdirOptionsRetryBlocked: false,
 selectedIds: new Set(),
 search: "",
 dateStart: "",

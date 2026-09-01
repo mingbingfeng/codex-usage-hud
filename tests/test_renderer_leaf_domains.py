@@ -14,6 +14,7 @@ from codex_usage_hud.renderer_assets.model_picker import TEXT as MODEL_PICKER
 from codex_usage_hud.renderer_assets.composer import TEXT as COMPOSER
 from codex_usage_hud.renderer_assets.rest_reminder import TEXT as REST_REMINDER
 from codex_usage_hud.renderer_assets.session_view import TEXT as SESSION_VIEW
+from codex_usage_hud.renderer_assets.session_cleanup import TEXT as SESSION_CLEANUP
 from codex_usage_hud.renderer_assets.shared import TEXT as SHARED
 from codex_usage_hud.renderer_assets.settings_shell import TEXT as SETTINGS_SHELL
 from codex_usage_hud.renderer_assets.theme import TEXT as THEME
@@ -76,6 +77,81 @@ def test_active_session_owner_keeps_sequence_capture_before_reinjection_remove()
     assert "window.__codexUsageHudReportActiveSession" in ACTIVE_SESSION
     assert "function ensureActiveSessionWatchers()" not in manifest.ROUTER
     assert "function cacheActiveSessionPayload(payload)" not in manifest.ROUTER
+
+
+def test_session_cleanup_pagination_uses_thirty_rows_and_reaches_last_page() -> None:
+    factory = SESSION_CLEANUP.split(
+        "  const sessionCleanupDomain = ctx.domains.register(", 1
+    )[0]
+    script = f"""
+const assert = require("node:assert/strict");
+global.window = {{}};
+global.location = {{ href: "app://-/index.html" }};
+const sessionCleanupState = {{
+  data: null,
+  search: "",
+  workdirId: "",
+  searchResultQuery: "",
+  searchResultRevision: "",
+  searchResultState: "idle",
+  searchResultMatches: new Set(),
+  searchResultDetails: new Map(),
+  archive: "all",
+  availability: "all",
+  clientKind: "all",
+  modelProvider: "all",
+  sort: "recommended",
+  page: 0,
+}};
+const currentPayload = () => ({{}});
+const renderSettingsModal = () => {{}};
+const ctx = {{ lifecycle: {{ clearTimeout: () => {{}}, clearInterval: () => {{}} }} }};
+const shared = {{}};
+{factory}
+const domain = createSessionCleanupDomain(ctx, shared);
+sessionCleanupState.data = {{
+  revision: "r1",
+  sessions: Array.from({{ length: 65 }}, (_, index) => ({{
+    id: `session-${{index + 1}}`,
+    title: `Session ${{index + 1}}`,
+    updatedAt: new Date(1700000000000 + index * 1000).toISOString(),
+    status: "idle",
+    archived: false,
+    selectable: true,
+    bytes: index,
+    descendantCount: 0,
+    clientKind: "app",
+    modelProvider: "openai",
+    workdirName: "project",
+    workdirId: "project-id",
+  }})),
+}};
+assert.equal(domain.sessionCleanupPageCount(65), 3);
+assert.equal(domain.sessionCleanupPageRows().length, 30);
+assert.equal(domain.sessionCleanupPageRows()[0].id, "session-1");
+sessionCleanupState.page = 1;
+assert.equal(domain.sessionCleanupPageRows().length, 30);
+assert.equal(domain.sessionCleanupPageRows()[0].id, "session-31");
+sessionCleanupState.page = 2;
+assert.equal(domain.sessionCleanupPageRows().length, 5);
+assert.equal(domain.sessionCleanupPageRows()[0].id, "session-61");
+assert.equal(domain.moveSessionCleanupPage(-1), true);
+assert.equal(sessionCleanupState.page, 1);
+sessionCleanupState.page = 99;
+assert.equal(domain.sessionCleanupPageRows().length, 5);
+assert.equal(sessionCleanupState.page, 2);
+console.log("session-cleanup-pagination-ok");
+"""
+    completed = subprocess.run(
+        ["node", "--input-type=commonjs"],
+        input=script,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+    assert "session-cleanup-pagination-ok" in completed.stdout
 
 
 def test_active_session_sequence_uses_canonical_identity_for_live_updates() -> None:
@@ -1561,6 +1637,6 @@ console.log("session-view-activity-viewport-ok");
 def test_leaf_bundle_keeps_one_iife_and_one_boot_placeholder() -> None:
     script = manifest.RENDERER_HUD_SCRIPT_TEMPLATE
     assert script.lstrip().startswith("(() => {")
-    assert script.count('const version = "67";') == 1
+    assert script.count('const version = "69";') == 1
     assert script.count("__CODEX_MODEL_PICKER_CATALOG__") == 1
     assert script.rstrip().endswith("})()")

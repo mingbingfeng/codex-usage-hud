@@ -276,6 +276,34 @@ def test_session_cleanup_workdir_opens_manager_resolved_directory(tmp_path: Path
     assert "backgroundUsageResponse" not in status
 
 
+def test_session_cleanup_workdir_options_stay_in_settings_response() -> None:
+    manager = SimpleNamespace(
+        workdir_options=MagicMock(
+            return_value=[
+                {
+                    "id": "opaque-workdir",
+                    "label": "project",
+                    "available": True,
+                    "sessionCount": 2,
+                }
+            ]
+        )
+    )
+
+    status = handle_cleanup_command(
+        {
+            "action": "sessionCleanupWorkdirOptions",
+            "requestId": "workdir-options-1",
+        },
+        RuntimeCommandPorts(cleanup_manager=manager),
+    )
+
+    manager.workdir_options.assert_called_once_with()
+    assert status["sessionCleanupWorkdirOptions"]["requestId"] == "workdir-options-1"
+    assert status["sessionCleanupWorkdirOptions"]["options"][0]["id"] == "opaque-workdir"
+    assert status["sessionCleanupWorkdirOptions"]["detailed"] is False
+
+
 @pytest.mark.parametrize("workdir", [None, Path("relative-workdir")])
 def test_session_cleanup_workdir_rejects_invalid_manager_directory(workdir: object) -> None:
     manager = SimpleNamespace(workdir_for_item=MagicMock(return_value=workdir))

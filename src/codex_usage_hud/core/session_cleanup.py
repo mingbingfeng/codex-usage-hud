@@ -14,10 +14,18 @@ from pathlib import Path, PureWindowsPath
 import secrets
 import shutil
 import sqlite3
+from threading import RLock
 import time
 import uuid
 
+from ..codex_cli_launcher import discover_workdirs
 from .parser import classify_session_client
+from .session_search import (
+    SessionSearchIndex,
+    normalise_workdir,
+    search_terms,
+    workdir_identity,
+)
 from .session_materializer import (
     SessionMaterializationError,
     _first_user_message_text,
@@ -27,10 +35,19 @@ from .session_materializer import (
 
 DEFAULT_CONFIRMATION_TTL_SECONDS = 300.0
 _ACTIVE_EDGE_STATES = {"active", "in_progress", "pending", "running", "starting"}
+_SESSION_METADATA_SCAN_LIMIT = 512 * 1024
 # Fork writers can take a short moment to create both the rollout and the
 # state-db record.  Transfer-only retries are bounded and never run as HUD
 # background polling.
 _TRANSFER_READY_RETRY_DELAYS_SECONDS = (0.0, 0.1, 0.25, 0.5, 0.75, 1.25)
+
+
+def _search_path_key(value: object) -> str:
+    try:
+        path = Path(str(value or "")).expanduser().resolve(strict=False)
+    except (OSError, RuntimeError, TypeError, ValueError):
+        path = Path(str(value or ""))
+    return os.path.normcase(os.path.normpath(str(path)))
 
 
 class SessionCleanupError(RuntimeError):
@@ -92,6 +109,10 @@ class SessionCleanupItem:
             "id": self.id,
             "title": self.title,
             "workdirName": self.workdir_name,
+            # The renderer gets only an opaque key.  Absolute cwd values stay
+            # behind the manager boundary, preserving the existing payload
+            # privacy contract while still allowing workdir filtering.
+            "workdirId": workdir_identity(self._cwd),
             "updatedAt": self.updated_at,
             "status": self.status,
             "archived": bool(self.archived),
@@ -337,20 +358,22 @@ def _provider_from_payload(payload: Mapping[str, object]) -> str:
 def _session_metadata(path: Path | None) -> _SessionMetadata:
     """Read only the session metadata record needed for inventory filters.
 
-    When the canonical ``session_meta`` record is absent (older rollouts,
-    truncated files, or writes that never flushed the header), provider and
-    client signals are collected from any record in the file so the session
-    is not silently classified as ``unknown`` and missed by provider-scoped
-    deletion.
+    When the canonical ``session_meta`` record is absent, a bounded prefix is
+    enough for the inventory fast path. Provider-scoped deletion performs its
+    own targeted deep scan for the remaining ``unknown`` cases.
     """
     if path is None:
         return _SessionMetadata()
     fallback_provider = ""
     fallback_originator: object = None
     fallback_source: object = None
+    scanned = 0
     try:
         with path.open("r", encoding="utf-8") as handle:
             for line in handle:
+                if scanned >= _SESSION_METADATA_SCAN_LIMIT:
+                    break
+                scanned += len(line)
                 try:
                     record = json.loads(line)
                 except json.JSONDecodeError:
@@ -462,6 +485,7 @@ class SessionCleanupManager:
         transfer_max_workers: int = 1,
         sleep: Callable[[float], None] = time.sleep,
         migrated_source_store: Path | None = None,
+        search_index_path: Path | None = None,
     ) -> None:
         self.state_db_path = Path(state_db_path)
         self.sessions_root = Path(sessions_root)
@@ -493,6 +517,27 @@ class SessionCleanupManager:
         self._generated_at = 0.0
         self._capability = SessionDeleteCapability(False, "Not scanned yet.")
         self._items: dict[str, SessionCleanupItem] = {}
+        self._search_state_lock = RLock()
+        self._search_index = SessionSearchIndex(
+            search_index_path
+            if search_index_path is not None
+            else self.sessions_root.parent / "session-search.sqlite"
+        )
+        self._search_state: dict[str, object] = {
+            "query": "",
+            "workdirId": "",
+            "state": "idle",
+            "matches": [],
+            "matchKinds": [],
+            "indexed": 0,
+            "indexTotal": 0,
+            "indexState": "idle",
+            "generation": 0,
+            "indexAvailable": True,
+            "requestId": "",
+            "revision": "",
+            "error": "",
+        }
         self._confirmations: dict[str, _Confirmation] = {}
         self._operation: dict[str, object] = self._idle_operation()
         self._unresolved_count = 0
@@ -528,40 +573,393 @@ class SessionCleanupManager:
         }
 
     def snapshot(self, *, include_sessions: bool = True) -> dict[str, object]:
-        sessions = sorted(
-            (
-                item
-                for item in self._items.values()
-                if item._session_id not in self._migrated_source_ids
-            ),
-            key=lambda item: (item.updated_at, item.title.casefold()),
-            reverse=True,
+        with self._search_state_lock:
+            sessions = sorted(
+                (
+                    item
+                    for item in self._items.values()
+                    if item._session_id not in self._migrated_source_ids
+                ),
+                key=lambda item: (item.updated_at, item.title.casefold()),
+                reverse=True,
+            )
+            selectable = [item for item in sessions if item.selectable]
+            payload: dict[str, object] = {
+                "revision": self._revision,
+                "generatedAt": _updated_at_iso(int(self._generated_at * 1000)),
+                "capability": self._capability.to_payload(),
+                "totals": {
+                    "sessions": len(sessions),
+                    "selectable": len(selectable),
+                    "blocked": len(sessions) - len(selectable),
+                    "unresolved": self._unresolved_count,
+                    "bytes": sum(item.size for item in sessions),
+                    "descendants": sum(item.descendant_count for item in sessions),
+                },
+                "operation": dict(self._operation),
+                "search": dict(self._search_state),
+            }
+            if include_sessions:
+                payload["sessions"] = [
+                    item.to_payload(
+                        pending_source_cleanup=(
+                            item._session_id in self._pending_cleanup_source_ids
+                        ),
+                    )
+                    for item in sessions
+                ]
+                payload["workdirs"] = self.workdir_options()
+            return payload
+
+    def workdir_options(self, *, include_paths: bool = False) -> list[dict[str, object]]:
+        """Return renderer-safe workdir choices with opaque identities.
+
+        The labels/order follow the same local-project discovery used by the
+        CLI launcher. Historical cwd values from the scanned inventory are
+        merged in as well, including directories that no longer exist. Full
+        paths remain private to the manager and are never serialized here.
+        """
+
+        discovered = discover_workdirs(
+            sessions_root=self.sessions_root,
+            current_workdir=Path.cwd(),
         )
-        selectable = [item for item in sessions if item.selectable]
-        payload: dict[str, object] = {
-            "revision": self._revision,
-            "generatedAt": _updated_at_iso(int(self._generated_at * 1000)),
-            "capability": self._capability.to_payload(),
-            "totals": {
-                "sessions": len(sessions),
-                "selectable": len(selectable),
-                "blocked": len(sessions) - len(selectable),
-                "unresolved": self._unresolved_count,
-                "bytes": sum(item.size for item in sessions),
-                "descendants": sum(item.descendant_count for item in sessions),
-            },
-            "operation": dict(self._operation),
+        values: dict[str, dict[str, object]] = {}
+        order: list[str] = []
+
+        def add(raw_path: object, label: object = "", source: object = "") -> None:
+            path = str(raw_path or "").strip()
+            identity = workdir_identity(path)
+            if not identity:
+                return
+            normalised = normalise_workdir(path)
+            key = normalised.casefold()
+            if key in values:
+                return
+            try:
+                path_obj = Path(path)
+                available = path_obj.is_dir()
+            except (OSError, ValueError):
+                path_obj = Path(".")
+                available = False
+            entry: dict[str, object] = {
+                "id": identity,
+                "label": str(label or path_obj.name or path).strip(),
+                "available": available,
+                "source": str(source or "Codex Desktop"),
+                "sessionCount": 0,
+            }
+            if include_paths:
+                entry["path"] = path
+            values[key] = entry
+            order.append(key)
+
+        for entry in discovered:
+            if isinstance(entry, Mapping):
+                add(entry.get("path"), entry.get("label"), entry.get("source"))
+        for item in self._items.values():
+            raw_path = str(item._cwd or "").strip()
+            if not raw_path:
+                continue
+            add(raw_path, item.workdir_name, "session history")
+        for item in self._items.values():
+            identity = workdir_identity(item._cwd)
+            if not identity:
+                continue
+            entry = values.get(normalise_workdir(item._cwd).casefold())
+            if entry is not None:
+                entry["sessionCount"] = int(entry.get("sessionCount") or 0) + 1
+        options = [values[key] for key in order]
+        options.sort(key=lambda item: (str(item.get("label") or "").casefold(), str(item.get("id") or "")))
+        return options
+
+    def workdir_options_detailed(self) -> list[dict[str, object]]:
+        """Return CLI-style labels plus paths for the local settings command.
+
+        This explicit command response is the only path-bearing workdir
+        surface. The normal session inventory remains opaque for privacy and
+        transfer/delete payload compatibility.
+        """
+
+        return self.workdir_options(include_paths=True)
+
+    def search_index_entries(
+        self,
+        changed_paths: Iterable[Path] = (),
+    ) -> tuple[tuple[str, tuple[Path, ...], str, str, str, str], ...]:
+        """Return current index work without exposing session identifiers."""
+
+        changed = {
+            _search_path_key(path)
+            for path in changed_paths
+            if str(path or "").strip()
         }
-        if include_sessions:
-            payload["sessions"] = [
-                item.to_payload(
-                    pending_source_cleanup=(
-                        item._session_id in self._pending_cleanup_source_ids
-                    ),
+        with self._search_state_lock:
+            entries: list[tuple[str, tuple[Path, ...], str, str, str, str]] = []
+            for item in self._items.values():
+                if item._session_id in self._migrated_source_ids:
+                    continue
+                if changed and not any(
+                    _search_path_key(path) in changed for path in item._rollout_paths
+                ):
+                    continue
+                entries.append(
+                    (
+                        item._session_id,
+                        item._rollout_paths,
+                        item.title,
+                        item._cwd,
+                        item.model_provider,
+                        item.client_kind,
+                    )
                 )
-                for item in sessions
-            ]
-        return payload
+            return tuple(entries)
+
+    def begin_search_index(self, revision: str, total: int) -> dict[str, object]:
+        """Mark an event-triggered index generation as running."""
+
+        with self._search_state_lock:
+            if str(revision or "") != self._revision:
+                return self.snapshot(include_sessions=False)
+            self._search_state = {
+                **self._search_state,
+                "state": "indexing",
+                "indexState": "indexing",
+                "processed": 0,
+                "indexed": max(0, int(self._search_state.get("indexed") or 0)),
+                "indexTotal": max(0, int(total)),
+                "generation": int(self._search_state.get("generation") or 0) + 1,
+                "indexAvailable": True,
+                "error": "",
+                "requestId": "",
+                "revision": self._revision,
+            }
+            return self.snapshot(include_sessions=False)
+
+    def _visible_search_items(
+        self,
+        workdir_id: str,
+    ) -> list[SessionCleanupItem]:
+        selected = str(workdir_id or "").strip()
+        return [
+            item
+            for item in self._items.values()
+            if item._session_id not in self._migrated_source_ids
+            and (
+                not selected
+                or workdir_identity(item._cwd) == selected
+            )
+        ]
+
+    @staticmethod
+    def _metadata_matches(item: SessionCleanupItem, query: str) -> bool:
+        terms = search_terms(query)
+        if not terms:
+            return True
+        haystack = " ".join(
+            (
+                item.title,
+                item.workdir_name,
+                item._cwd,
+                item.model_provider,
+                item.client_kind,
+            )
+        ).casefold().replace("\\", "/")
+        return all(term in haystack for term in terms)
+
+    def _search_matches_locked(
+        self,
+        query: str,
+        workdir_id: str,
+    ) -> tuple[list[str], list[dict[str, object]], dict[str, object]]:
+        visible_items = self._visible_search_items(workdir_id)
+        by_session = {item._session_id: item for item in visible_items}
+        result = self._search_index.search(
+            query,
+            session_ids=by_session,
+            load=False,
+        )
+        details: dict[str, dict[str, object]] = {}
+        order: list[str] = []
+        raw_matches = result.get("matches") if isinstance(result, Mapping) else []
+        if isinstance(raw_matches, Sequence) and not isinstance(
+            raw_matches, (str, bytes, bytearray)
+        ):
+            for raw in raw_matches:
+                if not isinstance(raw, Mapping):
+                    continue
+                item = by_session.get(str(raw.get("sessionId") or ""))
+                if item is None:
+                    continue
+                item_id = item.id
+                if item_id not in details:
+                    order.append(item_id)
+                    details[item_id] = {
+                        "id": item_id,
+                        "kinds": [
+                            str(kind)
+                            for kind in raw.get("kinds", ())
+                            if str(kind or "").strip()
+                        ]
+                        if isinstance(raw.get("kinds"), Sequence)
+                        and not isinstance(raw.get("kinds"), (str, bytes, bytearray))
+                        else [],
+                        "score": float(raw.get("score") or 0),
+                    }
+        if query.strip():
+            for item in visible_items:
+                if not self._metadata_matches(item, query):
+                    continue
+                item_id = item.id
+                if item_id not in details:
+                    order.append(item_id)
+                    details[item_id] = {
+                        "id": item_id,
+                        "kinds": ["metadata"],
+                        "score": 3.0,
+                    }
+                elif "metadata" not in details[item_id]["kinds"]:
+                    details[item_id]["kinds"].append("metadata")
+        else:
+            order = [item.id for item in visible_items]
+            details = {}
+        if details:
+            order.sort(
+                key=lambda item_id: (
+                    -float(details[item_id].get("score") or 0),
+                    item_id,
+                )
+            )
+        return (
+            order,
+            [details[item_id] for item_id in order if item_id in details],
+            result,
+        )
+
+    def update_search_index(
+        self,
+        revision: str,
+        processed: int,
+        total: int,
+        indexed: int,
+        *,
+        state: str = "indexing",
+        error: str = "",
+        generation: int | None = None,
+    ) -> dict[str, object]:
+        """Publish resident-index progress and refresh the active query."""
+
+        with self._search_state_lock:
+            if str(revision or "") != self._revision:
+                return self.snapshot(include_sessions=False)
+            if (
+                generation is not None
+                and int(generation) != int(self._search_state.get("generation") or 0)
+            ):
+                return self.snapshot(include_sessions=False)
+            query = str(self._search_state.get("query") or "")
+            workdir_id = str(self._search_state.get("workdirId") or "")
+            matches, match_kinds, result = self._search_matches_locked(
+                query,
+                workdir_id,
+            )
+            index_state = str(state or "indexing")
+            self._search_state = {
+                **self._search_state,
+                "query": query,
+                "workdirId": workdir_id,
+                "state": "indexing" if index_state == "indexing" else "completed",
+                "indexState": index_state,
+                "processed": max(0, int(processed)),
+                "indexTotal": max(0, int(total)),
+                "indexed": max(0, int(indexed)),
+                "matches": matches,
+                "matchKinds": match_kinds,
+                "indexAvailable": bool(result.get("indexAvailable", True))
+                and index_state != "failed",
+                "error": str(error or ""),
+                "requestId": "",
+                "revision": self._revision,
+            }
+            return self.snapshot(include_sessions=False)
+
+    def search(
+        self,
+        query: str,
+        *,
+        workdir_id: str = "",
+        request_id: str = "",
+        include_sessions: bool = True,
+    ) -> dict[str, object]:
+        """Search only the resident index and current inventory metadata."""
+
+        text = str(query or "").strip()
+        selected_workdir = str(workdir_id or "").strip()
+        with self._search_state_lock:
+            try:
+                matches, match_kinds, result = self._search_matches_locked(
+                    text,
+                    selected_workdir,
+                )
+                index_state = str(self._search_state.get("indexState") or "idle")
+                indexed = int(result.get("indexed") or 0)
+                if (
+                    index_state == "indexing"
+                    and indexed > 0
+                    and indexed >= int(self._search_state.get("indexTotal") or 0)
+                ):
+                    index_state = "ready"
+                self._search_state = {
+                    **self._search_state,
+                    "query": text,
+                    "workdirId": selected_workdir,
+                    "state": "completed",
+                    "indexState": index_state,
+                    "matches": matches,
+                    "matchKinds": match_kinds,
+                    "indexed": indexed,
+                    "indexAvailable": bool(result.get("indexAvailable", True)),
+                    "requestId": str(request_id or ""),
+                    "revision": self._revision,
+                    "error": "",
+                }
+                self._operation = {
+                    "id": str(request_id or self.token_factory()),
+                    "requestId": str(request_id or ""),
+                    "action": "search",
+                    "state": "completed",
+                    "progress": 100,
+                    "error": "",
+                    "query": text,
+                    "workdirId": selected_workdir,
+                    "matchedCount": len(matches),
+                }
+            except Exception as exc:
+                self._search_state = {
+                    **self._search_state,
+                    "query": text,
+                    "workdirId": selected_workdir,
+                    "state": "failed",
+                    "indexState": "failed",
+                    "matches": [],
+                    "matchKinds": [],
+                    "indexed": 0,
+                    "indexAvailable": False,
+                    "requestId": str(request_id or ""),
+                    "revision": self._revision,
+                    "error": type(exc).__name__,
+                }
+                self._operation = {
+                    "id": str(request_id or self.token_factory()),
+                    "requestId": str(request_id or ""),
+                    "action": "search",
+                    "state": "failed",
+                    "progress": 100,
+                    "error": type(exc).__name__,
+                    "query": text,
+                    "workdirId": selected_workdir,
+                }
+        return self.snapshot(include_sessions=bool(include_sessions))
 
     def mark_migrated_sources(self, session_ids: Iterable[str]) -> None:
         """Record sources that were successfully migrated to another provider.
@@ -702,6 +1100,7 @@ class SessionCleanupManager:
         state: str,
         progress: int = 0,
         error: str = "",
+        include_sessions: bool = True,
         **values: object,
     ) -> dict[str, object]:
         operation = {
@@ -714,7 +1113,7 @@ class SessionCleanupManager:
         }
         operation.update(values)
         self._operation = operation
-        return self.snapshot()
+        return self.snapshot(include_sessions=bool(include_sessions))
 
     def cancel(self, *, request_id: str = "") -> dict[str, object]:
         self._confirmations.clear()
@@ -786,7 +1185,13 @@ class SessionCleanupManager:
         records, parents, edge_states, unsafe_ids, unresolved = self._load_state()
         self._prune_migrated_source_ids(records)
         report("merge", "Merging root sessions and subagents", 2, 55)
-        titles = self._session_index_titles()
+        # State rows normally carry the visible title. Avoid rereading the
+        # legacy session index on every scan; consult it only for missing titles.
+        titles = (
+            self._session_index_titles()
+            if any(not record.title for record in records.values())
+            else {}
+        )
         current_ids = self._protected_ids(self.current_session_ids)
         active_ids = self._protected_ids(self.active_session_ids)
         roots, unsafe_roots, unresolved_roots = self._root_ids(
@@ -904,6 +1309,24 @@ class SessionCleanupManager:
         self._generated_at = float(self.clock())
         self._capability = capability
         self._items = {item.id: item for item in items}
+        previous_query = str(self._search_state.get("query") or "")
+        previous_workdir_id = str(self._search_state.get("workdirId") or "")
+        self._search_state = {
+            "query": previous_query,
+            "workdirId": previous_workdir_id,
+            "state": "idle",
+            "indexState": "stale",
+            "processed": 0,
+            "indexTotal": len(items),
+            "indexed": 0,
+            "generation": int(self._search_state.get("generation") or 0) + 1,
+            "matches": [],
+            "matchKinds": [],
+            "indexAvailable": True,
+            "requestId": "",
+            "revision": self._revision,
+            "error": "",
+        }
         self._unresolved_count = unresolved
         self._confirmations.clear()
         self._operation = {
@@ -3002,6 +3425,18 @@ class SessionCleanupManager:
             item_id: item
             for item_id, item in self._items.items()
             if item._session_id in remaining_session_ids
+        }
+        remaining_ids = tuple(item._session_id for item in self._items.values())
+        try:
+            self._search_index.remove_missing(remaining_ids)
+        except (OSError, sqlite3.Error):
+            pass
+        self._search_state = {
+            **self._search_state,
+            "state": "idle",
+            "matches": [],
+            "matchKinds": [],
+            "revision": self._revision,
         }
         _roots, _unsafe_roots, graph_unresolved = self._root_ids(
             records,

@@ -757,6 +757,43 @@ def handle_cleanup_command(
     command: Mapping[str, Any], ports: RuntimeCommandPorts
 ) -> dict[str, object] | object:
     action = str(command.get("action") or "").strip()
+    if action == "sessionCleanupWorkdirOptions":
+        manager = ports.cleanup_manager
+        options = getattr(manager, "workdir_options_detailed", None)
+        detailed = callable(options)
+        if not callable(options):
+            options = getattr(manager, "workdir_options", None)
+        request_id = str(command.get("requestId") or command.get("id") or "")
+        if not callable(options):
+            status = _status("会话工作目录筛选当前不可用。", kind="error")
+            status["sessionCleanupWorkdirOptions"] = {
+                "requestId": request_id,
+                "options": [],
+                "error": "unavailable",
+                "detailed": False,
+            }
+            return status
+        try:
+            values = options()
+        except Exception as exc:
+            error_detail = _exc_detail_log(exc, tag="session_cleanup_workdir_options_failed")
+            status = _status(
+                f"无法读取会话工作目录选项：{error_detail}", kind="error"
+            )
+            status["sessionCleanupWorkdirOptions"] = {
+                "requestId": request_id,
+                "options": [],
+                "error": error_detail,
+                "detailed": detailed,
+            }
+            return status
+        status = _status("")
+        status["sessionCleanupWorkdirOptions"] = {
+            "requestId": request_id,
+            "options": list(values) if isinstance(values, Sequence) else [],
+            "detailed": detailed,
+        }
+        return status
     if action == "openSessionCleanupWorkdir":
         workdir_for_item = getattr(ports.cleanup_manager, "workdir_for_item", None)
         if not callable(workdir_for_item):
@@ -817,6 +854,7 @@ def handle_cleanup_command(
     request_id = str(accepted.get("requestId") or request_id)
     labels = {
         "sessionCleanupScan": "会话清单扫描已开始。",
+        "sessionCleanupSearch": "正在搜索会话内容...",
         "sessionCleanupPreview": "正在生成永久删除确认。",
         "sessionCleanupExecute": "永久删除请求已进入本地事务门禁。",
         "sessionCleanupCancel": "已取消会话删除确认。",

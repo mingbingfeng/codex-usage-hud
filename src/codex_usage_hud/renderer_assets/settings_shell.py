@@ -3266,6 +3266,14 @@ _TEXT_PREFIX = r"""
         if (activeTab === "storage") {
           restoreStorageUiState();
           restoreSessionCleanupConfirm(sessionCleanupConfirmToken);
+          requestSessionCleanupWorkdirOptions({ force: true });
+          if (
+            String(sessionCleanupState.search || "").trim()
+            && !sessionCleanupState.searchRequestId
+            && sessionCleanupState.searchResultState !== "completed"
+          ) {
+            requestSessionCleanupSearch(sessionCleanupState.search);
+          }
         }
         if (activeTab === "backgroundUsage") {
           restoreBackgroundUsageScrollPositions();
@@ -4561,6 +4569,50 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
 
       function applySettingsCommandStatus(payload) {
         const status = payload?.settingsCommandStatus;
+        const workdirOptionsResponse = status?.sessionCleanupWorkdirOptions;
+        if (workdirOptionsResponse && typeof workdirOptionsResponse === "object") {
+          const responseRequestId = String(workdirOptionsResponse.requestId || "");
+          const expectedRequestId = String(sessionCleanupState.workdirOptionsRequestId || "");
+          if (!expectedRequestId || !responseRequestId || responseRequestId === expectedRequestId) {
+            const responseError = String(workdirOptionsResponse.error || "");
+            sessionCleanupState.workdirOptionsRetryBlocked = !!responseError;
+            if (Array.isArray(workdirOptionsResponse.options)) {
+              const current = Array.isArray(sessionCleanupState.workdirOptions)
+                ? sessionCleanupState.workdirOptions
+                : [];
+              const byId = new Map(
+                current
+                  .filter((item) => item && typeof item === "object" && String(item?.id || ""))
+                  .map((item) => [String(item.id), item]),
+              );
+              for (const item of workdirOptionsResponse.options) {
+                const id = String(item?.id || "");
+                if (!id) continue;
+                // Preserve a path-bearing entry already received from the
+                // latest scan when an older request completes afterward.
+                byId.set(id, { ...byId.get(id), ...item });
+              }
+              sessionCleanupState.workdirOptions = Array.from(byId.values());
+            }
+            sessionCleanupState.workdirOptionsRequestId = "";
+            const safeOptions = Array.isArray(sessionCleanupState.data?.workdirs)
+              ? sessionCleanupState.data.workdirs
+              : [];
+            const detailedIds = new Set(
+              sessionCleanupState.workdirOptions
+                .filter((item) => item?.path)
+                .map((item) => String(item?.id || "")),
+            );
+            const responseReady = !responseError
+              && workdirOptionsResponse.detailed === true
+              && Array.isArray(workdirOptionsResponse.options)
+              && workdirOptionsResponse.options.length > 0;
+            if (responseReady && safeOptions.some((item) => String(item?.id || "") && !detailedIds.has(String(item.id)))) {
+              requestSessionCleanupWorkdirOptions();
+            }
+            if (settingsActiveTab === "storage") refreshStoragePanelIfVisible();
+          }
+        }
         if (status && typeof status === "object" && String(status.action || "")) {
           // Quick launch is intentionally independent from the Settings modal.
           // Consume its request-scoped statuses even while Settings stays hidden.
@@ -4742,7 +4794,7 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
         }
       }
 
-      function submitSettingsCommand(command, pendingMessage, { preserveOverlay = false } = {}) {
+      function submitSettingsCommand(command, pendingMessage, { preserveOverlay = false, quiet = false } = {}) {
         const payload = {
           id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
           createdAt: Date.now(),
@@ -4781,7 +4833,7 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
         const providerDeleteHandledSynchronously = String(command?.action || "") === "deleteProvider"
           && Boolean(providerDeleteRequestId)
           && !String(pricingWorkflowState.providerDeleteRequestId || "");
-        if (!providerDeleteHandledSynchronously) {
+        if (!providerDeleteHandledSynchronously && !quiet) {
           setSettingsStatus(pendingMessage || "设置命令已提交，等待 HUD daemon 写入本地配置...");
         }
         clearSettingsRestartPrompt();
@@ -5888,6 +5940,8 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
         writeSettingsUiState(false, settingsActiveTab);
         ensureRestReminderCountdownTicker();
         stopSessionCleanupElapsedTicker();
+        stopSessionCleanupSearchTimer();
+        resetSessionCleanupPendingRequests();
         settingsProviderDraft = null;
         settingsDirtyProviders.clear();
         codexProviderDrafts.clear();

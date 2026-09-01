@@ -102,6 +102,7 @@ class RuntimeContext:
     session_cleanup_manager: object | None = None
     session_cleanup_worker: object | None = None
     session_cleanup_payload: dict[str, object] = field(default_factory=dict)
+    session_cleanup_delta: dict[str, object] = field(default_factory=dict)
     session_management_current_session_id: str = ""
     session_management_active_session_ids: set[str] = field(default_factory=set)
     rest_reminder: object | None = None

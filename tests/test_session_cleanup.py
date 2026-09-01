@@ -208,6 +208,132 @@ class SessionCleanupManagerTests(unittest.TestCase):
         self.assertNotIn(CHILD_ID, serialized)
         self.assertNotIn(str(root), serialized)
 
+    def test_scan_does_not_build_content_index_on_inventory_thread(self) -> None:
+        fixture = self._fixture()
+        temporary, _root, _state, _index, _rollouts, manager = fixture
+        self.addCleanup(temporary.cleanup)
+
+        with patch.object(
+            manager._search_index,
+            "sync",
+            side_effect=AssertionError("content indexing must be deferred"),
+        ):
+            payload = manager.scan(request_id="fast-scan")
+
+        self.assertEqual(payload["operation"]["state"], "completed")
+        self.assertEqual(payload["search"]["indexState"], "stale")
+
+    def test_search_indexes_user_assistant_and_changed_file_text(self) -> None:
+        fixture = self._fixture()
+        temporary, _root, _state, _index, rollouts, manager = fixture
+        self.addCleanup(temporary.cleanup)
+        rollouts[ROOT_ID].write_text(
+            rollouts[ROOT_ID].read_text(encoding="utf-8")
+            + json.dumps(
+                {
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "user_message",
+                        "message": "请检查会话索引中的 fuzzy-marker",
+                    },
+                },
+                ensure_ascii=False,
+            )
+            + "\n"
+            + json.dumps(
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "已修改 active_session.py"}],
+                    },
+                },
+                ensure_ascii=False,
+            )
+            + "\n"
+            + json.dumps(
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "custom_tool_call",
+                        "name": "apply_patch",
+                        "arguments": "*** Begin Patch\\n*** Update File: E:/Project/codex-usage-hud/src/codex_usage_hud/renderer_assets/active_session.py\\n*** End Patch",
+                    },
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        payload = manager.scan(request_id="search-scan")
+        root_row = next(row for row in payload["sessions"] if row["title"] == "Root")
+        manager._search_index.sync(manager.search_index_entries())
+
+        for query in ("fuzzy-marker", "active_session.py", "renderer_assets"):
+            result = manager.search(query, request_id=f"search-{query}")
+            assert root_row["id"] in result["search"]["matches"]
+            assert result["operation"]["action"] == "search"
+            assert result["operation"]["state"] == "completed"
+
+        lightweight = manager.search(
+            "fuzzy-marker",
+            request_id="search-lightweight",
+            include_sessions=False,
+        )
+        assert "sessions" not in lightweight
+        assert "workdirs" not in lightweight
+
+        if manager._search_index._fts_available:
+            with closing(sqlite3.connect(manager._search_index.path)) as connection, connection:
+                connection.execute("DELETE FROM session_search_fts")
+            rebuilt = manager.search("fuzzy-marker", request_id="search-fts-rebuild")
+            assert root_row["id"] in rebuilt["search"]["matches"]
+
+        rollouts[ROOT_ID].write_text(
+            rollouts[ROOT_ID].read_text(encoding="utf-8")
+            + json.dumps(
+                {
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "user_message",
+                        "message": "append-only-marker",
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        manager._search_index.sync(manager.search_index_entries())
+        refreshed = manager.search("append-only-marker", request_id="search-append")
+        assert root_row["id"] in refreshed["search"]["matches"]
+
+        filtered = manager.search(
+            "", workdir_id=root_row["workdirId"], request_id="search-workdir"
+        )
+        assert root_row["id"] in filtered["search"]["matches"]
+        assert all(
+            row["workdirId"] == root_row["workdirId"]
+            for row in filtered["sessions"]
+            if row["id"] in filtered["search"]["matches"]
+        )
+
+    def test_workdir_options_are_opaque_and_include_history(self) -> None:
+        fixture = self._fixture()
+        temporary, root, _state, _index, _rollouts, manager = fixture
+        self.addCleanup(temporary.cleanup)
+
+        payload = manager.scan(request_id="workdir-scan")
+
+        options = payload["workdirs"]
+        assert any(item["label"] == "project-a" for item in options)
+        assert any(item["label"] == "project-b" for item in options)
+        detailed = manager.workdir_options_detailed()
+        assert any(item.get("path") == str(root / "project-a") for item in detailed)
+        serialized = json.dumps(payload, ensure_ascii=False)
+        assert str(root) not in serialized
+
     def test_workdir_for_item_rechecks_current_inventory_directory(self) -> None:
         fixture = self._fixture()
         temporary, root, state, _index, _rollouts, manager = fixture
@@ -990,8 +1116,7 @@ class SessionCleanupManagerTests(unittest.TestCase):
             token_factory=iter(f"flag-{i}" for i in range(100)).__next__,
             migrated_source_store=store,
         )
-        payload = manager.scan(request_id="transfer-scan")
-        root_row = next(row for row in payload["sessions"] if row["title"] == "Root")
+        manager.scan(request_id="transfer-scan")
         manager.mark_pending_cleanup_sources((ROOT_ID, CHILD_ID))
 
         fresh = manager.scan(request_id="rescan")

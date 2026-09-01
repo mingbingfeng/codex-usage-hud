@@ -223,11 +223,18 @@ TEXT = r"""
     const commitSessionCleanupSearch = (sessionSearch) => {
       if (!sessionSearch || !root.contains(sessionSearch)) return false;
       const search = String(sessionSearch.value || "");
-      if (search === sessionCleanupState.search) return false;
+      if (
+        search === sessionCleanupState.search
+        && !sessionCleanupState.searchRequestId
+        && !sessionCleanupSearchTimer
+        && sessionCleanupState.searchResultQuery === search
+      ) return false;
       sessionCleanupState.search = search;
+      sessionCleanupState.page = 0;
       sessionCleanupState.selectedIds.clear();
       persistSessionCleanupFilters();
-      renderSettingsModal("storage");
+      stopSessionCleanupSearchTimer();
+      requestSessionCleanupSearch(search);
       return true;
     };
     const commitSessionTransferSearch = (sessionSearch) => {
@@ -297,7 +304,24 @@ TEXT = r"""
       const sessionSearch = event.target?.closest?.('[data-session-cleanup-search="true"]');
       if (sessionSearch && root.contains(sessionSearch)) {
         // IME composition emits input events before the final text is committed.
-        // Re-rendering here replaces the input and aborts Chinese composition.
+        // Keep the input stable while composing; the final input event schedules
+        // an asynchronous indexed query without replacing the DOM node.
+        if (event.isComposing || sessionSearch.isComposing) return;
+        const search = String(sessionSearch.value || "");
+        if (search === sessionCleanupState.search) return;
+        sessionCleanupState.search = search;
+        sessionCleanupState.page = 0;
+        sessionCleanupState.selectedIds.clear();
+        persistSessionCleanupFilters();
+        stopSessionCleanupSearchTimer();
+        sessionCleanupSearchTimer = ctx.lifecycle.timeout(
+          "session_cleanup_search",
+          () => {
+            sessionCleanupSearchTimer = 0;
+            requestSessionCleanupSearch(search);
+          },
+          220,
+        );
         return;
       }
       const sessionTransferSearch = event.target?.closest?.('[data-session-transfer-search="true"]');
@@ -407,17 +431,23 @@ TEXT = r"""
       const sessionFilter = event.target?.closest?.("[data-session-cleanup-filter]");
       if (sessionFilter && root.contains(sessionFilter)) {
         const key = String(sessionFilter.dataset.sessionCleanupFilter || "");
-        if (!new Set(["archive", "availability", "clientKind", "modelProvider", "sort"]).has(key)) return;
+        if (!new Set(["archive", "availability", "clientKind", "modelProvider", "sort", "workdirId"]).has(key)) return;
         sessionCleanupState[key] = String(sessionFilter.value || "all");
+        sessionCleanupState.page = 0;
         if (key !== "sort") sessionCleanupState.selectedIds.clear();
         persistSessionCleanupFilters();
-        renderSettingsModal("storage");
+        if (key === "workdirId") {
+          stopSessionCleanupSearchTimer();
+          requestSessionCleanupSearch(sessionCleanupState.search);
+        } else {
+          renderSettingsModal("storage");
+        }
         return;
       }
 
       const sessionSelectAll = event.target?.closest?.('[data-session-cleanup-select-all="true"]');
       if (sessionSelectAll && root.contains(sessionSelectAll)) {
-        for (const item of sessionCleanupRows()) {
+        for (const item of sessionCleanupPageRows()) {
           const id = String(item?.id || "");
           if (!id || item?.selectable !== true) continue;
           if (sessionSelectAll.checked) sessionCleanupState.selectedIds.add(id);
@@ -774,6 +804,12 @@ TEXT = r"""
         moveSessionTransferPage(action.dataset.direction === "prev" ? -1 : 1);
         return;
       }
+      if (action.dataset.action === "session-cleanup-page") {
+        event.preventDefault();
+        event.stopPropagation();
+        moveSessionCleanupPage(action.dataset.direction === "prev" ? -1 : 1);
+        return;
+      }
       if (action.dataset.action === "session-cleanup-date-toggle") {
         event.preventDefault();
         event.stopPropagation();
@@ -803,6 +839,7 @@ TEXT = r"""
         sessionCleanupState.dateDraftStart = "";
         sessionCleanupState.dateDraftEnd = "";
         sessionCleanupState.datePickerOpen = false;
+        sessionCleanupState.page = 0;
         sessionCleanupState.selectedIds.clear();
         persistSessionCleanupFilters();
         renderSettingsModal("storage");
@@ -818,6 +855,7 @@ TEXT = r"""
         sessionCleanupState.dateStart = sessionCleanupState.dateDraftStart;
         sessionCleanupState.dateEnd = sessionCleanupState.dateDraftEnd;
         sessionCleanupState.datePickerOpen = false;
+        sessionCleanupState.page = 0;
         sessionCleanupState.selectedIds.clear();
         persistSessionCleanupFilters();
         renderSettingsModal("storage");
@@ -827,6 +865,16 @@ TEXT = r"""
         event.preventDefault();
         event.stopPropagation();
         sessionCleanupState.search = "";
+        sessionCleanupState.workdirId = "";
+        sessionCleanupState.page = 0;
+        sessionCleanupState.searchRequestId = "";
+        sessionCleanupState.searchResultQuery = "";
+        sessionCleanupState.searchResultRevision = "";
+        sessionCleanupState.searchResultState = "idle";
+        sessionCleanupState.searchResultGeneration = 0;
+        sessionCleanupState.searchResultMatches = new Set();
+        sessionCleanupState.searchResultDetails = new Map();
+        stopSessionCleanupSearchTimer();
         sessionCleanupState.dateStart = "";
         sessionCleanupState.dateEnd = "";
         sessionCleanupState.dateDraftStart = "";
