@@ -624,21 +624,30 @@ def _overlay_execution_group_steps(
     ordered action steps.  Reasoning-only rows are intentionally excluded: the
     group contains the commands/tools a user can act on.
     """
-    # The renderer explicitly reports multiple native work disclosures in the
-    # current turn. The JSONL timeline cannot identify which disclosure owns
-    # each action, so suppress execution rows rather than mixing groups.
-    if bool(item.get("collapsedDisclosureAmbiguous")):
-        return []
     steps = _overlay_activity_steps(item)
     if not steps:
         return []
-    last_output_at = parse_timestamp(str(item.get("lastOutputAt") or "").strip())
 
     def is_action(step: Mapping[str, object]) -> bool:
         title = str(step.get("title") or "").strip()
         tool_name = str(step.get("toolName") or step.get("tool_name") or "").strip()
         detail = " ".join(str(step.get("detail") or "").split())
         return bool(detail or tool_name) and not (title == "思考" and not tool_name)
+
+    if bool(item.get("collapsedDisclosureAmbiguous")):
+        # The JSONL timeline cannot identify which historical actions belong to
+        # one of multiple native disclosures. A unique latest running action
+        # is still safe to expose for the live title/body; never mix completed
+        # rows from the ambiguous history into that minimal view.
+        running_steps = [
+            step
+            for step in steps
+            if is_action(step)
+            and str(step.get("status") or "").strip().lower() == "running"
+        ]
+        return running_steps[-1:]
+
+    last_output_at = parse_timestamp(str(item.get("lastOutputAt") or "").strip())
 
     candidates: list[Mapping[str, object]] = []
     for step in steps:
@@ -705,6 +714,11 @@ def _overlay_mcp_provider_label(tool_name: str) -> str:
 
 def _overlay_execution_group_title(item: Mapping[str, object]) -> str:
     """Build the short title shown in the bubble footer for a tool group."""
+    steps = _overlay_execution_group_steps(item)
+    if bool(item.get("collapsedDisclosureAmbiguous")):
+        return _overlay_running_execution_title(item)
+    execution_active = bool(steps) and _overlay_execution_body_active(item)
+    elapsed_title_seen = False
     for key in (
         "nativeCollapsedTitle",
         "executionGroupTitle",
@@ -713,9 +727,17 @@ def _overlay_execution_group_title(item: Mapping[str, object]) -> str:
         "groupTitle",
     ):
         explicit = " ".join(str(item.get(key) or "").split())
-        if explicit:
+        if explicit and not _overlay_title_is_elapsed(explicit):
             return explicit
-    steps = _overlay_execution_group_steps(item)
+        if explicit:
+            elapsed_title_seen = True
+    if elapsed_title_seen and execution_active:
+        # Codex exposes the user-message duration button as the collapsed
+        # title while the actual tool group is active. Prefer the current
+        # action kind in that narrow case so "用时 ..." cannot mask editing.
+        state_title = _overlay_running_execution_title(item)
+        if state_title:
+            return state_title
     if len(steps) < 2:
         return ""
     command_steps: list[Mapping[str, object]] = []
@@ -766,6 +788,61 @@ def _overlay_execution_group_title(item: Mapping[str, object]) -> str:
         # footer's existing ellipsis to preserve its beginning.
         return " ".join(fragments)
     return "执行了一组工具"
+
+
+def _overlay_title_is_elapsed(value: object) -> bool:
+    """Whether a native disclosure value is only a duration summary."""
+    text = " ".join(str(value or "").split()).casefold()
+    return text.startswith(
+        (
+            "已处理",
+            "处理了",
+            "用时",
+            "耗时",
+            "历时",
+            "worked for",
+            "worked",
+            "duration",
+            "processed",
+            "took",
+        )
+    )
+
+
+def _overlay_title_is_active(value: object) -> bool:
+    """Whether a native disclosure value describes live execution."""
+    text = " ".join(str(value or "").split()).casefold()
+    return text.startswith(
+        (
+            "正在",
+            "等待",
+            "working",
+            "editing",
+            "running",
+            "reading",
+            "executing",
+            "calling",
+        )
+    )
+
+
+def _overlay_running_execution_title(item: Mapping[str, object]) -> str:
+    """Return the current action-kind title for a running tool step."""
+    for step in reversed(_overlay_execution_group_steps(item)):
+        if str(step.get("status") or "").strip().lower() != "running":
+            continue
+        prefix = _overlay_activity_step_prefix(step)
+        if prefix == "编辑":
+            return "正在编辑文件"
+        if prefix == "命令":
+            return "正在执行命令"
+        if prefix == "读文件":
+            return "正在读取文件"
+        if prefix == "等确认":
+            return "等待确认"
+        if prefix:
+            return "正在执行操作"
+    return ""
 
 
 def _overlay_execution_rows(
@@ -1097,16 +1174,7 @@ def _work_overlay_header_text(
     *,
     title_limit: int = 28,
 ) -> str:
-    timestamp = started_at
-    if isinstance(started_at, str):
-        timestamp = parse_timestamp(started_at)
-    start_text = ""
-    if isinstance(timestamp, datetime):
-        start_text = (
-            timestamp.astimezone().strftime("%H:%M:%S")
-            if timestamp.tzinfo is not None
-            else timestamp.strftime("%H:%M:%S")
-        )
+    del started_at
     elapsed = str(elapsed_text or "").strip()
     # The Chinese label is the normal local UI copy, but the renderer can
     # surface the equivalent English label while Codex is in an English locale.
@@ -1116,7 +1184,7 @@ def _work_overlay_header_text(
             elapsed = elapsed[len(prefix) :].lstrip(" ：:")
             break
     title_text = _compact_work_text(title, title_limit)
-    parts = [part for part in (start_text, elapsed, title_text) if part]
+    parts = [part for part in (elapsed, title_text) if part]
     return " | ".join(parts) if parts else "Codex 工作"
 
 def _work_overlay_live_elapsed_text(

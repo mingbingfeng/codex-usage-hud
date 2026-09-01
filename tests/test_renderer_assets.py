@@ -574,6 +574,8 @@ def test_active_session_reports_native_current_work_disclosure_title() -> None:
     assert "function activeSessionCollapsedWorkTitle()" in script
     assert "function activeSessionCollapsedWorkState()" in script
     assert "function activeSessionDisclosureTitleLine(value)" in script
+    assert "function activeSessionDisclosureTitleIsActive(value)" in script
+    assert "const activeEntries = groups.flatMap" in script
     assert "const collapsedWork = (newSession || pendingSession)" in script
     assert "const collapsedDisclosureAmbiguous = !!collapsedWork.ambiguous;" in script
     assert "collapsedTitle," in script

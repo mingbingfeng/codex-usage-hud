@@ -7904,7 +7904,8 @@ with tempfile.TemporaryDirectory() as temp_dir:
             "这是一个很长很长很长很长很长很长很长很长很长很长的会话标题",
         )
 
-        self.assertTrue(text.startswith("09:08:07 | 42s | "))
+        self.assertTrue(text.startswith("42s | "))
+        self.assertNotIn("09:08:07", text)
         self.assertNotIn("已处理", text)
         self.assertIn("...", text)
 
@@ -7969,7 +7970,7 @@ with tempfile.TemporaryDirectory() as temp_dir:
 
     def test_work_overlay_native_collapsed_title_overrides_reconstructed_title(self) -> None:
         item = {
-            "collapsedTitle": "已处理 1m 12s",
+            "collapsedTitle": "正在编辑文件",
             "status": "tool",
             "activitySteps": [{"title": "执行命令", "detail": "git status", "status": "running"}],
         }
@@ -7978,8 +7979,91 @@ with tempfile.TemporaryDirectory() as temp_dir:
             object(), {}, item, now=0.0
         )
 
-        self.assertEqual(title, "已处理 1m 12s")
-        self.assertIn("已处理 1m 12s", tooltip)
+        self.assertEqual(title, "正在编辑文件")
+        self.assertIn("正在编辑文件", tooltip)
+
+    def test_work_overlay_elapsed_collapsed_title_does_not_hide_running_execution(self) -> None:
+        now = datetime.now().astimezone()
+        item = {
+            "collapsedTitle": "用时 2分钟 46秒",
+            "status": "tool",
+            "activitySteps": [
+                {
+                    "title": "编辑文件",
+                    "toolName": "apply_patch",
+                    "detail": "src/main.py",
+                    "status": "running",
+                    "timestamp": now.isoformat(),
+                }
+            ],
+            "taskStartedAt": now.isoformat(),
+        }
+
+        title, _tooltip = OverlayRenderingMixin._activity_step_display_text(
+            object(), {}, item, now=0.0
+        )
+
+        self.assertEqual(title, "正在编辑文件")
+        self.assertNotIn("用时", title)
+
+    def test_work_overlay_stale_completed_native_title_does_not_hide_running_execution(self) -> None:
+        now = datetime.now().astimezone()
+        item = {
+            "collapsedTitle": "编辑了文件运行了命令",
+            "status": "tool",
+            "activitySteps": [
+                {
+                    "title": "编辑文件",
+                    "toolName": "apply_patch",
+                    "detail": "src/main.py",
+                    "status": "running",
+                    "timestamp": now.isoformat(),
+                }
+            ],
+            "taskStartedAt": now.isoformat(),
+        }
+
+        title, _tooltip = OverlayRenderingMixin._activity_step_display_text(
+            object(), {}, item, now=0.0
+        )
+
+        self.assertEqual(title, "正在编辑文件")
+
+    def test_work_overlay_ambiguous_native_title_keeps_latest_running_edit_only(self) -> None:
+        now = datetime.now().astimezone()
+        for stale_title in ("用时 2分钟 46秒", "编辑了文件运行了命令"):
+            item = {
+                "collapsedTitle": stale_title,
+                "collapsedDisclosureAmbiguous": True,
+                "status": "tool",
+                "activitySteps": [
+                    {
+                        "title": "编辑文件",
+                        "toolName": "apply_patch",
+                        "detail": "src/old.py",
+                        "status": "completed",
+                        "timestamp": (now - timedelta(minutes=2)).isoformat(),
+                    },
+                    {
+                        "title": "编辑文件",
+                        "toolName": "apply_patch",
+                        "detail": "src/current.py",
+                        "status": "running",
+                        "timestamp": (now - timedelta(seconds=1)).isoformat(),
+                    },
+                ],
+                "lastOutputAt": (now - timedelta(minutes=3)).isoformat(),
+            }
+
+            title, _tooltip = OverlayRenderingMixin._activity_step_display_text(
+                object(), {}, item, now=0.0
+            )
+
+            self.assertEqual(title, "正在编辑文件")
+            self.assertEqual(_overlay_execution_group_title(item), "正在编辑文件")
+            rows = _overlay_execution_rows(item)
+            self.assertEqual(len(rows), 1)
+            self.assertIn("src/current.py", rows[0]["text"])
 
     def test_work_overlay_activity_steps_keep_desktop_style_command_content(self) -> None:
         item = {

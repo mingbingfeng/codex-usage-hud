@@ -262,11 +262,20 @@ TEXT = r"""
       function activeSessionDisclosureTitleLine(value) {
         for (const rawLine of String(value || "").split(/\r?\n/)) {
           const line = normalize(rawLine);
-          if (/^(?:已处理|处理了|用时|耗时|历时|worked(?:\s+for)?\s|duration\b|processed\b|took\b)/i.test(line)) {
+          // The duration button belongs to the user message, not to the
+          // following tool-execution disclosure. Never forward it as the
+          // bubble's execution-state title.
+          if (/^(?:已处理|处理了|用时|耗时|历时|worked(?:\s+for)?\s|duration\b|processed\b|took\b)/i.test(line)) continue;
+          if (/^(?:正在(?:编辑|运行|读取|执行|调用|处理|查看|操作)|等待(?:确认|用户)|(?:编辑了|运行了|读取了|执行了|调用了|处理了|已(?:编辑|运行|读取|执行|调用|处理|使用|创建|写入|修改))|(?:working|editing|running|reading|executing|calling|waiting|edited|ran|read|executed|used|created)\b)/i.test(line)) {
             return line.slice(0, 512);
           }
         }
         return "";
+      }
+
+      function activeSessionDisclosureTitleIsActive(value) {
+        const line = normalize(value);
+        return /^(?:正在(?:编辑|运行|读取|执行|调用|处理|查看|操作)|等待(?:确认|用户)|(?:working|editing|running|reading|executing|calling|waiting)\b)/i.test(line);
       }
 
       function activeSessionWorkDisclosureTitle(node) {
@@ -305,6 +314,15 @@ TEXT = r"""
         // has a collapsed-work disclosure. Selecting it (instead of the newest
         // running turn) keeps the bubble title on the latest finished block and
         // follows Codex when the next turn collapses.
+        const activeEntries = groups.flatMap((group) => (
+          group.entries.filter(({ title }) => activeSessionDisclosureTitleIsActive(title))
+        ));
+        if (activeEntries.length === 1) {
+          return { title: activeEntries[0].title, ambiguous: false };
+        }
+        if (activeEntries.length > 1) {
+          return { title: "", ambiguous: true };
+        }
         const latest = groups[groups.length - 1];
         if (latest.entries.length !== 1) {
           return { title: "", ambiguous: latest.entries.length > 1 };

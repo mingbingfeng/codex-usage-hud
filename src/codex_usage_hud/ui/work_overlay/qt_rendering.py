@@ -82,6 +82,9 @@ from .model import (
     _overlay_execution_group_title,
     _overlay_execution_live_summary,
     _overlay_execution_rows,
+    _overlay_running_execution_title,
+    _overlay_title_is_active,
+    _overlay_title_is_elapsed,
     _overlay_item_is_stably_current,
     _overlay_step_elapsed_seconds,
     _normalized_rest_reminder,
@@ -271,13 +274,29 @@ class OverlayRenderingMixin:
             item.get("nativeCollapsedTitle") or item.get("collapsedTitle"),
             240,
         )
-        if native_title:
+        native_title_is_elapsed = _overlay_title_is_elapsed(native_title)
+        if native_title and not native_title_is_elapsed and _overlay_title_is_active(native_title):
             tooltip = native_title
             activity_tooltip = _overlay_activity_tooltip(item)
             if activity_tooltip:
                 tooltip = f"{tooltip}\n{activity_tooltip}"
             return native_title, tooltip
         texts = _overlay_activity_step_texts(item)
+        running_title = _overlay_running_execution_title(item)
+        if running_title and _overlay_feed_active(item) and _overlay_execution_body_active(item):
+            tooltip = running_title
+            activity_tooltip = _overlay_activity_tooltip(item)
+            if activity_tooltip:
+                tooltip = f"{tooltip}\n{activity_tooltip}"
+            return running_title, tooltip
+        if bool(item.get("collapsedDisclosureAmbiguous")):
+            return "", ""
+        if native_title and not native_title_is_elapsed:
+            tooltip = native_title
+            activity_tooltip = _overlay_activity_tooltip(item)
+            if activity_tooltip:
+                tooltip = f"{tooltip}\n{activity_tooltip}"
+            return native_title, tooltip
         if not texts:
             return "", ""
         group_title = _overlay_execution_group_title(item)
