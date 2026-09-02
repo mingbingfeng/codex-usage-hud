@@ -666,6 +666,33 @@ class SessionIndexWarmJob:
             self._state.updated_at = self._clock()
             self._maybe_persist_locked()
             self._publish_locked()
+        self._warm_memory()
+
+    def _warm_memory(self) -> None:
+        """Pre-load the resident search snapshot in the background.
+
+        The resident index is a pickled snapshot (``.memory``, ~200 MB on a
+        full corpus) whose first deserialisation costs on the order of 20 s on
+        a cold page cache.  Without this step that cost lands on the user's
+        first search (PRD §14.1 "seconds to first result").  The warm job is
+        already the startup-time background task, so it is the natural place
+        to pull that cost off the interactive path: ``load()`` populates the
+        in-process ``SessionSearchIndex`` instance that the renderer searches
+        against, and its ``_memory_loaded`` flag makes this idempotent across
+        the whole process.
+
+        This must never block the worker's state transitions or fail the job:
+        a missing ``load`` capability, an already-loaded index, or any error
+        is simply skipped (PRD §12: warm-up is best-effort).
+        """
+        load_fn = self._capability("load")
+        if not callable(load_fn):
+            return
+        try:
+            load_fn()
+        except Exception:
+            # Best-effort only; the indexer already surfaced any real error.
+            pass
 
     def _fail(self, message: str) -> None:
         with self._lock:

@@ -74,17 +74,28 @@ class _FakeSearchIndex:
         entries: list[tuple[str, tuple[Path, ...], str, str, str, str]],
         *,
         delay_per_entry: float = 0.0,
+        load_side_effect=None,
     ) -> None:
         self._entries = list(entries)
         self._committed: list[str] = []
         self._delay = delay_per_entry
         self.sync_calls: list[list[str]] = []
+        self.load_calls = 0
+        self._load_side_effect = load_side_effect
 
     def search_index_entries(self):
         return list(self._entries)
 
     def indexed_session_ids(self) -> frozenset[str]:
         return frozenset(self._committed)
+
+    def load(self) -> dict[str, object]:
+        self.load_calls += 1
+        if self._load_side_effect is not None:
+            if isinstance(self._load_side_effect, Exception):
+                raise self._load_side_effect
+            self._load_side_effect()
+        return {"indexed": len(self._committed), "indexAvailable": True}
 
     def sync_batches(
         self,
@@ -193,6 +204,71 @@ def test_warm_job_builds_default_range_and_finishes(tmp_path: Path) -> None:
         assert status["builtCount"] == 3
         assert status["canExtend"] is True
         assert sorted(index.indexed_session_ids()) == ["a", "b", "c"]
+    finally:
+        job.close()
+
+
+def test_warm_job_preloads_resident_snapshot_after_finish(tmp_path: Path) -> None:
+    # The warm job must pull the resident-snapshot deserialisation off the
+    # interactive path by calling ``load()`` in the background worker once the
+    # range is done (PRD §14.1 "seconds to first result").
+    entries = _make_entries(tmp_path, {"a": 5, "b": 10, "c": 20})
+    index = _FakeSearchIndex(entries)
+    job = SessionIndexWarmJob(index, state_path=tmp_path / "warm.json")
+    try:
+        assert job.start("1m") is True
+        assert _wait_until(lambda: job.status()["jobState"] == "idle")
+        assert _wait_until(lambda: index.load_calls >= 1)
+        assert job.status()["coverage"] == "range_done(1m)"
+    finally:
+        job.close()
+
+
+def test_warm_job_preload_failure_never_fails_the_job(tmp_path: Path) -> None:
+    # A failing ``load()`` (e.g. corrupt snapshot) is best-effort: it must not
+    # flip the job into ``error`` or lose the completed coverage (PRD §12).
+    entries = _make_entries(tmp_path, {"a": 5})
+    index = _FakeSearchIndex(entries, load_side_effect=RuntimeError("boom"))
+    job = SessionIndexWarmJob(index, state_path=tmp_path / "warm.json")
+    try:
+        assert job.start("1m") is True
+        assert _wait_until(lambda: job.status()["jobState"] == "idle")
+        assert _wait_until(lambda: index.load_calls >= 1)
+        status = job.status()
+        assert status["coverage"] == "range_done(1m)"
+        assert status["jobState"] == "idle"
+        assert status["error"] == ""
+    finally:
+        job.close()
+
+
+def test_warm_job_skips_preload_without_load_capability(tmp_path: Path) -> None:
+    # A surface without ``load`` (e.g. a partial manager that only exposes
+    # search_index_entries/sync_batches) must not crash the warm job.
+    class NoLoadIndex:
+        def __init__(self, entries: list) -> None:
+            self._entries = list(entries)
+            self._committed: list[str] = []
+
+        def search_index_entries(self):
+            return list(self._entries)
+
+        def indexed_session_ids(self) -> frozenset[str]:
+            return frozenset(self._committed)
+
+        def sync_batches(self, entries, *, total=None, batch_size=24,
+                         progress_callback=None, cancelled=None) -> int:
+            del total, batch_size, progress_callback, cancelled
+            self._committed.extend(str(e[0]) for e in entries)
+            return len(entries)
+
+    entries = _make_entries(tmp_path, {"a": 5})
+    index = NoLoadIndex(entries)
+    job = SessionIndexWarmJob(index, state_path=tmp_path / "warm.json")
+    try:
+        assert job.start("1m") is True
+        assert _wait_until(lambda: job.status()["jobState"] == "idle")
+        assert job.status()["coverage"] == "range_done(1m)"
     finally:
         job.close()
 
