@@ -53,6 +53,7 @@ def collect_renderer_contract() -> dict[str, object]:
     return {
         "template": _digest(template),
         "currentBundle": _digest(RENDERER_HUD_SCRIPT),
+        "timeoutOwners": _collect_timeout_owners(RENDERER_HUD_SCRIPT),
         "lifecycleCounts": {
             "mutationObservers": RENDERER_HUD_SCRIPT.count(
                 "new MutationObserver"
@@ -64,6 +65,22 @@ def collect_renderer_contract() -> dict[str, object]:
             "kernelSetTimeouts": RENDERER_HUD_SCRIPT.count("setTimeout("),
         },
     }
+
+
+def _collect_timeout_owners(script: str) -> list[str]:
+    """Return the owner of every ``ctx.lifecycle.timeout(...)`` call in order.
+
+    ``test_renderer_payload_order_and_lifecycle_match_contract`` pins the
+    inventory length to the raw call count, so every call must carry a literal
+    first argument (duplicates are allowed when a timer reschedules itself).
+    """
+    owners = re.findall(r'ctx\.lifecycle\.timeout\(\s*"([^"]+)"', script)
+    if len(owners) != script.count("ctx.lifecycle.timeout("):
+        raise RuntimeError(
+            "could not derive timeout owners: every ctx.lifecycle.timeout() "
+            "call must use a literal first-argument name"
+        )
+    return owners
 
 
 def load_contract(path: Path = CONTRACT_PATH) -> dict[str, Any]:
@@ -117,6 +134,14 @@ def contract_mismatches(
                 f"renderer_contract.lifecycleCounts.{key} expected {expected}, "
                 f"actual {observed}"
             )
+    expected_owners = contract.get("currentTimeoutOwners")
+    observed_owners = actual.get("timeoutOwners")
+    if expected_owners != observed_owners:
+        mismatches.append(
+            "renderer_contract.currentTimeoutOwners expected "
+            f"{len(expected_owners) if expected_owners is not None else None} "
+            f"entries, actual {len(observed_owners) if observed_owners is not None else None}"
+        )
     return mismatches
 
 
@@ -154,6 +179,7 @@ def _render_updated_manifest(path: Path, template: dict[str, object]) -> str:
 def _render_updated_contract(path: Path, actual: dict[str, object]) -> str:
     text = path.read_text(encoding="utf-8")
     current = actual["currentBundle"]
+    owners = actual.get("timeoutOwners")
     lifecycle = actual["lifecycleCounts"]
     assert isinstance(current, dict)
     assert isinstance(lifecycle, dict)
@@ -175,6 +201,30 @@ def _render_updated_contract(path: Path, actual: dict[str, object]) -> str:
             rf"\g<1>{value}\g<2>",
             label=f"lifecycle count {key}",
         )
+    if isinstance(owners, list):
+        block = _render_timeout_owners(owners)
+        text, count = re.subn(
+            r'("currentTimeoutOwners"\s*:\s*)\[[\s\S]*?\](\s*,)',
+            rf"\g<1>{block}\g<2>",
+            text,
+            count=1,
+        )
+        if count != 1:
+            raise RuntimeError("could not update currentTimeoutOwners; expected one block")
+    return text
+
+
+def _render_timeout_owners(owners: list[str]) -> str:
+    """Render the owner array in the checked-in contract's wrapped style."""
+    text = "[\n"
+    line = "    "
+    for index, owner in enumerate(owners):
+        fragment = f'"{owner}"' + (", " if index < len(owners) - 1 else "")
+        if len(line) + len(fragment) > 100 and line.rstrip():
+            text += line.rstrip() + "\n"
+            line = "    "
+        line += fragment
+    text += line.rstrip() + "\n  ]"
     return text
 
 

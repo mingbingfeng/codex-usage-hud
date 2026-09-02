@@ -35,6 +35,8 @@ class SettingsBridgeServer:
         background_usage_confirm_callback: Callable[[str], bool] | None = None,
         background_usage_policy_query_callback: Callable[[str, str], dict[str, object]] | None = None,
         background_usage_policy_set_callback: Callable[..., dict[str, object]] | None = None,
+        session_index_status_callback: Callable[[], dict[str, object]] | None = None,
+        session_index_control_callback: Callable[[dict[str, Any]], dict[str, object]] | None = None,
     ) -> None:
         self.store = store
         self.host = host
@@ -48,6 +50,8 @@ class SettingsBridgeServer:
         self.background_usage_confirm_callback = background_usage_confirm_callback
         self.background_usage_policy_query_callback = background_usage_policy_query_callback
         self.background_usage_policy_set_callback = background_usage_policy_set_callback
+        self.session_index_status_callback = session_index_status_callback
+        self.session_index_control_callback = session_index_control_callback
         self.background_usage_access_token = secrets.token_urlsafe(24)
         self._server: ThreadingHTTPServer | None = None
         self._thread: Thread | None = None
@@ -82,6 +86,15 @@ class SettingsBridgeServer:
             f"{quote(self.background_usage_access_token, safe='')}"
         )
 
+    @property
+    def session_index_url(self) -> str:
+        if not self.url:
+            return ""
+        return (
+            f"{self.url}/session-index/status?access_token="
+            f"{quote(self.background_usage_access_token, safe='')}"
+        )
+
     def close(self) -> None:
         server = self._server
         thread = self._thread
@@ -110,6 +123,8 @@ class SettingsBridgeServer:
         background_usage_confirm_callback = self.background_usage_confirm_callback
         background_usage_policy_query_callback = self.background_usage_policy_query_callback
         background_usage_policy_set_callback = self.background_usage_policy_set_callback
+        session_index_status_callback = self.session_index_status_callback
+        session_index_control_callback = self.session_index_control_callback
         background_usage_access_token = self.background_usage_access_token
 
         class Handler(BaseHTTPRequestHandler):
@@ -135,6 +150,9 @@ class SettingsBridgeServer:
                     return
                 if parsed.path == "/background-usage/policy":
                     self._background_usage_policy_query(parsed)
+                    return
+                if parsed.path == "/session-index/status":
+                    self._session_index_status(parsed)
                     return
                 if parsed.path != "/settings":
                     self._send_json({"status": "failed", "message": "not found"}, 404)
@@ -165,6 +183,9 @@ class SettingsBridgeServer:
                     return
                 if path == "/background-usage/policy":
                     self._background_usage_policy_set(urlparse(self.path))
+                    return
+                if path == "/session-index/control":
+                    self._session_index_control(urlparse(self.path))
                     return
                 self._send_json({"status": "failed", "message": "not found"}, 404)
 
@@ -302,6 +323,51 @@ class SettingsBridgeServer:
                     self._send_json({"status": "failed", "message": f"background policy update failed: {exc}"}, 500)
                     return
                 self._send_json({"status": "ok", "backgroundUsagePolicy": payload})
+
+            def _session_index_status(self, parsed: Any) -> None:
+                if not self._background_usage_authorized(parsed):
+                    return
+                if session_index_status_callback is None:
+                    self._send_json(
+                        {"status": "failed", "message": "session index is unavailable"},
+                        503,
+                    )
+                    return
+                try:
+                    payload = session_index_status_callback()
+                except Exception as exc:
+                    self._send_json(
+                        {"status": "failed", "message": f"session index status failed: {exc}"},
+                        500,
+                    )
+                    return
+                if not isinstance(payload, dict):
+                    payload = {}
+                self._send_json({"status": "ok", "sessionIndex": payload})
+
+            def _session_index_control(self, parsed: Any) -> None:
+                if not self._background_usage_authorized(parsed):
+                    return
+                if session_index_control_callback is None:
+                    self._send_json(
+                        {"status": "failed", "message": "session index is unavailable"},
+                        503,
+                    )
+                    return
+                body = self._read_json()
+                body = body if isinstance(body, dict) else {}
+                body["accessTokenCheck"] = True
+                try:
+                    payload = session_index_control_callback(body)
+                except Exception as exc:
+                    self._send_json(
+                        {"status": "failed", "message": f"session index control failed: {exc}"},
+                        500,
+                    )
+                    return
+                if not isinstance(payload, dict):
+                    payload = {}
+                self._send_json({"status": "ok", "sessionIndex": payload})
 
             def _save_settings(self) -> None:
                 body = self._read_json()

@@ -354,6 +354,37 @@ TEXT = r"""
         return labels[raw] || raw || "读取会话索引";
       }
 
+      function sessionIndexScanMergeHtml() {
+        // PRD §6.2: while a scan is running, fold the warm-index progress into
+        // the scan phase instead of showing a second, unrelated progress strip.
+        // Hidden entirely when there is no live index state.
+        const sessionIndex = sessionIndexDomainState();
+        if (!sessionIndex) return "";
+        const coverage = String(sessionIndex.coverage || "empty");
+        const jobState = String(sessionIndex.jobState || "idle");
+        const built = Math.max(0, Number(sessionIndex.builtCount || 0));
+        const total = Math.max(0, Number(sessionIndex.totalCount || 0));
+        const range = String(sessionIndex.selectedRange || "1m");
+        const rangeLabel = {
+          "1m": "最近 1 个月", "3m": "最近 3 个月", "6m": "最近 6 个月",
+          "1y": "最近 1 年", "all": "全部",
+        }[range] || "最近 1 个月";
+        const running = new Set(["running", "attached"]).has(jobState);
+        if (running && total > 0) {
+          const percent = Math.min(100, Math.round((built / total) * 100));
+          const remaining = Math.max(0, Number(sessionIndex.estimatedRemainingSec || 0));
+          const remainingLabel = remaining > 0 ? ` · 预计剩余 ${sessionIndexEtaLabel(remaining)}` : "";
+          return `<div class="codex-usage-hud-cleanup-scan-stage" data-merged="session-index"><span><span class="codex-usage-hud-cleanup-mini-spinner"></span><strong>建立搜索索引</strong> · ${rangeLabel}</span><span data-secondary="true">${built}/${total} 个会话 · ${percent}%${remainingLabel}</span></div>`;
+        }
+        if (coverage === "full") {
+          return `<div class="codex-usage-hud-cleanup-scan-stage" data-merged="session-index"><span><strong>搜索索引已就绪</strong></span><span>可搜索全部会话</span></div>`;
+        }
+        if (total > 0) {
+          return `<div class="codex-usage-hud-cleanup-scan-stage" data-merged="session-index"><span><strong>搜索索引已就绪</strong> · ${rangeLabel}</span><span>${total} 个会话可搜索</span></div>`;
+        }
+        return null;
+      }
+
       function formatSessionCleanupElapsed(startedAt) {
         const start = Number(startedAt || 0);
         if (!start) return "0:00";
@@ -481,6 +512,133 @@ TEXT = r"""
         return true;
       }
 
+      function sessionIndexBannerHtml() {
+        // Progressive-warmup coverage banner: honest about what is and is not
+        // searchable (PRD D1), offers extend/background/pause actions.
+        const sessionIndex = sessionIndexDomainState();
+        if (!sessionIndex) return "";
+        const coverage = String(sessionIndex.coverage || "empty");
+        const jobState = String(sessionIndex.jobState || "idle");
+        const built = Math.max(0, Number(sessionIndex.builtCount || 0));
+        const total = Math.max(0, Number(sessionIndex.totalCount || 0));
+        const canExtend = sessionIndex.canExtend === true;
+        const range = String(sessionIndex.selectedRange || "1m");
+        const running = new Set(["running", "attached", "paused"]).has(jobState);
+        const rangeLabelText = {
+          "1m": "最近 1 个月", "3m": "最近 3 个月", "6m": "最近 6 个月",
+          "1y": "最近 1 年", "all": "全部",
+        }[range] || "最近 1 个月";
+        if (!running && coverage === "full") return "";
+        const percent = total > 0 ? Math.min(100, Math.round((built / total) * 100)) : 0;
+        const remaining = Math.max(0, Number(sessionIndex.estimatedRemainingSec || 0));
+        const remainingLabel = remaining > 0
+          ? ` · 预计剩余 ${sessionIndexEtaLabel(remaining)}`
+          : "";
+        let message = "";
+        if (running) {
+          if (total > 0) {
+            message = `正在建立索引：已覆盖 ${rangeLabelText} · ${built}/${total} 个会话 · ${percent}%${remainingLabel}`;
+          } else {
+            message = `正在建立索引：${rangeLabelText}（${percent}%）`;
+          }
+        } else if (coverage === "empty") {
+          message = "首次启动：正在后台准备最近 1 个月的搜索索引";
+        } else if (coverage.indexOf("range_done") === 0) {
+          message = `可搜索 ${rangeLabelText}${total ? `（${total} 个会话）` : ""}`;
+        } else {
+          message = `当前可搜索 ${rangeLabelText} 的会话`;
+        }
+        const extendOptions = sessionIndexExtendOptions(sessionIndex)
+          .map((item) => `<option value="${item.key}">${item.label}${item.estimate ? `（${item.estimate}）` : ""}</option>`)
+          .join("");
+        const actions = [];
+        if (running && jobState !== "paused") {
+          actions.push(`<button type="button" class="codex-usage-hud-settings-action codex-usage-hud-session-index-action" data-action="session-index-pause" data-size="small">中止</button>`);
+          actions.push(`<button type="button" class="codex-usage-hud-settings-action codex-usage-hud-session-index-action" data-action="session-index-background" data-size="small">后台运行</button>`);
+        }
+        if (jobState === "paused") {
+          actions.push(`<button type="button" class="codex-usage-hud-settings-action codex-usage-hud-session-index-action" data-action="session-index-resume" data-size="small">继续</button>`);
+        }
+        if (canExtend) {
+          actions.push(`<label class="codex-usage-hud-session-index-extend-label">扩展到<select data-session-index-extend="true">${extendOptions}</select></label>`);
+          actions.push(`<button type="button" class="codex-usage-hud-settings-action codex-usage-hud-session-index-action" data-action="session-index-extend" data-size="small">扩展</button>`);
+        }
+        const progressHtml = running || total > 0
+          ? `<div class="codex-usage-hud-session-index-track" role="progressbar" aria-valuenow="${percent}" aria-valuemin="0" aria-valuemax="100" aria-label="搜索索引建立进度"><div class="codex-usage-hud-session-index-fill" data-indeterminate="${total <= 0}" style="width:${Math.max(percent, 6)}%"></div></div>`
+          : "";
+        return `<div class="codex-usage-hud-session-index-coverage" data-job-state="${escapeHtml(jobState)}" data-coverage="${escapeHtml(coverage)}"><span class="codex-usage-hud-session-index-shield">${cleanupIconSvg("search")}</span><span class="codex-usage-hud-session-index-text">${message}</span>${progressHtml}<span class="codex-usage-hud-session-index-actions">${actions.join("")}</span></div>`;
+      }
+
+      function formatSessionIndexEta(seconds) {
+        const value = Math.max(0, Math.round(Number(seconds) || 0));
+        if (value <= 0) return "";
+        if (value < 60) return `${value}秒`;
+        const minutes = Math.floor(value / 60);
+        if (minutes < 60) return `${minutes}分钟`;
+        const hours = Math.floor(minutes / 60);
+        if (hours < 24) return `${hours}小时${minutes % 60 ? ` ${minutes % 60}分` : ""}`;
+        const days = Math.floor(hours / 24);
+        return `${days}天`;
+      }
+
+      function sessionIndexEtaLabel(seconds) {
+        return formatSessionIndexEta(seconds) || "稍后";
+      }
+
+      function sessionIndexExtendOptions(sessionIndex) {
+        // PRD §6.1: the extend dropdown lists larger ranges, each annotated
+        // with the estimated remaining time. Sessions-per-second throughput is
+        // a live estimate from the job (or a conservative fallback), so the
+        // estimate degrades gracefully to counts-only when the byte figure is
+        // not available.
+        const current = String(sessionIndex?.selectedRange || "1m");
+        const options = [
+          ["3m", "最近 3 个月"], ["6m", "最近 6 个月"], ["1y", "最近 1 年"], ["all", "全部"],
+        ].filter(([key]) => key !== current);
+        const built = Math.max(0, Number(sessionIndex?.builtCount || 0));
+        const total = Math.max(0, Number(sessionIndex?.totalCount || 0));
+        const rate = Math.max(1, Number(sessionIndex?.estimatedSessionsPerSec || 9));
+        return options.map(([key, label]) => {
+          const estimate = sessionIndexEstimateForRange(key, { built, total, rate });
+          return { key, label, estimate };
+        });
+      }
+
+      function sessionIndexEstimateForRange(rangeKey, { built = 0, total = 0, rate = 9 } = {}) {
+        // Only show an estimate when the job already reported a target total;
+        // otherwise 未知 range size → return "" (degrade to count-only).
+        if (total <= 0) return "";
+        const pending = Math.max(0, total - built);
+        const seconds = pending / Math.max(1, Number(rate) || 9);
+        return pending > 0 ? formatSessionIndexEta(seconds) : "已完成";
+      }
+
+      function sessionIndexDomainState() {
+        // The warm job's status arrives on the settingsCommandStatus response
+        // (``sessionIndexStatus`` / ``sessionIndexControl`` both embed the full
+        // job snapshot under ``sessionIndex``).  Cache the freshest snapshot in
+        // ``sessionCleanupState.sessionIndex`` when it is present, then fall
+        // back to the payload shape / HTTP bridge.  A top-level ``sessionIndex``
+        // is a legacy/HTTP fallback shape and is only consulted as a second
+        // source -- command responses win because they are fresher.
+        if (sessionCleanupState.sessionIndex && typeof sessionCleanupState.sessionIndex === "object") {
+          return sessionCleanupState.sessionIndex.available === false
+            ? null
+            : sessionCleanupState.sessionIndex;
+        }
+        const payload = currentPayload();
+        const payloadIndex = payload?.sessionIndex;
+        const statusIndex = payload?.settingsCommandStatus?.sessionIndex;
+        const candidate = (statusIndex && typeof statusIndex === "object" && Object.keys(statusIndex).length)
+          ? statusIndex
+          : (payloadIndex && typeof payloadIndex === "object" && Object.keys(payloadIndex).length
+            ? payloadIndex
+            : null);
+        if (!candidate) return null;
+        if (candidate.available === false) return null;
+        return candidate;
+      }
+
       function sessionCleanupPanelHtml() {
         const data = sessionCleanupFromPayload();
         const scanned = !!String(data?.revision || "");
@@ -496,7 +654,8 @@ TEXT = r"""
           const phaseIndex = Math.max(1, Number(operation?.phaseIndex || 1));
           const phaseCount = Math.max(phaseIndex, Number(operation?.phaseCount || 3));
           const elapsed = formatSessionCleanupElapsed(sessionCleanupState.scanStartedAt);
-          return `<section class="codex-usage-hud-session-cleanup" aria-label="会话管理" aria-busy="true"><div class="codex-usage-hud-cleanup-scan-strip" aria-live="polite"><div class="codex-usage-hud-cleanup-scan-strip-top"><div class="codex-usage-hud-cleanup-scan-strip-title"><span class="codex-usage-hud-cleanup-mini-spinner"></span>扫描本地会话</div><div class="codex-usage-hud-cleanup-scan-strip-meta">第 ${phaseIndex}/${phaseCount} 步 · 约 ${progress || 1}% · 已用时 <span data-session-cleanup-elapsed="true">${escapeHtml(elapsed)}</span></div></div><div class="codex-usage-hud-cleanup-scan-track"><div class="codex-usage-hud-cleanup-scan-fill" data-indeterminate="${progress <= 0}" style="width:${Math.max(progress, 8)}%"></div></div><div class="codex-usage-hud-cleanup-scan-stage"><span>当前：<strong>${escapeHtml(phaseLabel || "读取会话索引")}</strong></span><span>筛选与删除在完成后解锁</span></div></div><div class="codex-usage-hud-cleanup-empty-state" style="min-height:180px"><div class="codex-usage-hud-cleanup-scan-mark" data-live="true">${cleanupIconSvg("trash", "codex-usage-hud-cleanup-icon-lg")}</div><h2 class="codex-usage-hud-cleanup-empty-title">正在扫描会话</h2><p class="codex-usage-hud-cleanup-empty-meta">按主会话归并本地记录与关联子任务</p><button type="button" class="codex-usage-hud-settings-action" data-action="session-cleanup-cancel">取消扫描</button></div></section>`;
+          const mergedIndexHtml = sessionIndexScanMergeHtml() || "";
+          return `<section class="codex-usage-hud-session-cleanup" aria-label="会话管理" aria-busy="true"><div class="codex-usage-hud-cleanup-scan-strip" aria-live="polite"><div class="codex-usage-hud-cleanup-scan-strip-top"><div class="codex-usage-hud-cleanup-scan-strip-title"><span class="codex-usage-hud-cleanup-mini-spinner"></span>扫描本地会话</div><div class="codex-usage-hud-cleanup-scan-strip-meta">第 ${phaseIndex}/${phaseCount} 步 · 约 ${progress || 1}% · 已用时 <span data-session-cleanup-elapsed="true">${escapeHtml(elapsed)}</span></div></div><div class="codex-usage-hud-cleanup-scan-track"><div class="codex-usage-hud-cleanup-scan-fill" data-indeterminate="${progress <= 0}" style="width:${Math.max(progress, 8)}%"></div></div><div class="codex-usage-hud-cleanup-scan-stage"><span>当前：<strong>${escapeHtml(phaseLabel || "读取会话索引")}</strong></span><span>筛选与删除在完成后解锁</span></div>${mergedIndexHtml}</div><div class="codex-usage-hud-cleanup-empty-state" style="min-height:180px"><div class="codex-usage-hud-cleanup-scan-mark" data-live="true">${cleanupIconSvg("trash", "codex-usage-hud-cleanup-icon-lg")}</div><h2 class="codex-usage-hud-cleanup-empty-title">正在扫描会话</h2><p class="codex-usage-hud-cleanup-empty-meta">按主会话归并本地记录与关联子任务</p><button type="button" class="codex-usage-hud-settings-action" data-action="session-cleanup-cancel">取消扫描</button></div></section>`;
         }
         if (!data || !scanned) {
           return `<section class="codex-usage-hud-session-cleanup" aria-label="会话管理"><div class="codex-usage-hud-cleanup-empty-state"><div class="codex-usage-hud-cleanup-scan-mark">${cleanupIconSvg("trash", "codex-usage-hud-cleanup-icon-lg")}</div><h2 class="codex-usage-hud-cleanup-empty-title">尚未扫描会话</h2><p class="codex-usage-hud-cleanup-empty-meta">按主会话整理本地记录，关联子任务会随主会话一起永久删除。</p><button type="button" class="codex-usage-hud-settings-action" data-action="session-cleanup-scan" data-primary="true" data-size="large" ${busy ? "disabled" : ""}>${busy ? "正在扫描..." : `${cleanupIconSvg("search")}扫描会话`}</button></div></section>`;
@@ -596,8 +755,34 @@ TEXT = r"""
           : (sessionCleanupState.search
           ? `<span class="codex-usage-hud-session-search-meta">已索引 ${indexed} 个会话</span>`
           : "")));
+        // PRD §6.4 / §D1: honest coverage hint. When the index does not cover
+        // all history, a search that returns "no rows" must be distinguishable
+        // from "no matching sessions". Show the hint on an empty result set
+        // whenever coverage is partial; the hint itself carries a direct
+        // extend entry (select + button) so the user can widen the window
+        // without scrolling back to the banner.
+        const coverageHint = ((() => {
+          const sessionIndex = sessionIndexDomainState();
+          if (!sessionIndex) return "";
+          const coverage = String(sessionIndex.coverage || "empty");
+          const jobState = String(sessionIndex.jobState || "idle");
+          const running = new Set(["running", "attached"]).has(jobState);
+          if (coverage === "full" || running) return "";
+          const searching = Boolean(String(sessionCleanupState.search || "").trim());
+          if (!searching || rowHtml) return "";
+          const range = String(sessionIndex.selectedRange || "1m");
+          const rangeLabel = {
+            "1m": "最近 1 个月", "3m": "最近 3 个月", "6m": "最近 6 个月",
+            "1y": "最近 1 年", "all": "全部",
+          }[range] || range;
+          if (range === "all") return "";
+          const extendOptions = sessionIndexExtendOptions(sessionIndex)
+            .map((item) => `<option value="${item.key}">${item.label}${item.estimate ? `（${item.estimate}）` : ""}</option>`)
+            .join("");
+          return `<div class="codex-usage-hud-session-coverage-hint" data-kind="coverage"><span>没搜到结果，可能因为索引只覆盖了 ${rangeLabel}。更早的会话需要先扩展索引范围。</span><span class="codex-usage-hud-session-coverage-hint-action"><label class="codex-usage-hud-session-index-extend-label">扩展到<select data-session-index-extend="true">${extendOptions}</select></label><button type="button" class="codex-usage-hud-settings-action codex-usage-hud-session-index-action" data-action="session-index-extend" data-size="small">扩展索引</button></span></div>`;
+        })());
         const emptyState = rowHtml ? "" : `<div class="codex-usage-hud-cleanup-empty"><div class="codex-usage-hud-cleanup-empty-mark">${cleanupIconSvg("search", "codex-usage-hud-cleanup-icon-lg")}</div><p class="codex-usage-hud-cleanup-empty-title">当前筛选没有会话</p><p class="codex-usage-hud-cleanup-empty-hint">试试调整筛选条件，或清除筛选后重新查看</p></div>`;
-        return `<section class="codex-usage-hud-session-cleanup" aria-label="会话管理">${unavailable}<div class="codex-usage-hud-session-tools"><div class="codex-usage-hud-session-tools-primary"><div class="codex-usage-hud-session-search">${cleanupIconSvg("search")}<input type="search" data-session-cleanup-search="true" value="${escapeHtml(sessionCleanupState.search)}" placeholder="搜索会话、内容或文件" aria-label="搜索会话">${searchMeta}</div>${workdirControl}<div class="codex-usage-hud-session-date-filter" data-open="${sessionCleanupState.datePickerOpen}"><button type="button" class="codex-usage-hud-session-date-trigger" data-action="session-cleanup-date-toggle" aria-expanded="${sessionCleanupState.datePickerOpen}" aria-haspopup="dialog">${cleanupIconSvg("calendar")}<span>最后活动：${escapeHtml(sessionCleanupDateRangeLabel())}</span>${cleanupIconSvg("chevron")}</button>${datePopover}</div></div><div class="codex-usage-hud-session-filter-controls">${controls}</div>${sessionCleanupFilterSummary(data, rows)}</div><div class="codex-usage-hud-session-table"><div class="codex-usage-hud-session-head"><span><input type="checkbox" data-session-cleanup-select-all="true" ${allVisibleSelected ? "checked" : ""} ${visibleSelectable.length ? "" : "disabled"} aria-label="全选当前页"></span><span>会话</span><span aria-hidden="true"></span><span>最后活动</span><span>状态</span><span>占用</span></div>${rowHtml || emptyState}</div>${pagination}${resultHtml}</section>`;
+        return `<section class="codex-usage-hud-session-cleanup" aria-label="会话管理">${unavailable}${sessionIndexBannerHtml()}<div class="codex-usage-hud-session-tools"><div class="codex-usage-hud-session-tools-primary"><div class="codex-usage-hud-session-search">${cleanupIconSvg("search")}<input type="search" data-session-cleanup-search="true" value="${escapeHtml(sessionCleanupState.search)}" placeholder="搜索会话、内容或文件" aria-label="搜索会话">${searchMeta}</div>${workdirControl}<div class="codex-usage-hud-session-date-filter" data-open="${sessionCleanupState.datePickerOpen}"><button type="button" class="codex-usage-hud-session-date-trigger" data-action="session-cleanup-date-toggle" aria-expanded="${sessionCleanupState.datePickerOpen}" aria-haspopup="dialog">${cleanupIconSvg("calendar")}<span>最后活动：${escapeHtml(sessionCleanupDateRangeLabel())}</span>${cleanupIconSvg("chevron")}</button>${datePopover}</div></div>${coverageHint}<div class="codex-usage-hud-session-filter-controls">${controls}</div>${sessionCleanupFilterSummary(data, rows)}</div><div class="codex-usage-hud-session-table"><div class="codex-usage-hud-session-head"><span><input type="checkbox" data-session-cleanup-select-all="true" ${allVisibleSelected ? "checked" : ""} ${visibleSelectable.length ? "" : "disabled"} aria-label="全选当前页"></span><span>会话</span><span aria-hidden="true"></span><span>最后活动</span><span>状态</span><span>占用</span></div>${rowHtml || emptyState}</div>${pagination}${resultHtml}</section>`;
       }
 
       function captureStorageUiState() {
@@ -977,10 +1162,24 @@ TEXT = r"""
 
       function applySessionCleanupPayload(_root, payload) {
         const incoming = payload?.sessionCleanup;
-        if (!incoming || typeof incoming !== "object") return;
+        let data = sessionCleanupState.data;
         const previousRevision = String(sessionCleanupState.data?.revision || "");
-        const data = sessionCleanupPayloadWithInventory(incoming);
-        sessionCleanupState.data = data;
+        if (incoming && typeof incoming === "object") {
+          data = sessionCleanupPayloadWithInventory(incoming);
+          // A full inventory payload is the freshest version. A partial
+          // operation-only delta keeps the previous session list, so only a
+          // payload carrying ``sessions`` (or a revision bump) replaces it.
+          if (Array.isArray(incoming.sessions) || previousRevision !== String(data?.revision || "")) {
+            sessionCleanupState.data = data;
+          } else {
+            sessionCleanupState.data = { ...sessionCleanupState.data, ...data };
+          }
+        }
+        const statusIndex = payload?.settingsCommandStatus?.sessionIndex;
+        if (statusIndex && typeof statusIndex === "object" && Object.keys(statusIndex).length) {
+          sessionCleanupState.sessionIndex = { ...statusIndex };
+          sessionCleanupState.sessionIndexRefreshing = false;
+        }
         if (
           Array.isArray(incoming.sessions)
           && previousRevision
@@ -1115,6 +1314,11 @@ TEXT = r"""
       storageFormatBytes,
       sessionCleanupFromPayload,
       cleanupIconSvg,
+      sessionIndexDomainState,
+      sessionIndexBannerHtml,
+      sessionIndexScanMergeHtml,
+      sessionIndexExtendOptions,
+      formatSessionIndexEta,
       storagePanelHtml,
       sessionCleanupRows,
       sessionCleanupPageRows,
@@ -1169,6 +1373,11 @@ TEXT = r"""
     storageFormatBytes,
     sessionCleanupFromPayload,
     cleanupIconSvg,
+    sessionIndexDomainState,
+    sessionIndexBannerHtml,
+    sessionIndexScanMergeHtml,
+    sessionIndexExtendOptions,
+    formatSessionIndexEta,
     storagePanelHtml,
     sessionCleanupRows,
     sessionCleanupPageRows,

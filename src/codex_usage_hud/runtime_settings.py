@@ -18,6 +18,12 @@ SESSION_CLEANUP_COMMANDS = frozenset(
         "sessionTransfer",
     }
 )
+SESSION_INDEX_COMMANDS = frozenset(
+    {
+        "sessionIndexStatus",
+        "sessionIndexControl",
+    }
+)
 
 _OVERLAY_KEYS = frozenset({"work_overlay_max_items", "work_overlay_side"})
 _SESSION_ACTIVITY_KEYS = frozenset({"stop_hud_on_lock_screen"})
@@ -96,6 +102,8 @@ def partial_domains_for_command(
 ) -> set[str] | None:
     action = str(command.get("action") or "").strip()
     if action in SESSION_CLEANUP_COMMANDS:
+        return {"settings", "sessionCleanup"}
+    if action in SESSION_INDEX_COMMANDS:
         return {"settings", "sessionCleanup"}
     if action == "usageInsightsRefresh":
         return {"settings", "usageInsights"}

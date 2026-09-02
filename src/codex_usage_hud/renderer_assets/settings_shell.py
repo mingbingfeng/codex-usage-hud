@@ -3183,7 +3183,86 @@ _TEXT_PREFIX = r"""
         return `${String(prefix || "request")}-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
       }
 
-      function renderSettingsModal(tab = "settings", status = "", { resetProviderDraft = false } = {}) {
+      function refreshSessionIndexIfStale() {
+        // Warm-index status is delivered via settingsCommandStatus responses
+        // (sessionIndexStatus / sessionIndexControl). When the storage tab has
+        // never seen a snapshot (fresh renderer or daemon restart), pull one
+        // on open so the coverage banner and hints are not blank.
+        const current = currentPayload();
+        const cached = sessionCleanupState?.sessionIndex;
+        const hasSnapshot = cached && typeof cached === "object" && Object.keys(cached).length > 0;
+        const payloadSnapshot = current?.settingsCommandStatus?.sessionIndex
+          || current?.sessionIndex;
+        const hasPayloadSnapshot = payloadSnapshot
+          && typeof payloadSnapshot === "object"
+          && Object.keys(payloadSnapshot).length > 0;
+        if (hasSnapshot || hasPayloadSnapshot) return;
+        if (sessionCleanupState?.sessionIndexRefreshing) return;
+        sessionCleanupState.sessionIndexRefreshing = true;
+        const requestId = typedSettingsRequestId("session-index-status");
+        const submitted = submitSettingsCommand(
+          { action: "sessionIndexStatus", requestId },
+          "正在读取搜索索引状态...",
+          { preserveOverlay: true, quiet: true },
+        );
+        if (!submitted) sessionCleanupState.sessionIndexRefreshing = false;
+        ctx.lifecycle.timeout("session_index_status_watchdog", () => {
+          sessionCleanupState.sessionIndexRefreshing = false;
+        }, 6000);
+      }
+
+      function startSessionIndexProgressPolling() {
+        // PRD §6.1/§9.3: while the storage tab is open and the warm job is
+        // building, refresh the coverage banner/progress at 1 Hz (≤4 Hz). The
+        // response updates sessionCleanupState.sessionIndex (which clears the
+        // refreshing lock), then the next tick fires; when the tab closes or
+        // the job reaches a terminal state the chain stops scheduling itself.
+        ctx.lifecycle.timeout(
+          "session_index_progress",
+          sessionIndexProgressTick,
+          1000,
+        );
+      }
+
+      function sessionIndexProgressTick() {
+        const modal = document.getElementById(settingsModalId);
+        if (!modal || modal.hidden || settingsActiveTab !== "storage") {
+          sessionCleanupState.sessionIndexRefreshing = false;
+          return;
+        }
+        const index = sessionCleanupState?.sessionIndex;
+        const jobState = String(index?.jobState || "");
+        if (!new Set(["running", "attached", "paused"]).has(jobState)) {
+          sessionCleanupState.sessionIndexRefreshing = false;
+          return;
+        }
+        if (!sessionCleanupState?.sessionIndexRefreshing) {
+          sessionCleanupState.sessionIndexRefreshing = true;
+          const requestId = typedSettingsRequestId("session-index-progress");
+          const submitted = submitSettingsCommand(
+            { action: "sessionIndexStatus", requestId },
+            "正在刷新搜索索引进度...",
+            { preserveOverlay: true, quiet: true },
+          );
+          if (!submitted) sessionCleanupState.sessionIndexRefreshing = false;
+          // Self-healing watchdog: if the daemon never answers, drop the lock
+          // so the next tick can retry instead of freezing the banner.
+          ctx.lifecycle.timeout(
+            "session_index_progress_watchdog",
+            () => {
+              sessionCleanupState.sessionIndexRefreshing = false;
+            },
+            6000,
+          );
+        }
+        ctx.lifecycle.timeout(
+          "session_index_progress",
+          sessionIndexProgressTick,
+          1000,
+        );
+      }
+
+        function renderSettingsModal(tab = "settings", status = "", { resetProviderDraft = false } = {}) {
         const root = document.getElementById(rootId);
         const modal = document.getElementById(settingsModalId);
         if (!root || !modal) return;
@@ -3267,6 +3346,8 @@ _TEXT_PREFIX = r"""
           restoreStorageUiState();
           restoreSessionCleanupConfirm(sessionCleanupConfirmToken);
           requestSessionCleanupWorkdirOptions({ force: true });
+          refreshSessionIndexIfStale();
+          startSessionIndexProgressPolling();
           if (
             String(sessionCleanupState.search || "").trim()
             && !sessionCleanupState.searchRequestId
@@ -5941,6 +6022,7 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
         ensureRestReminderCountdownTicker();
         stopSessionCleanupElapsedTicker();
         stopSessionCleanupSearchTimer();
+        sessionCleanupState.sessionIndexRefreshing = false;
         resetSessionCleanupPendingRequests();
         settingsProviderDraft = null;
         settingsDirtyProviders.clear();

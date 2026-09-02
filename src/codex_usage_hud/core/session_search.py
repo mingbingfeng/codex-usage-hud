@@ -222,6 +222,109 @@ def workdir_identity(value: object) -> str:
     return hashlib.sha256(normalised.encode("utf-8", errors="replace")).hexdigest()[:20]
 
 
+# Progressive-warmup range labels. The default is the first month; extending
+# keeps the same "newest first" order and only appends older sessions.
+RANGE_OPTIONS = (
+    "1m",
+    "3m",
+    "6m",
+    "1y",
+    "all",
+)
+DEFAULT_RANGE = "1m"
+
+
+def range_days(range_key: str, *, now: float | None = None) -> int | None:
+    """Return the coverage window in days for one range option.
+
+    ``all`` maps to None (no boundary). Unknown keys fall back to the default
+    month so callers never surface a bare ``unknown`` label.
+    """
+    key = str(range_key or DEFAULT_RANGE).strip().casefold()
+    if key == "all":
+        return None
+    if key == "1y":
+        return 365
+    if key == "6m":
+        return 183
+    if key == "3m":
+        return 91
+    return 30
+
+
+def range_label(range_key: str) -> str:
+    """Return the renderer-safe Chinese label for one range option."""
+    return {
+        "1m": "最近 1 个月",
+        "3m": "最近 3 个月",
+        "6m": "最近 6 个月",
+        "1y": "最近 1 年",
+        "all": "全部",
+    }.get(str(range_key or "").strip().casefold(), "最近 1 个月")
+
+
+def entries_in_range(
+    entries: Sequence[tuple[str, Sequence[Path], str, str, str, str]],
+    range_key: str,
+    *,
+    now: float | None = None,
+    use_mtime: bool = True,
+) -> tuple[list[tuple[str, Sequence[Path], str, str, str, str]], int, int]:
+    """Bucket one candidate list into a time window.
+
+    Returns ``(filtered, newest_active_ts, oldest_active_ts)`` where the two
+    timestamps are the mtime of the most- and least-recent rollout in the
+    filtered set (0.0 when the window is empty).  ``range_days == None`` means
+    "all": a single pass over every candidate, still measuring the span.
+    """
+    days = range_days(range_key, now=now)
+    cutoff = None if days is None else (float(now or time.time()) - days * 86_400.0)
+    entries_by_latest: list[tuple[float, object]] = []
+    for entry in entries:
+        newest = 0.0
+        if use_mtime:
+            for path in entry[1] if len(entry) > 1 else ():
+                try:
+                    newest = max(newest, path.stat().st_mtime)
+                except (OSError, ValueError):
+                    continue
+        if cutoff is not None and newest > 0.0 and newest < cutoff:
+            continue
+        entries_by_latest.append((newest, entry))
+    entries_by_latest.sort(key=lambda item: item[0], reverse=True)
+    filtered = tuple(item[1] for item in entries_by_latest)
+    newest = entries_by_latest[0][0] if entries_by_latest else 0.0
+    oldest = entries_by_latest[-1][0] if entries_by_latest else 0.0
+    return (filtered, int(newest), int(oldest))
+
+
+def range_candidates(
+    entries: Sequence[tuple[str, Sequence[Path], str, str, str, str]],
+    range_key: str,
+    *,
+    covered_ids: frozenset[str] = frozenset(),
+    now: float | None = None,
+    use_mtime: bool = True,
+) -> list[tuple[str, Sequence[Path], str, str, str, str]]:
+    """Return candidates for one range, newest first, excluding covered ids.
+
+    Extension must be incremental (PRD D3): sessions already present in the
+    snapshot are dropped here so the warm job only appends the delta.
+    """
+    bucket, _newest, _oldest = entries_in_range(
+        list(entries),
+        range_key,
+        now=now,
+        use_mtime=use_mtime,
+    )
+    known = {str(item or "").strip() for item in covered_ids}
+    return [
+        entry
+        for entry in bucket
+        if str(entry[0] or "").strip() not in known
+    ]
+
+
 def _bounded_text(value: object, limit: int = MAX_FIELD_CHARS) -> str:
     text = _WHITESPACE_RE.sub(" ", str(value or "")).strip()
     for pattern in _SECRET_VALUE_PATTERNS:
@@ -1420,6 +1523,52 @@ class SessionSearchIndex:
         finally:
             connection.close()
 
+    def append_no_commit(
+        self,
+        connection: sqlite3.Connection,
+        session_id: str,
+        paths: Sequence[Path],
+        *,
+        title: str = "",
+        workdir: str = "",
+        model_provider: str = "",
+        client_kind: str = "",
+        parsed: tuple | None = None,
+    ) -> tuple[int, SearchDocument | None]:
+        """Upsert one entry into an open connection without committing.
+
+        The commit is deferred to the caller so a range-expansion job can
+        advance its cursor before ``commit()``, keeping the "state must not
+        outrun the actually built index" invariant from the PRD (§8).  The
+        caller is responsible for ``connection.commit()`` and for applying the
+        returned document to resident memory afterwards.
+        """
+        return self._upsert_connection(
+            connection,
+            session_id,
+            paths,
+            title=title,
+            workdir=workdir,
+            model_provider=model_provider,
+            client_kind=client_kind,
+            parsed=parsed,
+        )
+
+    def indexed_session_ids(self) -> frozenset[str]:
+        """Return the set of session ids already present in the snapshot.
+
+        Used by the warm job to diff candidates against the persisted index so
+        an extension only appends sessions that are not yet covered.
+        """
+        connection = self._connect()
+        try:
+            rows = connection.execute(
+                f"SELECT session_id FROM {_DOC_TABLE}"
+            ).fetchall()
+            return frozenset(str(row[0]) for row in rows)
+        finally:
+            connection.close()
+
     def remove_missing(self, session_ids: Iterable[str]) -> None:
         keep = {str(item or "").strip() for item in session_ids if str(item or "").strip()}
         connection = self._connect()
@@ -1582,12 +1731,18 @@ class SessionSearchIndex:
 
 
 __all__ = [
+    "DEFAULT_RANGE",
     "MAX_DOCUMENT_CHARS",
     "MAX_FIELD_CHARS",
+    "RANGE_OPTIONS",
     "SearchDocument",
     "SessionSearchIndex",
+    "entries_in_range",
     "normalise_workdir",
     "parse_rollout",
+    "range_candidates",
+    "range_days",
+    "range_label",
     "rollout_fingerprints",
     "search_terms",
     "workdir_identity",

@@ -191,6 +191,8 @@ SHARED_HEAD = r"""
   let restReminderSavedRequestId = "";
 const sessionCleanupState = {
 data: null,
+sessionIndex: null,
+sessionIndexRefreshing: false,
 pendingRequestId: "",
 searchRequestId: "",
 searchResultQuery: "",

@@ -42,6 +42,7 @@ class RendererHudPayload:
     settings_path: str = ""
     settings_bridge_url: str = ""
     background_usage_bridge_url: str = ""
+    session_index_url: str = ""
     background_usage_revision: int = 0
     background_usage_notification: dict[str, object] = field(default_factory=dict)
     rest_reminder: dict[str, object] = field(default_factory=dict)
@@ -102,6 +103,7 @@ class RendererHudPayload:
             "settingsPath": self.settings_path,
             "settingsBridgeUrl": self.settings_bridge_url,
             "backgroundUsageBridgeUrl": self.background_usage_bridge_url,
+            "sessionIndexUrl": self.session_index_url,
             "backgroundUsageRevision": int(self.background_usage_revision),
             "backgroundUsageNotification": dict(self.background_usage_notification),
             "restReminder": dict(self.rest_reminder),

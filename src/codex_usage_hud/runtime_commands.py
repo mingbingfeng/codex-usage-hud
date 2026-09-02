@@ -134,6 +134,7 @@ class RuntimeCommandPorts:
     background_usage: object | None = None
     cleanup_worker: object | None = None
     cleanup_manager: object | None = None
+    session_index_job: object | None = None
     insights_worker: object | None = None
     insights_payload: Mapping[str, object] | None = None
     activate_session: Callable[[Mapping[str, object]], object | None] | None = None
@@ -521,6 +522,7 @@ def dispatch_command(
 ) -> dict[str, object]:
     for handler in (
         handle_active_session_command,
+        handle_session_index_command,
         handle_cleanup_command,
         handle_insights_command,
         handle_background_command,
@@ -751,6 +753,87 @@ def handle_background_command(
             event_id=str(command.get("eventId") or "").strip(),
             error=f"用量总览读取失败：{error_detail}"
         )
+
+
+def handle_session_index_command(
+    command: Mapping[str, Any], ports: RuntimeCommandPorts
+) -> dict[str, object] | object:
+    """Handle ``sessionIndexStatus`` / ``sessionIndexControl``.
+
+    Both read the single warm job; control actions are validated against the
+    action set from the PRD (§9.2): ``start | extend | pause | resume |
+    cancel_ui``.  ``cancel_ui`` only detaches the UI, never stops the job.
+    """
+    action = str(command.get("action") or "").strip()
+    if action not in runtime_settings.SESSION_INDEX_COMMANDS:
+        return UNHANDLED
+    job = getattr(ports, "session_index_job", None)
+    if job is None:
+        status = _status("会话搜索索引进度当前不可用。", kind="error")
+        status["sessionIndex"] = {
+            "available": False,
+            "error": "unavailable",
+        }
+        return status
+    request_id = str(command.get("requestId") or command.get("id") or "")
+    if action == "sessionIndexStatus":
+        status = _status("")
+        _session_index_attach(job)
+        payload = job.status() if callable(getattr(job, "status", None)) else {}
+        status["sessionIndex"] = payload
+        return status
+    control_action = str(command.get("control") or "").strip().casefold()
+    valid = {"start", "extend", "pause", "resume", "cancel_ui"}
+    if control_action not in valid:
+        status = _status("未知的索引控制动作。", kind="error")
+        status["sessionIndex"] = {"accepted": False, "error": "unknown_action"}
+        return status
+    range_key = str(command.get("range") or "").strip().casefold()
+    try:
+        if control_action == "start":
+            accepted = bool(job.start(range_key))
+        elif control_action == "extend":
+            accepted = bool(job.extend(range_key))
+        elif control_action == "pause":
+            accepted = bool(job.pause())
+        elif control_action == "resume":
+            accepted = bool(job.resume())
+        else:
+            accepted = bool(job.cancel_ui())
+    except Exception as exc:
+        status = _status(
+            _exc_detail_log(exc, tag="session_index_control_failed"),
+            kind="error",
+        )
+        status["sessionIndex"] = {
+            "accepted": False,
+            "error": str(exc) or type(exc).__name__,
+        }
+        return status
+    if accepted and control_action in ("start", "extend", "resume"):
+        _session_index_attach(job)
+    status = _status("" if accepted else "索引控制未生效。", kind="" if accepted else "warning")
+    payload = dict(job.status()) if callable(getattr(job, "status", None)) else {}
+    payload["accepted"] = bool(accepted)
+    payload["error"] = ""
+    payload["requestId"] = request_id
+    status["sessionIndex"] = payload
+    return status
+
+
+def _session_index_attach(job: object) -> None:
+    """Mark the UI as subscribed to the shared warm job (PRD §4.1).
+
+    Entering session management only attaches to the existing task; it never
+    creates or stops a job.  ``cancel_ui`` (background run) detaches without
+    stopping the worker, so attach here only flips a subscription flag.
+    """
+    attach = getattr(job, "attach", None)
+    if callable(attach):
+        try:
+            attach()
+        except Exception:
+            pass
 
 
 def handle_cleanup_command(
@@ -1472,6 +1555,7 @@ def _handle_renderer_session_cleanup_command(
         RuntimeCommandPorts(
             cleanup_worker=getattr(context, "session_cleanup_worker", None),
             cleanup_manager=getattr(context, "session_cleanup_manager", None),
+            session_index_job=getattr(context, "session_index_warm_job", None),
         ),
     )
     if result is UNHANDLED:
@@ -1545,6 +1629,7 @@ def _handle_renderer_settings_command(
         background_usage=getattr(context, "background_usage_runtime", None),
         cleanup_worker=getattr(context, "session_cleanup_worker", None),
         cleanup_manager=getattr(context, "session_cleanup_manager", None),
+        session_index_job=getattr(context, "session_index_warm_job", None),
         insights_worker=getattr(context, "usage_insights_worker", None),
         insights_payload=getattr(context, "usage_insights_payload", None),
         resolve_active_session=lambda candidate: _resolve_renderer_active_session_candidate(
@@ -1797,5 +1882,6 @@ __all__ = [
     "handle_active_session_command",
     "handle_cleanup_command",
     "handle_insights_command",
+    "handle_session_index_command",
     "handle_general_command",
 ]

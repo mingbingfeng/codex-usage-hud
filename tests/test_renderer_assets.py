@@ -10,6 +10,7 @@ from codex_usage_hud.renderer_assets.layout_markup import TEXT as LAYOUT_MARKUP
 from codex_usage_hud.renderer_assets.layout_observers import TEXT as LAYOUT_OBSERVERS
 from codex_usage_hud.renderer_assets.layout_style import TEXT as LAYOUT_STYLE
 from codex_usage_hud.renderer_assets.router import TEXT as ROUTER
+from codex_usage_hud.renderer_assets.session_cleanup import TEXT as SESSION_CLEANUP
 from codex_usage_hud.renderer_assets.settings_shell import TEXT as SETTINGS_SHELL
 from codex_usage_hud.renderer_assets.settings_support_panels import (
     TEXT as SETTINGS_SUPPORT_PANELS,
@@ -111,6 +112,64 @@ def test_renderer_kernel_manifest_and_shared_contract_are_explicit() -> None:
     for domain in ("layout", "composer"):
         assert f'ctx.domains.register(\n    "{domain}",' in script
     assert 'ctx.domains.register(\n    "active_session",' in script
+
+
+def test_session_cleanup_payload_keeps_revision_state_in_function_scope() -> None:
+    script = renderer_script._RENDERER_HUD_SCRIPT_TEMPLATE
+    start = script.index("function applySessionCleanupPayload")
+    end = script.index("function install()", start)
+    source = script[start:end]
+
+    assert source.index("let data = sessionCleanupState.data;") < source.index(
+        'if (incoming && typeof incoming === "object")'
+    )
+    assert source.index("const previousRevision") < source.index(
+        'if (incoming && typeof incoming === "object")'
+    )
+    assert "const data = sessionCleanupPayloadWithInventory(incoming);" not in source
+
+
+def test_session_index_polling_chain_and_status_unlock_are_wired() -> None:
+    shell = SETTINGS_SHELL
+    assert "function refreshSessionIndexIfStale" in shell
+    assert "function startSessionIndexProgressPolling" in shell
+    assert "function sessionIndexProgressTick" in shell
+    # the tick reschedules itself while the storage tab is visible, and the
+    # watchdog drops the refreshing lock when the daemon never answers
+    assert "session_index_progress" in shell
+    assert "session_index_progress_watchdog" in shell
+
+    cleanup = SESSION_CLEANUP
+    assert "function sessionIndexBannerHtml" in cleanup
+    assert "function sessionIndexScanMergeHtml" in cleanup
+    assert "function sessionIndexExtendOptions" in cleanup
+    # a status response must clear the refreshing lock so the next tick fires
+    status_merge = cleanup.index("sessionCleanupState.sessionIndex = { ...statusIndex };")
+    unlock = cleanup.index(
+        "sessionCleanupState.sessionIndexRefreshing = false;",
+        status_merge,
+    )
+    assert status_merge < unlock
+
+
+def test_session_index_extend_entry_matches_hint_container_and_copy() -> None:
+    # regression: the extend button lives in two containers (banner + empty-
+    # result coverage hint); the router lookup must match both or the hint's
+    # extend silently falls back to the current range (a no-op).
+    assert (
+        'action.closest(\n            ".codex-usage-hud-session-index-coverage,'
+        " .codex-usage-hud-session-coverage-hint\",\n          )" in ROUTER
+    )
+    hint = SESSION_CLEANUP.index("codex-usage-hud-session-coverage-hint")
+    extend_select = SESSION_CLEANUP.index(
+        'data-session-index-extend="true"',
+        hint,
+    )
+    assert hint < extend_select
+    # regression: range labels already carry 「最近」; templates must not
+    # duplicate it (「最近 最近 1 个月」).
+    assert "可搜索最近 ${rangeLabelText}" not in SESSION_CLEANUP
+    assert "覆盖了最近 ${rangeLabel}" not in SESSION_CLEANUP
 
 
 def test_layout_static_fragments_join_without_changing_manifest_asset() -> None:

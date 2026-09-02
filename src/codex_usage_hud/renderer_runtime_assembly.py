@@ -61,6 +61,7 @@ class RendererSessionAssembly:
     overlay_runtime_commands: overlay_commands.OverlayRuntimeCommandCallbacks
     bridge_url: object
     background_usage_bridge_url: str
+    session_index_url: str
     startup_feedback: RendererStartupFeedback
     snapshot_or_error: snapshot_builder_owner.RuntimeSnapshotBuilder
 
@@ -234,11 +235,26 @@ def assemble_renderer_session(
         background_usage_policy_set_callback=(
             getattr(background_usage_runtime, "policy_set", None)
         ),
+        session_index_status_callback=(
+            (lambda: context.session_index_warm_job.status())
+            if getattr(context, "session_index_warm_job", None) is not None
+            else None
+        ),
+        session_index_control_callback=(
+            (lambda body: context.session_index_warm_job.control(body))
+            if getattr(context, "session_index_warm_job", None) is not None
+            else None
+        ),
     )
     resources.bridge = bridge
     bridge_url = bridge.start()
     background_usage_bridge_url = (
         bridge.background_usage_url if background_usage_runtime is not None else ""
+    )
+    session_index_url = (
+        bridge.session_index_url
+        if getattr(context, "session_index_warm_job", None) is not None
+        else ""
     )
     startup_feedback = RendererStartupFeedback(
         client,
@@ -270,6 +286,7 @@ def assemble_renderer_session(
         overlay_runtime_commands=overlay_runtime_commands,
         bridge_url=bridge_url,
         background_usage_bridge_url=background_usage_bridge_url,
+        session_index_url=session_index_url,
         startup_feedback=startup_feedback,
         snapshot_or_error=snapshot_or_error,
     )

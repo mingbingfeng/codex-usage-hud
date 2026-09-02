@@ -1033,6 +1033,60 @@ TEXT = r"""
         executeSessionCleanup();
         return;
       }
+      if (String(action.dataset.action || "").indexOf("session-index-") === 0) {
+        event.preventDefault();
+        event.stopPropagation();
+        submitSessionIndexAction(action, event);
+        return;
+      }
+      function submitSessionIndexAction(action, event) {
+        // Warm-index coverage banner controls (PRD §7.2). The banner offers
+        // pause / resume / background(detach UI, keep building) / extend; each
+        // maps 1:1 to a ``sessionIndexControl`` command. ``cancel_ui`` is the
+        // "background run" semantic: it only detaches the UI subscription and
+        // never stops the worker.
+        const kind = String(action?.dataset?.action || "").slice("session-index-".length);
+        const controlByKind = {
+          pause: "pause",
+          resume: "resume",
+          background: "cancel_ui",
+          extend: "extend",
+        };
+        const control = controlByKind[kind];
+        if (!control) return;
+        const requestId = typedSettingsRequestId("session-index");
+        const command = {
+          action: "sessionIndexControl",
+          requestId,
+          control,
+        };
+        if (control === "extend") {
+          // The extend entry lives in two containers: the coverage banner
+          // (``...-session-index-coverage``) and the empty-result coverage
+          // hint (``...-session-coverage-hint``); match both or the hint's
+          // extend button silently falls back to the current range.
+          const coverage = action.closest(
+            ".codex-usage-hud-session-index-coverage, .codex-usage-hud-session-coverage-hint",
+          );
+          const select = coverage?.querySelector?.(
+            'select[data-session-index-extend="true"]',
+          );
+          const range = String(
+            select?.value
+            || sessionCleanupState?.sessionIndex?.selectedRange
+            || "3m",
+          ).trim().toLowerCase();
+          if (!range) return;
+          command.range = range;
+        }
+        const pendingLabel = {
+          pause: "正在暂停搜索索引建立...",
+          resume: "正在继续建立搜索索引...",
+          background: "已转入后台，索引将继续建立。",
+          extend: "正在扩展索引范围...",
+        }[kind] || "正在更新搜索索引...";
+        submitSettingsCommand(command, pendingLabel, { preserveOverlay: true });
+      }
       if (action.dataset.action === "settings-provider-tab") {
         event.preventDefault();
         event.stopPropagation();

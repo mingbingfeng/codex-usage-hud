@@ -101,6 +101,7 @@ class RuntimeContext:
     usage_insights_worker: object | None = None
     session_cleanup_manager: object | None = None
     session_cleanup_worker: object | None = None
+    session_index_warm_job: object | None = None
     session_cleanup_payload: dict[str, object] = field(default_factory=dict)
     session_cleanup_delta: dict[str, object] = field(default_factory=dict)
     session_management_current_session_id: str = ""
@@ -152,6 +153,7 @@ class RuntimeContext:
                 self.active_session_tracker = None
         for field_name in (
             "session_cleanup_worker",
+            "session_index_warm_job",
             "usage_insights_worker",
             "background_usage_runtime",
             "session_snapshot_cache",
@@ -217,6 +219,45 @@ def _initialize_runtime_context_resources(context: RuntimeContext) -> None:
             context.session_cleanup_manager,
             on_deleted=_refresh_usage_after_session_delete,
         )
+    if _session_index_warm_job_available(context.session_cleanup_manager):
+        context.session_index_warm_job = _build_session_index_warm_job(context)
+        try:
+            context.session_index_warm_job.start(
+                _session_index_default_range(context)
+            )
+        except Exception as exc:
+            _LOGGER.exception(
+                "session_index_warm_start_failed error=%s", exc
+            )
+
+
+def _session_index_warm_job_available(manager: object) -> bool:
+    return bool(
+        manager is not None
+        and hasattr(manager, "search_index_entries")
+        and hasattr(manager, "_search_index")
+    )
+
+
+def _session_index_default_range(context: RuntimeContext) -> str:
+    config = getattr(context, "user_config", None)
+    raw = getattr(config, "session_search_range", "") if config is not None else ""
+    candidate = str(raw or "").strip().casefold()
+    return candidate if candidate else "1m"
+
+
+def _build_session_index_warm_job(context: RuntimeContext) -> object:
+    from .core.session_index_job import SessionIndexWarmJob
+
+    manager = context.session_cleanup_manager
+    state_path = (
+        hud_runtime_dir() / "session-index-warm.json"
+    )
+    return SessionIndexWarmJob(
+        manager,
+        state_path=state_path,
+        progress_callback=None,
+    )
 
 
 def _suspend_native_active_title(context: "RuntimeContext") -> None:
