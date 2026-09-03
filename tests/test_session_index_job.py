@@ -484,6 +484,50 @@ def test_progress_publish_throttled_to_four_hz(tmp_path: Path) -> None:
     assert final_status["coverage"] == "range_done(1m)"
 
 
+def test_extend_publishes_range_change_before_worker_bucket(tmp_path: Path) -> None:
+    entries = _make_entries(tmp_path, {f"e{i}": 1 + i for i in range(6)})
+    index = _FakeSearchIndex(entries)
+    events: list[WarmJobSnapshot] = []
+    job = SessionIndexWarmJob(
+        index,
+        state_path=tmp_path / "warm.json",
+        progress_callback=events.append,
+    )
+    try:
+        assert job.start("1m") is True
+        assert _wait_until(lambda: job.status()["jobState"] == "idle")
+        events.clear()
+        assert job.extend("3m") is True
+        # The live sessionIndex channel must report the new range on the frame
+        # the extend is accepted. Without this publish, a renderer push landing
+        # before the worker's first bucket publish would show "最近1个月" as
+        # the current range while a 3m job is already running.
+        assert events, "extend() 必须立刻发布一次进度，否则实时通道落后于命令响应"
+        assert events[0].selected_range == "3m"
+        assert _wait_until(lambda: job.status()["jobState"] == "idle")
+    finally:
+        job.close()
+
+
+def test_pause_announces_paused_state_to_attached_ui(tmp_path: Path) -> None:
+    entries = _make_entries(tmp_path, {f"s{i}": 1 + i * 2 for i in range(10)})
+    index = _FakeSearchIndex(entries, delay_per_entry=0.02)
+    job = SessionIndexWarmJob(index, state_path=tmp_path / "warm.json")
+    try:
+        assert job.start("1m") is True
+        assert job.attach() is True
+        assert _wait_until(lambda: int(job.status()["builtCount"]) >= 3)
+        assert job.pause() is True
+        # The ``paused`` transition is published by the worker, and a detached
+        # job publishes no runtime event at all. Detaching on pause would
+        # therefore leave the panel stuck on "索引中" until an unrelated
+        # full refresh happened to clear the command status.
+        assert job.is_attached() is True
+        assert _wait_until(lambda: job.status()["jobState"] == "paused")
+    finally:
+        job.close()
+
+
 def test_attached_progress_callback_exposes_attachment_state(tmp_path: Path) -> None:
     entries = _make_entries(tmp_path, {"a": 1})
     index = _FakeSearchIndex(entries)

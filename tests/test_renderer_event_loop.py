@@ -36,6 +36,7 @@ from codex_usage_hud.renderer_wait import (
 )
 from codex_usage_hud.core import ParsedSession
 from codex_usage_hud.core.runtime_events import RuntimeEventBus
+from codex_usage_hud.renderer_payload_builder import payload_from_snapshot
 from codex_usage_hud.renderer_pre_refresh import (
     RendererPreRefreshExecutor,
     RendererPreRefreshPorts,
@@ -1819,6 +1820,87 @@ def test_refresh_executor_applies_partial_domain_and_clears_matching_response() 
     assert state.failures == 0
     reset_retry.assert_called_once_with()
     connection_success.assert_called_once_with()
+
+
+def _session_index_settings_domain(
+    *,
+    session_index: dict[str, object],
+    command_status: dict[str, object],
+) -> dict[str, object]:
+    return payload_from_snapshot(
+        ParsedSession(),
+        session_index=dict(session_index),
+        settings_command_status=dict(command_status),
+    ).to_domain_json("settings")
+
+
+def _renderer_session_index_choice(
+    domain_payload: dict[str, object],
+) -> dict[str, object] | None:
+    """Mirror the renderer's selection rule (``sessionIndexDomainState``).
+
+    ``settingsCommandStatus.sessionIndex`` is a one-shot command response and
+    wins while present; the live ``sessionIndex`` key is the fallback.
+    """
+    status = domain_payload.get("settingsCommandStatus")
+    status_index = status.get("sessionIndex") if isinstance(status, dict) else None
+    if isinstance(status_index, dict) and status_index:
+        return status_index
+    live = domain_payload.get("sessionIndex")
+    return live if isinstance(live, dict) and live else None
+
+
+def test_session_index_progress_is_not_shadowed_by_command_ack() -> None:
+    """Regression: 扩展索引后进度不刷新，只在下一次全量刷新时跳到最终态。
+
+    ``settingsCommandStatus.sessionIndex`` 是一次性命令响应，``sessionIndex``
+    是随 warm job 推进的实时通道。渲染端优先读前者，而
+    ``settings_command_status`` 只在全量刷新成功后才清空 —— 于是命令响应会一直
+    遮蔽实时通道，进度帧全部被丢弃，直到某次全量刷新清空它才显示最终态。
+    """
+    ack: dict[str, object] = {
+        "jobState": "running",
+        "coverage": "partial(3m)",
+        "builtCount": 0,
+        "totalCount": 0,
+        "selectedRange": "3m",
+        "accepted": True,
+        "requestId": "req-1",
+    }
+    live: dict[str, object] = {
+        "jobState": "idle",
+        "coverage": "range_done(1m)",
+        "builtCount": 120,
+        "totalCount": 120,
+        "selectedRange": "1m",
+    }
+    state = RendererLoopState(
+        latest_snapshot=ParsedSession(),
+        settings_command_status={"status": "", "kind": "", "sessionIndex": dict(ack)},
+    )
+    live_box = {"value": dict(live)}
+    pushed: list[dict[str, object]] = []
+    ports = replace(
+        _refresh_ports(fresh=ParsedSession()),
+        build_domain_payload=lambda snapshot, inputs: _session_index_settings_domain(
+            session_index=live_box["value"],
+            command_status=state.settings_command_status,
+        ),
+        push_domain_payload=lambda payload: pushed.append(payload) or True,
+    )
+    executor = RendererRefreshExecutor(state, ports)
+    inputs = _tick_inputs(plan=RefreshPlan(domains={"settings"}))
+
+    # 命令响应帧：ack 优先，UI 立刻从"最近1个月"切到"索引中"。
+    assert executor.apply_domains(inputs)
+    assert _renderer_session_index_choice(pushed[-1]) == ack
+
+    # warm job 推进后的每一帧都必须由实时通道决定，而不是停在 ack 上。
+    for built in (260, 401, 542):
+        advanced = dict(ack, builtCount=built, totalCount=542)
+        live_box["value"] = advanced
+        assert executor.apply_domains(inputs)
+        assert _renderer_session_index_choice(pushed[-1]) == advanced
 
 
 def test_wait_planner_collects_owner_deadlines_with_fake_clock() -> None:

@@ -359,6 +359,7 @@ class SessionIndexWarmJob:
                 # pause event would stop the next batch and flip back to
                 # ``paused`` right after the UI confirmed the resume).
                 self._requested_pause.clear()
+                self._publish_locked(force=True)
                 return True
             if self._state.job_state == "paused":
                 self._state.job_state = "running"
@@ -377,6 +378,11 @@ class SessionIndexWarmJob:
             self._requested_pause.clear()
             self._attached = False
             self._spawn_worker()
+            # Publish the range/state change now so the live ``sessionIndex``
+            # channel is never one frame behind the command ack. Otherwise a
+            # domain push landing between the ack and the worker's first bucket
+            # publish would show the *previous* range as current.
+            self._publish_locked(force=True)
             return True
 
     def _trim_index_to_range(self, range_key: str) -> None:
@@ -426,8 +432,10 @@ class SessionIndexWarmJob:
             self._state.updated_at = self._clock()
             self._maybe_persist_locked()
             if self._worker is not None and self._worker.is_alive():
+                self._publish_locked(force=True)
                 return True
             self._spawn_worker()
+            self._publish_locked(force=True)
             return True
 
     def pause(self) -> bool:
@@ -436,7 +444,9 @@ class SessionIndexWarmJob:
             if self._state.job_state not in ("running", "attached"):
                 return False
             self._requested_pause.set()
-            self._attached = False
+            # Keep the UI subscription: the worker still has to announce the
+            # ``paused`` transition, and a detached job publishes no event, so
+            # clearing the flag here would leave the panel stuck on "索引中".
             return True
 
     def resume(self) -> bool:
@@ -527,7 +537,7 @@ class SessionIndexWarmJob:
         except OSError:
             pass
 
-    def _publish_locked(self) -> None:
+    def _publish_locked(self, *, force: bool = False) -> None:
         if not callable(self._progress_callback) or self._closed:
             return
         snapshot = self._snapshot_locked()
@@ -535,10 +545,14 @@ class SessionIndexWarmJob:
         # Never throttle terminal state transitions. A very small corpus can
         # finish inside one throttle window; suppressing its final idle/error
         # event would leave an attached Renderer showing stale "indexing" UI
-        # until the next explicit status request.
+        # until the next explicit status request. A control-driven change
+        # (start/extend) is forced for the same reason: it must reach the live
+        # channel immediately, but it still opens a fresh throttle window so
+        # the 4 Hz bound on streaming progress is preserved.
         terminal = snapshot.job_state not in {"running", "attached"}
         if (
-            not terminal
+            not force
+            and not terminal
             and now - self._last_progress_emitted < 1.0 / PROGRESS_MAX_HZ
         ):
             return

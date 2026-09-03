@@ -592,6 +592,7 @@ class RendererRefreshExecutor:
         if not payload:
             return True
         if self.ports.push_domain_payload(payload):
+            self._consume_delivered_session_index(domains)
             if "backgroundUsage" in domains and (
                 self.state.settings_command_status.get(
                     "backgroundUsageOpenEventId"
@@ -619,6 +620,27 @@ class RendererRefreshExecutor:
             sorted(domains),
         )
         return False
+
+    def _consume_delivered_session_index(self, domains: set[str]) -> None:
+        """Deliver ``settingsCommandStatus.sessionIndex`` exactly once.
+
+        The renderer prefers ``settingsCommandStatus.sessionIndex`` over the
+        live ``sessionIndex`` key, but ``settings_command_status`` is only
+        cleared when a full-snapshot refresh succeeds. Left in place, the
+        one-shot command ack keeps shadowing every later progress frame, so an
+        "扩展索引" click shows no movement at all until an unrelated full
+        refresh clears the status and the UI jumps straight to the final
+        coverage. Dropping the key after the settings domain has carried it
+        leaves ``sessionIndex`` as the single live channel.
+        """
+        if "settings" not in domains:
+            return
+        status = self.state.settings_command_status
+        if not isinstance(status, dict) or "sessionIndex" not in status:
+            return
+        self.state.settings_command_status = {
+            key: value for key, value in status.items() if key != "sessionIndex"
+        }
 
     def _merge_active_work(
         self,
