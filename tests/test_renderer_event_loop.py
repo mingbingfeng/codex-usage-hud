@@ -1400,6 +1400,7 @@ def test_snapshot_refresh_decision_builds_initial_full_refresh_kwargs() -> None:
         "refresh_budget_aggregate": True,
         "refresh_budget_paths": (),
         "refresh_active_work_items": True,
+        "scan_active_work_candidates": False,
     }
 
 
@@ -1431,6 +1432,7 @@ def test_snapshot_refresh_decision_preserves_visible_first_contract() -> None:
         "refresh_budget_aggregate": False,
         "refresh_budget_paths": (),
         "refresh_active_work_items": False,
+        "scan_active_work_candidates": True,
         "reuse_budget_from": latest,
         "refresh_visible_app_error": False,
         "refresh_current_session_usage": False,

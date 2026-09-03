@@ -1030,6 +1030,10 @@ class ParsedSession:
     week_start: datetime | None = None
     budget_warnings: list[str] = field(default_factory=list)
     budget_error: str = ""
+    # False while the renderer cold-start path defers the historical budget
+    # scan: today/week amounts are still placeholder zeros and must not be
+    # rendered as if they were measured. True everywhere else.
+    budget_ready: bool = True
     active_work_items: list[WorkStatusItem] = field(default_factory=list)
     estimate_base: BaseEstimate = field(default_factory=BaseEstimate)
     reading_activity: ReadingActivity = field(default_factory=ReadingActivity)

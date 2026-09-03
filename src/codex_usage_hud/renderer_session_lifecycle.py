@@ -279,7 +279,7 @@ class RendererStartupFeedback:
             ),
             "showing_hud": (
                 "第 4 步，共 4 步",
-                "会话信息已就绪，正在显示用量与预算…",
+                "会话信息已就绪，正在载入用量与预算…",
                 88,
             ),
         }

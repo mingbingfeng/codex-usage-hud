@@ -663,9 +663,13 @@ class RendererRefreshExecutor:
             )
         )
         active_work_queued = False
-        if decision.refresh_active_work_items and (
-            latest is not None or priority_paths
-        ):
+        # The first frame (latest is None) built only the current-session
+        # bubble synchronously (scan_candidates=False). It must still kick the
+        # async pump so the recent-session candidate set is backfilled in the
+        # background without blocking startup. Later frames trigger the pump
+        # when a priority path arrives or the periodic rescan comes due, both
+        # of which also imply refresh_active_work_items is True.
+        if decision.refresh_active_work_items:
             active_work_queued = self.ports.request_active_work(
                 fresh,
                 priority_paths,
@@ -948,6 +952,10 @@ def snapshot_refresh_decision(
         "refresh_active_work_items": bool(
             refresh_active_work_items and not has_latest_snapshot
         ),
+        # The first frame builds the current-session bubble synchronously but
+        # must not parse the recent-session candidate set on the startup path;
+        # that scan is deferred to the async active-work pump.
+        "scan_active_work_candidates": bool(has_latest_snapshot),
     }
     if lightweight:
         snapshot_kwargs["reuse_budget_from"] = latest_snapshot

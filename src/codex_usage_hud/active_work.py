@@ -1038,8 +1038,17 @@ def active_work_items_for_snapshot(
     snapshot: ParsedSession,
     session_path: Path | None,
     priority_paths: Sequence[Path] = (),
+    *,
+    scan_candidates: bool = True,
 ) -> list[WorkStatusItem]:
-    """Build primary-screen work bubble items from recently active Codex sessions."""
+    """Build primary-screen work bubble items from recently active Codex sessions.
+
+    ``scan_candidates=False`` skips the recent-session discovery loop (the costly
+    ``parse_file`` pass over ``ACTIVE_WORK_CANDIDATE_LIMIT`` historical logs) and
+    emits only the current-session bubble plus any already-cached items. The
+    renderer cold-start first frame uses this so the primary bubble appears
+    immediately while the candidate scan is deferred to the async pump.
+    """
     item_limit = _work_overlay_item_limit_for_context(context)
     if item_limit <= 0:
         _work_overlay_visible_item_cache(context).clear()
@@ -1119,87 +1128,88 @@ def active_work_items_for_snapshot(
         elif _work_item_model_startup_timed_out(snapshot, now=now) and snapshot.session_id:
             expired_startup_item_ids.add(str(snapshot.session_id))
 
-    for path in _recent_session_files(
-        context.sessions_root,
-        current_path=session_path,
-        limit=ACTIVE_WORK_CANDIDATE_LIMIT,
-        priority_paths=priority_paths,
-    ):
-        if _session_path_key(path) == current_key:
-            continue
-        try:
-            parsed = context.parser.parse_file(path)
-        except Exception:
-            continue
-        if _hide_from_work_overlay(parsed):
-            continue
-        parsed_segment_released = _clear_terminal_item_task_for_new_segment(
-            context,
-            parsed,
-        )
-        title = ""
-        if context.active_session_tracker is not None:
-            title = context.active_session_tracker.title_for_session(
-                path,
-                parsed.session_id,
-            )
-        item = _work_item_from_snapshot(
-            parsed,
-            current=False,
-            title=title,
-            source="activity",
-            context=context,
-            now=now,
-        )
-        _remember_released_segment(
-            context,
-            parsed,
-            item,
-            released=parsed_segment_released,
-        )
-        if item is not None:
-            cached_item = visible_item_cache.get(str(item.id))
-            if cached_item is not None:
-                item = _merge_stable_item_metadata(cached_item, item)
-            if item.status == "recent" and not _completion_was_seen_active(
+    if scan_candidates:
+        for path in _recent_session_files(
+            context.sessions_root,
+            current_path=session_path,
+            limit=ACTIVE_WORK_CANDIDATE_LIMIT,
+            priority_paths=priority_paths,
+        ):
+            if _session_path_key(path) == current_key:
+                continue
+            try:
+                parsed = context.parser.parse_file(path)
+            except Exception:
+                continue
+            if _hide_from_work_overlay(parsed):
+                continue
+            parsed_segment_released = _clear_terminal_item_task_for_new_segment(
                 context,
-                item,
-            ):
-                if parsed.session_id:
-                    task_key = _terminal_task_marker(item)
-                    _remember_suppressed_completion(
-                        context,
-                        str(parsed.session_id),
-                        task_key,
-                        parsed,
-                    )
-                    if task_key:
-                        terminal_item_ids[str(parsed.session_id)] = task_key
-            else:
-                items[str(item.id)] = item
-                if item.status == "recent" and parsed.session_id:
-                    terminal_item_tasks.pop(str(parsed.session_id), None)
-                    _terminal_completion_prompts(context).pop(
-                        str(parsed.session_id),
-                        None,
-                    )
-        elif _should_suppress_inherited_completion(context, parsed) and parsed.session_id:
-            task_key = _iso_or_empty(
-                parsed.task_started_at or parsed.request.started_at
-            )
-            _remember_suppressed_completion(
-                context,
-                str(parsed.session_id),
-                task_key,
                 parsed,
             )
-            terminal_item_ids[str(parsed.session_id)] = task_key
-        elif parsed.task_aborted_at is not None and parsed.session_id:
-            terminal_item_ids[str(parsed.session_id)] = _iso_or_empty(
-                parsed.task_started_at
+            title = ""
+            if context.active_session_tracker is not None:
+                title = context.active_session_tracker.title_for_session(
+                    path,
+                    parsed.session_id,
+                )
+            item = _work_item_from_snapshot(
+                parsed,
+                current=False,
+                title=title,
+                source="activity",
+                context=context,
+                now=now,
             )
-        elif _work_item_model_startup_timed_out(parsed, now=now) and parsed.session_id:
-            expired_startup_item_ids.add(str(parsed.session_id))
+            _remember_released_segment(
+                context,
+                parsed,
+                item,
+                released=parsed_segment_released,
+            )
+            if item is not None:
+                cached_item = visible_item_cache.get(str(item.id))
+                if cached_item is not None:
+                    item = _merge_stable_item_metadata(cached_item, item)
+                if item.status == "recent" and not _completion_was_seen_active(
+                    context,
+                    item,
+                ):
+                    if parsed.session_id:
+                        task_key = _terminal_task_marker(item)
+                        _remember_suppressed_completion(
+                            context,
+                            str(parsed.session_id),
+                            task_key,
+                            parsed,
+                        )
+                        if task_key:
+                            terminal_item_ids[str(parsed.session_id)] = task_key
+                else:
+                    items[str(item.id)] = item
+                    if item.status == "recent" and parsed.session_id:
+                        terminal_item_tasks.pop(str(parsed.session_id), None)
+                        _terminal_completion_prompts(context).pop(
+                            str(parsed.session_id),
+                            None,
+                        )
+            elif _should_suppress_inherited_completion(context, parsed) and parsed.session_id:
+                task_key = _iso_or_empty(
+                    parsed.task_started_at or parsed.request.started_at
+                )
+                _remember_suppressed_completion(
+                    context,
+                    str(parsed.session_id),
+                    task_key,
+                    parsed,
+                )
+                terminal_item_ids[str(parsed.session_id)] = task_key
+            elif parsed.task_aborted_at is not None and parsed.session_id:
+                terminal_item_ids[str(parsed.session_id)] = _iso_or_empty(
+                    parsed.task_started_at
+                )
+            elif _work_item_model_startup_timed_out(parsed, now=now) and parsed.session_id:
+                expired_startup_item_ids.add(str(parsed.session_id))
 
     terminal_item_tasks.update(terminal_item_ids)
     for item_id in terminal_item_ids:

@@ -49,6 +49,7 @@ class RuntimeSnapshotBuilder:
         refresh_budget_aggregate: bool | None = None,
         refresh_budget_paths: Iterable[Path] = (),
         refresh_active_work_items: bool = True,
+        scan_active_work_candidates: bool = True,
         refresh_current_session_usage: bool = True,
         reuse_budget_from: ParsedSession | None = None,
         refresh_visible_app_error: bool = True,
@@ -73,6 +74,8 @@ class RuntimeSnapshotBuilder:
                 kwargs["refresh_current_session_usage"] = False
             if not refresh_active_work_items:
                 kwargs["refresh_active_work_items"] = False
+            elif not scan_active_work_candidates:
+                kwargs["scan_active_work_candidates"] = False
             return self.builder(self.context, **kwargs)
         except Exception as exc:
             return ParsedSession(status="error", error=str(exc))
@@ -417,6 +420,7 @@ def build_snapshot(
     refresh_budget_aggregate: bool | None = None,
     refresh_budget_paths: Iterable[Path] = (),
     refresh_active_work_items: bool = True,
+    scan_active_work_candidates: bool = True,
     refresh_current_session_usage: bool = True,
     reuse_budget_from: ParsedSession | None = None,
     refresh_visible_app_error: bool = True,
@@ -465,14 +469,21 @@ def build_snapshot(
             refresh_budget_paths=refresh_budget_paths,
             refresh_current_session_usage=refresh_current_session_usage,
         )
+    # Renderers must not show the deferred placeholder zeros as measured usage.
+    snapshot.budget_ready = bool(budget_ready)
     usage_summarized_at_ms = now_ms()
     # Active-work discovery has a small bounded candidate set and must not be
     # coupled to the cold budget scan. Otherwise a HUD restart leaves every
     # already-running CLI conversation without a bubble until budgets warm.
     if refresh_active_work_items:
-        snapshot.active_work_items = ports.active_work_items(
-            context, snapshot, session_path
-        )
+        if scan_active_work_candidates:
+            snapshot.active_work_items = ports.active_work_items(
+                context, snapshot, session_path
+            )
+        else:
+            snapshot.active_work_items = ports.active_work_items(
+                context, snapshot, session_path, scan_candidates=False
+            )
     apply_pre_send_and_activity(context, snapshot)
     snapshot.follow_timing = {
         **dict(snapshot.follow_timing or {}),

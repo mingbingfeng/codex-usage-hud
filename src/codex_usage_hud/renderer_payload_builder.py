@@ -731,8 +731,21 @@ def _top_progress_metric(
 
 def _top_progress(snapshot: ParsedSession) -> dict[str, object]:
     cache_ratio, _cache_estimated = _session_cache_hit_rate(snapshot)
-    day_complete = snapshot.today_cost_usd is not None
-    week_complete = snapshot.week_cost_usd is not None
+    budget_ready = bool(getattr(snapshot, "budget_ready", True))
+    # A deferred cold-start scan leaves placeholder zeros behind. Treat them as
+    # unmeasured so the HUD never claims the budget is $0 before it is scanned.
+    day_complete = snapshot.today_cost_usd is not None and budget_ready
+    week_complete = snapshot.week_cost_usd is not None and budget_ready
+    day_label = (
+        f"今日 {_format_usage_money(snapshot.today_tokens, snapshot.today_cost_usd)}"
+        if budget_ready
+        else "今日 计算中…"
+    )
+    week_label = (
+        f"本周 {_format_usage_money(snapshot.week_tokens, snapshot.week_cost_usd)}"
+        if budget_ready
+        else "本周 计算中…"
+    )
     day_overflow = (
         _budget_progress_overflow_ratio(snapshot.today_cost_usd, snapshot.daily_limit_usd)
         if day_complete
@@ -764,7 +777,7 @@ def _top_progress(snapshot: ParsedSession) -> dict[str, object]:
         "cache",
     )
     day = _top_progress_metric(
-        f"今日 {_format_usage_money(snapshot.today_tokens, snapshot.today_cost_usd)}",
+        day_label,
         _budget_progress_ratio(snapshot.today_cost_usd, snapshot.daily_limit_usd),
         "day",
         # Keep full usage/amount on the left; only the badge shrinks under pressure.
@@ -779,7 +792,7 @@ def _top_progress(snapshot: ParsedSession) -> dict[str, object]:
         overflow_badge_icon="🚨" if day_badge else "",
     )
     week = _top_progress_metric(
-        f"本周 {_format_usage_money(snapshot.week_tokens, snapshot.week_cost_usd)}",
+        week_label,
         _budget_progress_ratio(snapshot.week_cost_usd, snapshot.weekly_limit_usd),
         "week",
         right_text=(
@@ -792,7 +805,7 @@ def _top_progress(snapshot: ParsedSession) -> dict[str, object]:
         overflow_badge_compact=week_badge_compact,
     )
     budget_day = _top_progress_metric(
-        f"今日 {_format_usage_money(snapshot.today_tokens, snapshot.today_cost_usd)}",
+        day_label,
         _budget_progress_ratio(snapshot.today_cost_usd, snapshot.daily_limit_usd),
         "day",
         right_text=(
@@ -806,7 +819,7 @@ def _top_progress(snapshot: ParsedSession) -> dict[str, object]:
         overflow_badge_icon="🚨" if day_badge else "",
     )
     budget_week = _top_progress_metric(
-        f"本周 {_format_usage_money(snapshot.week_tokens, snapshot.week_cost_usd)}",
+        week_label,
         _budget_progress_ratio(snapshot.week_cost_usd, snapshot.weekly_limit_usd),
         "week",
         right_text=(
