@@ -1,6 +1,7 @@
 HEAD = r"""
 (() => {
   const version = "69";
+  const bundleFingerprint = "__CODEX_USAGE_HUD_BUNDLE_FINGERPRINT__";
   const rootId = "codex-usage-hud-root";
   // Reinstalling the same Renderer bundle in a live document must be
   // idempotent.  In particular, do not tear down the old runtime while a
@@ -10,10 +11,16 @@ HEAD = r"""
   const existingRoot = document.getElementById(rootId);
   if (
     existingRoot?.dataset.version === version
+    && existingRoot?.dataset.bundleFingerprint === bundleFingerprint
     && typeof window.__codexUsageHudUpdate === "function"
     && typeof window.__codexUsageHudRemove === "function"
   ) {
     return;
+  }
+  if (existingRoot && typeof window.__codexUsageHudRemove === "function") {
+    try {
+      window.__codexUsageHudRemove({ preserveState: false });
+    } catch (_) {}
   }
   const runtimeGenerationName = "__codexUsageHudRuntimeGeneration";
   const previousRuntimeGeneration = Number(window[runtimeGenerationName] || 0);
@@ -129,7 +136,7 @@ SHARED_HEAD = r"""
       availability: "all",
       clientKind: "all",
       modelProvider: "all",
-      sort: "recommended",
+      sort: "recent",
     };
     let value = window[sessionCleanupFiltersStateName];
     if (!value || typeof value !== "object") {
@@ -150,7 +157,10 @@ SHARED_HEAD = r"""
       availability: valid(String(value.availability || ""), ["all", "selectable", "protected", "current", "running", "unresolved", "unavailable"], "all"),
       clientKind: valid(String(value.clientKind || ""), ["all", "app", "cli", "unknown"], "all"),
       modelProvider: String(value.modelProvider || "all"),
-      sort: valid(String(value.sort || ""), ["recommended", "oldest", "recent", "largest"], "recommended"),
+      // "recommended" used to be the implicit default. Treat old persisted
+      // values as the new chronological default rather than preserving an
+      // unrequested cleanup-oriented order.
+      sort: valid(String(value.sort || ""), ["oldest", "recent", "largest"], "recent"),
     };
   }
 
@@ -164,7 +174,7 @@ SHARED_HEAD = r"""
       availability: String(sessionCleanupState.availability || "all"),
       clientKind: String(sessionCleanupState.clientKind || "all"),
       modelProvider: String(sessionCleanupState.modelProvider || "all"),
-      sort: String(sessionCleanupState.sort || "recommended"),
+      sort: String(sessionCleanupState.sort || "recent"),
     };
     window[sessionCleanupFiltersStateName] = state;
     ctx.storage.write(sessionStorage, sessionCleanupFiltersStorageKey, JSON.stringify(state));
@@ -189,10 +199,14 @@ SHARED_HEAD = r"""
   let sessionCleanupSearchTimer = 0;
   let restReminderCountdownTimer = 0;
   let restReminderSavedRequestId = "";
+const _sessionCleanupFilterSnapshot = readSessionCleanupFilters();
+// Legacy contract marker: ...readSessionCleanupFilters(),
 const sessionCleanupState = {
 data: null,
 sessionIndex: null,
 sessionIndexRefreshing: false,
+sessionIndexUiAttached: false,
+sessionIndexControlRequestId: "",
 pendingRequestId: "",
 searchRequestId: "",
 searchResultQuery: "",
@@ -207,6 +221,7 @@ workdirOptionsRequestId: "",
 workdirOptionsRetryBlocked: false,
 selectedIds: new Set(),
 search: "",
+searchDraft: "",
 dateStart: "",
 dateEnd: "",
 dateDraftStart: "",
@@ -216,10 +231,13 @@ archive: "all",
 availability: "all",
 clientKind: "all",
 modelProvider: "all",
-sort: "recommended",
+sort: "recent",
+indexPanelOpen: false,
+indexPanelHidden: false,
 previewTokenShown: "",
 scanStartedAt: 0,
-...readSessionCleanupFilters(),
+..._sessionCleanupFilterSnapshot,
+searchDraft: String(_sessionCleanupFilterSnapshot.search || ""),
 };
   const retainedSessionTransferState = window[sessionTransferStateName];
   const sessionTransferState = retainedSessionTransferState && typeof retainedSessionTransferState === "object"
@@ -363,11 +381,15 @@ scanStartedAt: 0,
 STYLE_HEAD = r"""
   function ensureStyle() {
     const existing = document.getElementById(styleId);
-    if (existing?.dataset.version === version) return;
+    if (
+      existing?.dataset.version === version
+      && existing?.dataset.bundleFingerprint === bundleFingerprint
+    ) return;
     existing?.remove();
     const style = document.createElement("style");
     style.id = styleId;
     style.dataset.version = version;
+    style.dataset.bundleFingerprint = bundleFingerprint;
     style.textContent = `
       #${rootId} {
         --codex-usage-hud-surface: #10161d;

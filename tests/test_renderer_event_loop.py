@@ -82,6 +82,12 @@ def test_renderer_event_loop_reexports_event_normalization_owner() -> None:
             True,
             {"settings", "sessionCleanup"},
         ),
+        (
+            "session_index_progress",
+            False,
+            True,
+            {"settings", "sessionCleanup"},
+        ),
     ],
 )
 def test_event_reducer_maps_basic_refresh_contracts(

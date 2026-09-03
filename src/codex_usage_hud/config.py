@@ -255,6 +255,8 @@ class UserConfig:
     rest_reminder_lunch_enabled: bool = DEFAULT_REST_REMINDER_LUNCH_ENABLED
     rest_reminder_lunch_start_time: str = DEFAULT_REST_REMINDER_LUNCH_START_TIME
     rest_reminder_lunch_end_time: str = DEFAULT_REST_REMINDER_LUNCH_END_TIME
+    # Progressive session-search coverage used for the initial warm index.
+    session_search_range: str = "1m"
 
     @classmethod
     def defaults(cls) -> "UserConfig":
@@ -404,6 +406,13 @@ class UserConfig:
                 value.get("rest_reminder_lunch_end_time"),
                 defaults.rest_reminder_lunch_end_time,
             ),
+            session_search_range=(
+                str(value.get("session_search_range") or defaults.session_search_range)
+                .strip().casefold()
+                if str(value.get("session_search_range") or defaults.session_search_range).strip().casefold()
+                in {"1m", "3m", "6m", "1y", "all"}
+                else defaults.session_search_range
+            ),
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -442,6 +451,7 @@ class UserConfig:
             "rest_reminder_lunch_enabled": bool(self.rest_reminder_lunch_enabled),
             "rest_reminder_lunch_start_time": self.rest_reminder_lunch_start_time,
             "rest_reminder_lunch_end_time": self.rest_reminder_lunch_end_time,
+            "session_search_range": self.session_search_range,
             "model_prices": {
                 name: price.to_dict()
                 for name, price in sorted(self.model_prices.items())

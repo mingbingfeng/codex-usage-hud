@@ -129,21 +129,30 @@ def test_session_cleanup_payload_keeps_revision_state_in_function_scope() -> Non
     assert "const data = sessionCleanupPayloadWithInventory(incoming);" not in source
 
 
-def test_session_index_polling_chain_and_status_unlock_are_wired() -> None:
+def test_session_index_event_chain_and_status_sync_are_wired() -> None:
     shell = SETTINGS_SHELL
     assert "function refreshSessionIndexIfStale" in shell
-    assert "function startSessionIndexProgressPolling" in shell
-    assert "function sessionIndexProgressTick" in shell
-    # the tick reschedules itself while the storage tab is visible, and the
-    # watchdog drops the refreshing lock when the daemon never answers
-    assert "session_index_progress" in shell
-    assert "session_index_progress_watchdog" in shell
+    assert "function detachSessionIndexUi" in shell
+    assert "refreshSessionIndexIfStale," in shell
+    assert "sessionIndexUiAttached" in shell
+    assert "startSessionIndexProgressPolling" not in shell
+    assert "sessionIndexProgressTimer" not in shell
+    assert "sessionIndexControlRequestId" in shell
+    assert 'const isControlResponse = Object.prototype.hasOwnProperty.call(sessionIndex, "accepted");' in shell
 
     cleanup = SESSION_CLEANUP
-    assert "function sessionIndexBannerHtml" in cleanup
     assert "function sessionIndexScanMergeHtml" in cleanup
     assert "function sessionIndexExtendOptions" in cleanup
-    # a status response must clear the refreshing lock so the next tick fires
+    assert "sessionIndexEstimateForRange" not in cleanup
+    assert "item.estimate" not in cleanup
+    assert "sessionIndexControlRequestId" in cleanup
+    assert 'data-action="session-index-pause"' not in cleanup
+    assert 'data-action="session-index-background"' not in cleanup
+    assert "sessionIndexToggleHtml" in cleanup
+    assert "session-index-toggle-track" in cleanup
+    assert "const sessionIndex = sessionIndexDomainState();" in cleanup
+    # A status response must replace the cached state before rebuilding the
+    # visible panel.
     status_merge = cleanup.index("sessionCleanupState.sessionIndex = { ...statusIndex };")
     unlock = cleanup.index(
         "sessionCleanupState.sessionIndexRefreshing = false;",
@@ -153,12 +162,11 @@ def test_session_index_polling_chain_and_status_unlock_are_wired() -> None:
 
 
 def test_session_index_extend_entry_matches_hint_container_and_copy() -> None:
-    # regression: the extend button lives in two containers (banner + empty-
-    # result coverage hint); the router lookup must match both or the hint's
-    # extend silently falls back to the current range (a no-op).
+    # regression: the extend button has one owner (the empty-result coverage
+    # hint), and the router must read its select instead of silently falling
+    # back to the current range (a no-op).
     assert (
-        'action.closest(\n            ".codex-usage-hud-session-index-coverage,'
-        " .codex-usage-hud-session-coverage-hint\",\n          )" in ROUTER
+        'action.closest(".codex-usage-hud-session-coverage-hint")' in ROUTER
     )
     hint = SESSION_CLEANUP.index("codex-usage-hud-session-coverage-hint")
     extend_select = SESSION_CLEANUP.index(
@@ -170,6 +178,9 @@ def test_session_index_extend_entry_matches_hint_container_and_copy() -> None:
     # duplicate it (「最近 最近 1 个月」).
     assert "可搜索最近 ${rangeLabelText}" not in SESSION_CLEANUP
     assert "覆盖了最近 ${rangeLabel}" not in SESSION_CLEANUP
+    assert "（${item.estimate}）" not in SESSION_CLEANUP
+    assert 'data-action="session-index-toggle"' in SESSION_CLEANUP
+    assert 'aria-expanded="${expanded ? "true" : "false"}"' in SESSION_CLEANUP
 
 
 def test_layout_static_fragments_join_without_changing_manifest_asset() -> None:
@@ -600,6 +611,8 @@ def test_renderer_same_version_reinject_reuses_live_runtime_before_teardown() ->
     guard = script[guard_start:guard_end]
 
     assert 'existingRoot?.dataset.version === version' in guard
+    assert 'existingRoot?.dataset.bundleFingerprint === bundleFingerprint' in guard
+    assert 'window.__codexUsageHudRemove({ preserveState: false });' in guard
     assert 'typeof window.__codexUsageHudUpdate === "function"' in guard
     assert 'typeof window.__codexUsageHudRemove === "function"' in guard
     assert "return;" in guard

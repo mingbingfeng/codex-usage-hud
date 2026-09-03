@@ -18,6 +18,7 @@ from .core.session_cleanup import (
     SessionCleanupItem,
     SessionCleanupManager,
 )
+from .core.session_search import DEFAULT_RANGE
 from .core.session_transfer import CodexAppServerClient
 from .core.deleted_usage import DeletedUsageLedger, DeletedUsageLedgerError
 from .platforms.codex_desktop_threads import CodexDesktopThreadLifecycle
@@ -326,6 +327,41 @@ class SessionCleanupWorker:
         revision = str(snapshot.get("revision") or "").strip()
         if not revision:
             return None
+
+        # The progressive warm job is the canonical owner of the resident
+        # search index in Renderer mode.  The legacy worker below used to
+        # submit the entire inventory after every scan, silently turning a
+        # one-month warm-up into a full-history index.  Delegate to the warm
+        # job instead; it applies the selected time range and keeps extension
+        # progress observable through sessionIndexStatus.
+        warm_job = getattr(self._context, "session_index_warm_job", None)
+        if (
+            not changed_paths
+            and warm_job is not None
+            and callable(getattr(warm_job, "status", None))
+        ):
+            try:
+                warm_status = warm_job.status()
+                selected_range = str(
+                    warm_status.get("selectedRange") or DEFAULT_RANGE
+                ).strip().casefold()
+                job_state = str(warm_status.get("jobState") or "idle").strip().casefold()
+                if prune_missing or job_state not in {"running", "attached"}:
+                    starter = getattr(warm_job, "start", None)
+                    if callable(starter):
+                        starter(selected_range or DEFAULT_RANGE)
+                if prune_missing:
+                    remove_missing = getattr(manager._search_index, "remove_missing", None)
+                    if callable(remove_missing):
+                        remove_missing(
+                            entry[0] for entry in manager.search_index_entries()
+                        )
+                return manager.snapshot()
+            except Exception:
+                # Fall back to the compatibility indexer if the optional warm
+                # job is unavailable or fails during startup.  Search remains
+                # functional, and the exception is retained for diagnostics.
+                _LOGGER.debug("session_index_warm_delegate_failed", exc_info=True)
         entries = manager.search_index_entries(changed_paths)
         if changed_paths and not entries:
             return None

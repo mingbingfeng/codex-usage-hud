@@ -12,6 +12,7 @@ from codex_usage_hud.runtime_commands import (
     handle_background_command,
     handle_active_session_command,
     handle_cleanup_command,
+    handle_session_index_command,
     handle_insights_command,
     dispatch_command,
 )
@@ -136,6 +137,21 @@ def test_command_errors_keep_request_correlation(
 
     assert status[field] == command["requestId"]
     assert status["kind"] == "error"
+
+
+def test_session_index_status_keeps_request_correlation() -> None:
+    job = SimpleNamespace(
+        attach=MagicMock(),
+        status=MagicMock(return_value={"jobState": "idle", "coverage": "range_done(1m)"}),
+    )
+
+    status = handle_session_index_command(
+        {"action": "sessionIndexStatus", "requestId": "index-status-1"},
+        RuntimeCommandPorts(session_index_job=job),
+    )
+
+    assert status["sessionIndex"]["requestId"] == "index-status-1"
+    job.attach.assert_called_once_with()
 
 
 def test_active_session_candidate_command_binds_exact_id() -> None:

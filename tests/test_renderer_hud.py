@@ -1503,14 +1503,14 @@ class RendererHudPayloadTests(unittest.TestCase):
             script,
         )
 
-    def test_session_search_commits_on_enter_or_focusout_without_interrupting_ime(self) -> None:
+    def test_session_search_commits_only_on_button_or_enter_without_interrupting_ime(self) -> None:
         script = renderer_hud.RENDERER_HUD_SCRIPT
 
         self.assertIn("const commitSessionCleanupSearch = (sessionSearch) => {", script)
         self.assertIn('rootScope.listen(root, "keydown", (event) => {', script)
         self.assertIn('event.key !== "Enter" || event.isComposing || event.keyCode === 229', script)
-        self.assertIn('rootScope.listen(root, "focusout", (event) => {', script)
-        self.assertIn("commitSessionCleanupSearch(sessionSearch);", script)
+        self.assertIn('data-action="session-cleanup-search-submit"', script)
+        self.assertIn("commitSessionCleanupSearch(input);", script)
         input_start = script.index('rootScope.listen(root, "input", (event) => {')
         input_end = script.index('rootScope.listen(document, "paste", (event) => {', input_start)
         input_script = script[input_start:input_end]
@@ -2392,6 +2392,26 @@ class RendererHudPayloadTests(unittest.TestCase):
 
         self.assertNotIn("supportImages", payload)
         self.assertNotIn("supportImages", payload["payloadDomains"]["settings"])
+
+    def test_session_index_progress_is_carried_by_the_settings_domain(self) -> None:
+        snapshot = ParsedSession(status="waiting")
+
+        payload = payload_from_snapshot(
+            snapshot,
+            session_index={
+                "coverage": "partial(1m)",
+                "jobState": "attached",
+                "builtCount": 4,
+                "totalCount": 10,
+                "selectedRange": "1m",
+            },
+        ).to_domain_json("settings", "sessionCleanup")
+
+        self.assertEqual(payload["sessionIndex"]["builtCount"], 4)
+        self.assertEqual(
+            payload["payloadDomains"]["settings"]["sessionIndex"]["jobState"],
+            "attached",
+        )
 
     def test_settings_domain_update_does_not_emit_empty_theme(self) -> None:
         snapshot = ParsedSession(status="waiting")

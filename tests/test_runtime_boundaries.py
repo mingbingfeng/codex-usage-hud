@@ -178,6 +178,15 @@ def test_runtime_signals_wakes_for_usage_cache_hydration() -> None:
     assert not signals.active_session_refresh.is_set()
 
 
+def test_runtime_signals_wakes_for_session_index_progress() -> None:
+    signals = runtime_policies.RendererRuntimeSignals()
+
+    signals.wake_for_runtime_event(SimpleNamespace(type="session_index_progress"))
+
+    assert signals.command_refresh.is_set()
+    assert not signals.active_session_refresh.is_set()
+
+
 def test_runtime_signals_active_session_wakes_both_channels() -> None:
     signals = runtime_policies.RendererRuntimeSignals()
 

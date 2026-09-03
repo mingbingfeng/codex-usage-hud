@@ -25,6 +25,7 @@ RUNTIME_REFRESH_EVENTS = frozenset(
         "usage_insights_changed",
         "usage_cache_hydrated",
         "session_cleanup_changed",
+        "session_index_progress",
     }
 )
 

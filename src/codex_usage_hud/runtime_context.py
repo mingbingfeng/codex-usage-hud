@@ -30,6 +30,7 @@ from .core.deleted_usage import DeletedUsageLedger
 from .core.rest_reminder import RestReminderPresenter
 from .core.runtime_errors import RuntimeErrorRegistry
 from .core.runtime_events import RuntimeEventBus
+from .core.session_search import DEFAULT_RANGE
 from .platforms import ActiveSessionTracker, SessionPathResolver, get_current_platform
 from .platforms.base import BasePlatform
 from .provider_registry import ProviderRegistry, discover_provider_registry
@@ -102,6 +103,7 @@ class RuntimeContext:
     session_cleanup_manager: object | None = None
     session_cleanup_worker: object | None = None
     session_index_warm_job: object | None = None
+    session_index_payload: dict[str, object] = field(default_factory=dict)
     session_cleanup_payload: dict[str, object] = field(default_factory=dict)
     session_cleanup_delta: dict[str, object] = field(default_factory=dict)
     session_management_current_session_id: str = ""
@@ -221,14 +223,36 @@ def _initialize_runtime_context_resources(context: RuntimeContext) -> None:
         )
     if _session_index_warm_job_available(context.session_cleanup_manager):
         context.session_index_warm_job = _build_session_index_warm_job(context)
-        try:
-            context.session_index_warm_job.start(
-                _session_index_default_range(context)
-            )
-        except Exception as exc:
-            _LOGGER.exception(
-                "session_index_warm_start_failed error=%s", exc
-            )
+        context.session_index_payload = dict(
+            context.session_index_warm_job.status()
+        )
+        # The warm job needs the manager's candidate inventory.  Build that
+        # inventory in the background at startup so first-use indexing does
+        # not wait for the user to open session management and click Scan.
+        import threading
+
+        def _prime_session_index() -> None:
+            try:
+                snapshot = context.session_cleanup_manager.scan()
+                publisher = getattr(context.session_cleanup_worker, "_publish", None)
+                if callable(publisher):
+                    publisher(snapshot)
+                else:
+                    context.session_cleanup_payload = snapshot
+                watcher_start = getattr(context.session_cleanup_worker, "_start_search_watcher", None)
+                if callable(watcher_start):
+                    watcher_start()
+                context.session_index_warm_job.start(
+                    _session_index_default_range(context)
+                )
+            except Exception as exc:
+                _LOGGER.exception("session_index_warm_start_failed error=%s", exc)
+
+        threading.Thread(
+            target=_prime_session_index,
+            name="codex-usage-hud-session-index-prime",
+            daemon=True,
+        ).start()
 
 
 def _session_index_warm_job_available(manager: object) -> bool:
@@ -243,7 +267,7 @@ def _session_index_default_range(context: RuntimeContext) -> str:
     config = getattr(context, "user_config", None)
     raw = getattr(config, "session_search_range", "") if config is not None else ""
     candidate = str(raw or "").strip().casefold()
-    return candidate if candidate else "1m"
+    return candidate if candidate in {"1m", "3m", "6m", "1y", "all"} else "1m"
 
 
 def _build_session_index_warm_job(context: RuntimeContext) -> object:
@@ -253,11 +277,54 @@ def _build_session_index_warm_job(context: RuntimeContext) -> object:
     state_path = (
         hud_runtime_dir() / "session-index-warm.json"
     )
-    return SessionIndexWarmJob(
+    job: SessionIndexWarmJob
+
+    def publish_progress(snapshot: object) -> None:
+        payload = _session_index_snapshot_payload(snapshot)
+        context.session_index_payload = payload
+        current_job = getattr(context, "session_index_warm_job", None)
+        attached = bool(
+            callable(getattr(current_job, "is_attached", None))
+            and current_job.is_attached()
+        )
+        if not attached:
+            return
+        event_bus = getattr(context, "runtime_events", None)
+        publish = getattr(event_bus, "publish", None)
+        if callable(publish):
+            publish(
+                "session_index_progress",
+                source="session_index_warm_job",
+                context=payload,
+            )
+
+    job = SessionIndexWarmJob(
         manager,
         state_path=state_path,
-        progress_callback=None,
+        progress_callback=publish_progress,
     )
+    return job
+
+
+def _session_index_snapshot_payload(snapshot: object) -> dict[str, object]:
+    """Convert a warm-job snapshot to the renderer-safe progress shape."""
+    return {
+        "coverage": str(getattr(snapshot, "coverage", "empty") or "empty"),
+        "coverageBoundary": float(
+            getattr(snapshot, "coverage_boundary", 0.0) or 0.0
+        ),
+        "jobState": str(getattr(snapshot, "job_state", "idle") or "idle"),
+        "builtCount": max(0, int(getattr(snapshot, "built_count", 0) or 0)),
+        "totalCount": max(0, int(getattr(snapshot, "total_count", 0) or 0)),
+        "estimatedRemainingSec": float(
+            getattr(snapshot, "estimated_remaining_sec", 0.0) or 0.0
+        ),
+        "selectedRange": str(
+            getattr(snapshot, "selected_range", DEFAULT_RANGE) or DEFAULT_RANGE
+        ),
+        "canExtend": bool(getattr(snapshot, "can_extend", False)),
+        "error": str(getattr(snapshot, "error", "") or ""),
+    }
 
 
 def _suspend_native_active_title(context: "RuntimeContext") -> None:

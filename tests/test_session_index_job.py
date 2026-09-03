@@ -11,7 +11,6 @@ import json
 import os
 from pathlib import Path
 import sys
-import tempfile
 import time
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -475,11 +474,30 @@ def test_progress_publish_throttled_to_four_hz(tmp_path: Path) -> None:
         timestamps[i + 1] - timestamps[i]
         for i in range(len(timestamps) - 1)
     ]
-    assert all(gap >= 0.20 for gap in gaps)
+    # Terminal idle/error transitions are deliberately delivered immediately
+    # so a fast job cannot leave the attached UI stuck in "indexing". Only
+    # non-terminal progress notifications are subject to the 4 Hz throttle.
+    assert all(gap >= 0.20 for gap in gaps[:-1])
     counts = [snapshot.built_count for _stamp, snapshot in events]
     assert counts == sorted(counts)
     assert final_status["jobState"] == "idle"
     assert final_status["coverage"] == "range_done(1m)"
+
+
+def test_attached_progress_callback_exposes_attachment_state(tmp_path: Path) -> None:
+    entries = _make_entries(tmp_path, {"a": 1})
+    index = _FakeSearchIndex(entries)
+    state_path = tmp_path / "warm.json"
+    WarmJobState(job_state="running").dump(state_path)
+    job = SessionIndexWarmJob(index, state_path=state_path)
+    try:
+        assert job.is_attached() is False
+        assert job.attach() is True
+        assert job.is_attached() is True
+        assert job.cancel_ui() is True
+        assert job.is_attached() is False
+    finally:
+        job.close()
 
 
 def test_job_fails_cleanly_when_surface_is_missing(tmp_path: Path) -> None:

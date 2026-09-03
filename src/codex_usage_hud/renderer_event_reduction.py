@@ -121,6 +121,8 @@ def reduce_event(
         plan.request_domains("settings", "usageInsights", force_fast=True)
     elif event_type == "session_cleanup_changed":
         plan.request_domains("settings", "sessionCleanup", force_fast=True)
+    elif event_type == "session_index_progress":
+        plan.request_domains("settings", "sessionCleanup", force_fast=True)
     elif event_type == "background_usage_changed":
         plan.request_background_usage()
         plan.request_domains("backgroundUsage", "usageInsights", force_fast=True)

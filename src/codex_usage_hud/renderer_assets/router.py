@@ -24,7 +24,10 @@ TEXT = r"""
   function ensureRoot() {
     ensureStyle();
     let root = document.getElementById(rootId);
-    if (root?.dataset.version === version) {
+    if (
+      root?.dataset.version === version
+      && root?.dataset.bundleFingerprint === bundleFingerprint
+    ) {
       // A renderer script can be reinjected while the page is still alive.
       // The previous runtime has already disposed its delegated listeners, so
       // keep the existing DOM (including settings dialogs and their drafts)
@@ -40,6 +43,7 @@ TEXT = r"""
     root = document.createElement("div");
     root.id = rootId;
     root.dataset.version = version;
+    root.dataset.bundleFingerprint = bundleFingerprint;
     root.dataset.hudReady = "false";
     root.innerHTML = `
       <div class="codex-usage-hud-startup-bubble" data-field="startupBubble" role="status" aria-live="polite" hidden>
@@ -230,6 +234,8 @@ TEXT = r"""
         && sessionCleanupState.searchResultQuery === search
       ) return false;
       sessionCleanupState.search = search;
+      sessionCleanupState.searchDraft = search;
+      sessionCleanupState.indexPanelHidden = false;
       sessionCleanupState.page = 0;
       sessionCleanupState.selectedIds.clear();
       persistSessionCleanupFilters();
@@ -261,12 +267,16 @@ TEXT = r"""
       event.preventDefault();
       commitSessionTransferSearch(sessionTransferSearch);
     });
-    rootScope.listen(root, "focusout", (event) => {
-      const sessionSearch = event.target?.closest?.('[data-session-cleanup-search="true"]');
-      if (sessionSearch && root.contains(sessionSearch)) {
-        commitSessionCleanupSearch(sessionSearch);
+    rootScope.listen(root, "click", (event) => {
+      const action = event.target?.closest?.('[data-action="session-cleanup-search-submit"]');
+      if (action && root.contains(action)) {
+        event.preventDefault();
+        const input = action.closest(".codex-usage-hud-session-search")?.querySelector?.('[data-session-cleanup-search="true"]');
+        commitSessionCleanupSearch(input);
         return;
       }
+    });
+    rootScope.listen(root, "focusout", (event) => {
       const sessionTransferSearch = event.target?.closest?.('[data-session-transfer-search="true"]');
       if (!sessionTransferSearch || root.contains(sessionTransferSearch) === false) return;
       commitSessionTransferSearch(sessionTransferSearch);
@@ -303,13 +313,18 @@ TEXT = r"""
       }
       const sessionSearch = event.target?.closest?.('[data-session-cleanup-search="true"]');
       if (sessionSearch && root.contains(sessionSearch)) {
+        const search = String(sessionSearch.value || "");
+        sessionCleanupState.searchDraft = search;
         // IME composition emits input events before the final text is committed.
         // Keep the input stable while composing; the final input event schedules
         // an asynchronous indexed query without replacing the DOM node.
         if (event.isComposing || sessionSearch.isComposing) return;
-        const search = String(sessionSearch.value || "");
+        // Keep an unsubmitted draft separate from the active query. Storage
+        // progress updates rebuild the panel; rendering from this draft keeps
+        // the user's text and caret intact while they are still typing.
         if (search === sessionCleanupState.search) return;
         sessionCleanupState.search = search;
+        sessionCleanupState.indexPanelHidden = false;
         sessionCleanupState.page = 0;
         sessionCleanupState.selectedIds.clear();
         persistSessionCleanupFilters();
@@ -333,6 +348,10 @@ TEXT = r"""
       if (priceRow && root.contains(priceRow)) markSettingsProviderDirty();
     });
     rootScope.listen(root, "focusout", (event) => {
+      const sessionSearch = event.target?.closest?.('[data-session-cleanup-search="true"]');
+      // Search commits only on the dedicated button or Enter; leaving the field
+      // must not issue an unexpected query.
+      if (sessionSearch && root.contains(sessionSearch)) return;
       const settingControl = event.target?.closest?.('[data-setting-key]');
       if (!settingControl || !root.contains(settingControl)) return;
       if (settingControl.closest?.('.codex-usage-hud-rest-reminder-card')) return;
@@ -865,6 +884,8 @@ TEXT = r"""
         event.preventDefault();
         event.stopPropagation();
         sessionCleanupState.search = "";
+        sessionCleanupState.searchDraft = "";
+        sessionCleanupState.indexPanelHidden = false;
         sessionCleanupState.workdirId = "";
         sessionCleanupState.page = 0;
         sessionCleanupState.searchRequestId = "";
@@ -884,6 +905,7 @@ TEXT = r"""
         sessionCleanupState.availability = "all";
         sessionCleanupState.clientKind = "all";
         sessionCleanupState.modelProvider = "all";
+        sessionCleanupState.sort = "recent";
         sessionCleanupState.selectedIds.clear();
         persistSessionCleanupFilters();
         renderSettingsModal("storage");
@@ -1010,6 +1032,28 @@ TEXT = r"""
         requestSessionCleanupScan();
         return;
       }
+      if (action.dataset.action === "session-index-toggle") {
+        event.preventDefault();
+        event.stopPropagation();
+        settingsShellDomain.refreshSessionIndexIfStale?.();
+        const index = sessionIndexDomainState();
+        const coverage = String(index?.coverage || "");
+        const searchHasNoRows = Boolean(
+          String(sessionCleanupState.search || "").trim()
+          && !sessionCleanupRows().length
+          && coverage !== "full"
+        );
+        if (searchHasNoRows) {
+          sessionCleanupState.indexPanelHidden = !sessionCleanupState.indexPanelHidden;
+        } else {
+          sessionCleanupState.indexPanelOpen = !sessionCleanupState.indexPanelOpen;
+          sessionCleanupState.indexPanelHidden = false;
+        }
+        // Collapsing the details leaves the single warm job running while its
+        // compact progress stays visible in this button.
+        refreshStoragePanelIfVisible();
+        return;
+      }
       if (action.dataset.action === "session-cleanup-preview") {
         event.preventDefault();
         event.stopPropagation();
@@ -1040,20 +1084,19 @@ TEXT = r"""
         return;
       }
       function submitSessionIndexAction(action, event) {
-        // Warm-index coverage banner controls (PRD §7.2). The banner offers
-        // pause / resume / background(detach UI, keep building) / extend; each
-        // maps 1:1 to a ``sessionIndexControl`` command. ``cancel_ui`` is the
-        // "background run" semantic: it only detaches the UI subscription and
-        // never stops the worker.
+        // Warm-index coverage controls (PRD §7.2). The visible actions are
+        // start / continue / extend. Collapsing the status block is the
+        // background-run action and is handled by the toggle above.
         const kind = String(action?.dataset?.action || "").slice("session-index-".length);
         const controlByKind = {
-          pause: "pause",
+          start: "start",
           resume: "resume",
-          background: "cancel_ui",
           extend: "extend",
         };
         const control = controlByKind[kind];
         if (!control) return;
+        const wasAttached = sessionCleanupState.sessionIndexUiAttached === true;
+        sessionCleanupState.sessionIndexUiAttached = true;
         const requestId = typedSettingsRequestId("session-index");
         const command = {
           action: "sessionIndexControl",
@@ -1061,13 +1104,10 @@ TEXT = r"""
           control,
         };
         if (control === "extend") {
-          // The extend entry lives in two containers: the coverage banner
-          // (``...-session-index-coverage``) and the empty-result coverage
-          // hint (``...-session-coverage-hint``); match both or the hint's
-          // extend button silently falls back to the current range.
-          const coverage = action.closest(
-            ".codex-usage-hud-session-index-coverage, .codex-usage-hud-session-coverage-hint",
-          );
+          // Both the optional status panel and the empty-result hint own a
+          // range select. Read the nearest one so the chosen range is kept.
+          const coverage = action.closest(".codex-usage-hud-session-coverage-hint")
+            || action.closest(".codex-usage-hud-session-index-coverage");
           const select = coverage?.querySelector?.(
             'select[data-session-index-extend="true"]',
           );
@@ -1078,14 +1118,30 @@ TEXT = r"""
           ).trim().toLowerCase();
           if (!range) return;
           command.range = range;
+        } else if (control === "start") {
+          command.range = String(
+            sessionCleanupState?.sessionIndex?.selectedRange || "1m",
+          ).trim().toLowerCase();
         }
         const pendingLabel = {
-          pause: "正在暂停搜索索引建立...",
+          start: "正在建立搜索索引...",
           resume: "正在继续建立搜索索引...",
-          background: "已转入后台，索引将继续建立。",
           extend: "正在扩展索引范围...",
         }[kind] || "正在更新搜索索引...";
-        submitSettingsCommand(command, pendingLabel, { preserveOverlay: true });
+        sessionCleanupState.sessionIndexControlRequestId = requestId;
+        const submitted = submitSettingsCommand(command, pendingLabel, { preserveOverlay: true });
+        if (submitted) {
+          refreshStoragePanelIfVisible();
+          ctx.lifecycle.timeout("session_index_control_watchdog", () => {
+            if (sessionCleanupState.sessionIndexControlRequestId !== requestId) return;
+            sessionCleanupState.sessionIndexControlRequestId = "";
+            refreshStoragePanelIfVisible();
+            setSettingsStatus("索引控制命令未收到响应，请重试。", "error");
+          }, 15000);
+        } else {
+          sessionCleanupState.sessionIndexControlRequestId = "";
+          sessionCleanupState.sessionIndexUiAttached = wasAttached;
+        }
       }
       if (action.dataset.action === "settings-provider-tab") {
         event.preventDefault();

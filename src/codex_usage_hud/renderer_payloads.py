@@ -43,6 +43,7 @@ class RendererHudPayload:
     settings_bridge_url: str = ""
     background_usage_bridge_url: str = ""
     session_index_url: str = ""
+    session_index: dict[str, object] = field(default_factory=dict)
     background_usage_revision: int = 0
     background_usage_notification: dict[str, object] = field(default_factory=dict)
     rest_reminder: dict[str, object] = field(default_factory=dict)
@@ -104,6 +105,7 @@ class RendererHudPayload:
             "settingsBridgeUrl": self.settings_bridge_url,
             "backgroundUsageBridgeUrl": self.background_usage_bridge_url,
             "sessionIndexUrl": self.session_index_url,
+            "sessionIndex": dict(self.session_index),
             "backgroundUsageRevision": int(self.background_usage_revision),
             "backgroundUsageNotification": dict(self.background_usage_notification),
             "restReminder": dict(self.rest_reminder),
@@ -186,7 +188,7 @@ def payload_domains(payload: dict[str, object]) -> dict[str, dict[str, object]]:
     )
     settings_keys = (
         "settings", "activeDisplayMode", "settingsPath", "settingsBridgeUrl",
-        "settingsCommandStatus", "restReminder", "supportImages", "theme",
+        "settingsCommandStatus", "sessionIndex", "restReminder", "supportImages", "theme",
         "updateState", "appVersion", "activeSessionProvider",
     )
 

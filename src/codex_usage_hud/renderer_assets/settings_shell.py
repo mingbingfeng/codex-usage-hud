@@ -3196,8 +3196,9 @@ _TEXT_PREFIX = r"""
         const hasPayloadSnapshot = payloadSnapshot
           && typeof payloadSnapshot === "object"
           && Object.keys(payloadSnapshot).length > 0;
-        if (hasSnapshot || hasPayloadSnapshot) return;
+        if (sessionCleanupState?.sessionIndexUiAttached === true && (hasSnapshot || hasPayloadSnapshot)) return;
         if (sessionCleanupState?.sessionIndexRefreshing) return;
+        sessionCleanupState.sessionIndexUiAttached = true;
         sessionCleanupState.sessionIndexRefreshing = true;
         const requestId = typedSettingsRequestId("session-index-status");
         const submitted = submitSettingsCommand(
@@ -3205,60 +3206,27 @@ _TEXT_PREFIX = r"""
           "正在读取搜索索引状态...",
           { preserveOverlay: true, quiet: true },
         );
-        if (!submitted) sessionCleanupState.sessionIndexRefreshing = false;
+        if (!submitted) {
+          sessionCleanupState.sessionIndexRefreshing = false;
+          sessionCleanupState.sessionIndexUiAttached = false;
+        }
         ctx.lifecycle.timeout("session_index_status_watchdog", () => {
           sessionCleanupState.sessionIndexRefreshing = false;
+          if (sessionCleanupState.sessionIndexUiAttached === true && !hasSnapshot && !hasPayloadSnapshot) {
+            sessionCleanupState.sessionIndexUiAttached = false;
+          }
         }, 6000);
       }
 
-      function startSessionIndexProgressPolling() {
-        // PRD §6.1/§9.3: while the storage tab is open and the warm job is
-        // building, refresh the coverage banner/progress at 1 Hz (≤4 Hz). The
-        // response updates sessionCleanupState.sessionIndex (which clears the
-        // refreshing lock), then the next tick fires; when the tab closes or
-        // the job reaches a terminal state the chain stops scheduling itself.
-        ctx.lifecycle.timeout(
-          "session_index_progress",
-          sessionIndexProgressTick,
-          1000,
-        );
-      }
-
-      function sessionIndexProgressTick() {
-        const modal = document.getElementById(settingsModalId);
-        if (!modal || modal.hidden || settingsActiveTab !== "storage") {
-          sessionCleanupState.sessionIndexRefreshing = false;
-          return;
-        }
-        const index = sessionCleanupState?.sessionIndex;
-        const jobState = String(index?.jobState || "");
-        if (!new Set(["running", "attached", "paused"]).has(jobState)) {
-          sessionCleanupState.sessionIndexRefreshing = false;
-          return;
-        }
-        if (!sessionCleanupState?.sessionIndexRefreshing) {
-          sessionCleanupState.sessionIndexRefreshing = true;
-          const requestId = typedSettingsRequestId("session-index-progress");
-          const submitted = submitSettingsCommand(
-            { action: "sessionIndexStatus", requestId },
-            "正在刷新搜索索引进度...",
-            { preserveOverlay: true, quiet: true },
-          );
-          if (!submitted) sessionCleanupState.sessionIndexRefreshing = false;
-          // Self-healing watchdog: if the daemon never answers, drop the lock
-          // so the next tick can retry instead of freezing the banner.
-          ctx.lifecycle.timeout(
-            "session_index_progress_watchdog",
-            () => {
-              sessionCleanupState.sessionIndexRefreshing = false;
-            },
-            6000,
-          );
-        }
-        ctx.lifecycle.timeout(
-          "session_index_progress",
-          sessionIndexProgressTick,
-          1000,
+      function detachSessionIndexUi() {
+        if (sessionCleanupState?.sessionIndexUiAttached !== true) return false;
+        sessionCleanupState.sessionIndexUiAttached = false;
+        sessionCleanupState.sessionIndexRefreshing = false;
+        const requestId = typedSettingsRequestId("session-index-detach");
+        return submitSettingsCommand(
+          { action: "sessionIndexControl", requestId, control: "cancel_ui" },
+          "",
+          { preserveOverlay: true, quiet: true },
         );
       }
 
@@ -3267,6 +3235,9 @@ _TEXT_PREFIX = r"""
         const modal = document.getElementById(settingsModalId);
         if (!root || !modal) return;
         const activeTab = ["storage", "backgroundUsage", "support", "about"].includes(tab) ? tab : "settings";
+        if (settingsActiveTab === "storage" && activeTab !== "storage") {
+          detachSessionIndexUi();
+        }
         const preserveSecondaryLayers = !modal.hidden
           && settingsActiveTab === activeTab
           && !resetProviderDraft;
@@ -3347,7 +3318,6 @@ _TEXT_PREFIX = r"""
           restoreSessionCleanupConfirm(sessionCleanupConfirmToken);
           requestSessionCleanupWorkdirOptions({ force: true });
           refreshSessionIndexIfStale();
-          startSessionIndexProgressPolling();
           if (
             String(sessionCleanupState.search || "").trim()
             && !sessionCleanupState.searchRequestId
@@ -4650,6 +4620,33 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
 
       function applySettingsCommandStatus(payload) {
         const status = payload?.settingsCommandStatus;
+        const sessionIndex = status?.sessionIndex || payload?.sessionIndex;
+        if (sessionIndex && typeof sessionIndex === "object") {
+          // Terminal range_done/idle snapshots must replace the optimistic
+          // progress state immediately, including when the modal is open.
+          sessionCleanupState.sessionIndex = { ...sessionIndex };
+          sessionCleanupState.sessionIndexRefreshing = false;
+          const responseRequestId = String(sessionIndex.requestId || status?.requestId || "");
+          const controlRequestId = String(sessionCleanupState.sessionIndexControlRequestId || "");
+          const isControlResponse = Object.prototype.hasOwnProperty.call(sessionIndex, "accepted");
+          if (controlRequestId && isControlResponse && (!responseRequestId || responseRequestId === controlRequestId)) {
+            sessionCleanupState.sessionIndexControlRequestId = "";
+          }
+          if (settingsActiveTab === "storage") {
+            refreshStoragePanelIfVisible();
+            const modal = document.getElementById(settingsModalId);
+            if (
+              String(responseRequestId).startsWith("session-index-status-")
+              && modal
+              && !modal.hidden
+              && settingsActiveTab === "storage"
+            ) {
+              sessionCleanupState.sessionIndexUiAttached = new Set(["running", "attached", "paused"]).has(
+                String(sessionIndex.jobState || ""),
+              );
+            }
+          }
+        }
         const workdirOptionsResponse = status?.sessionCleanupWorkdirOptions;
         if (workdirOptionsResponse && typeof workdirOptionsResponse === "object") {
           const responseRequestId = String(workdirOptionsResponse.requestId || "");
@@ -6023,6 +6020,8 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
         stopSessionCleanupElapsedTicker();
         stopSessionCleanupSearchTimer();
         sessionCleanupState.sessionIndexRefreshing = false;
+        detachSessionIndexUi();
+        sessionCleanupState.sessionIndexControlRequestId = "";
         resetSessionCleanupPendingRequests();
         settingsProviderDraft = null;
         settingsDirtyProviders.clear();
@@ -6813,6 +6812,7 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
       setSettingsLoadingText,
       syncSettingsUpdateLoading,
       applySettingsCommandStatus,
+      refreshSessionIndexIfStale,
       openSessionTransferDialog,
       renderSessionTransferDialog,
       closeSessionTransferDialog,

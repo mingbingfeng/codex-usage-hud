@@ -100,7 +100,7 @@ const sessionCleanupState = {{
   availability: "all",
   clientKind: "all",
   modelProvider: "all",
-  sort: "recommended",
+  sort: "recent",
   page: 0,
 }};
 const currentPayload = () => ({{}});
@@ -128,13 +128,13 @@ sessionCleanupState.data = {{
 }};
 assert.equal(domain.sessionCleanupPageCount(65), 3);
 assert.equal(domain.sessionCleanupPageRows().length, 30);
-assert.equal(domain.sessionCleanupPageRows()[0].id, "session-1");
+assert.equal(domain.sessionCleanupPageRows()[0].id, "session-65");
 sessionCleanupState.page = 1;
 assert.equal(domain.sessionCleanupPageRows().length, 30);
-assert.equal(domain.sessionCleanupPageRows()[0].id, "session-31");
+assert.equal(domain.sessionCleanupPageRows()[0].id, "session-35");
 sessionCleanupState.page = 2;
 assert.equal(domain.sessionCleanupPageRows().length, 5);
-assert.equal(domain.sessionCleanupPageRows()[0].id, "session-61");
+assert.equal(domain.sessionCleanupPageRows()[0].id, "session-5");
 assert.equal(domain.moveSessionCleanupPage(-1), true);
 assert.equal(sessionCleanupState.page, 1);
 sessionCleanupState.page = 99;
@@ -152,6 +152,15 @@ console.log("session-cleanup-pagination-ok");
     )
     assert completed.returncode == 0, completed.stderr or completed.stdout
     assert "session-cleanup-pagination-ok" in completed.stdout
+
+
+def test_session_index_reuses_the_empty_result_coverage_hint() -> None:
+    """Index expansion has one inline entry point, not a duplicate dialog."""
+    assert 'data-action="session-index-dialog"' not in SESSION_CLEANUP
+    assert "openSessionIndexDialog" not in SESSION_CLEANUP
+    assert 'data-action="session-index-dialog"' not in manifest.ROUTER
+    assert "sessionIndexControlRequestId" in manifest.RENDERER_HUD_SCRIPT_TEMPLATE
+    assert 'data-action="session-index-extend"' in SESSION_CLEANUP
 
 
 def test_active_session_sequence_uses_canonical_identity_for_live_updates() -> None:

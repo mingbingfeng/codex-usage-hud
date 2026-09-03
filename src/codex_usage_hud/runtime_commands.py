@@ -780,6 +780,7 @@ def handle_session_index_command(
         status = _status("")
         _session_index_attach(job)
         payload = job.status() if callable(getattr(job, "status", None)) else {}
+        payload["requestId"] = request_id
         status["sessionIndex"] = payload
         return status
     control_action = str(command.get("control") or "").strip().casefold()
@@ -1868,7 +1869,17 @@ def _handle_renderer_settings_command(
         codex_cli_discover=discover_cli,
         codex_cli_launch=launch_cli,
     )
-    return dispatch_command(command, command_ports, general_ports)
+    result = dispatch_command(command, command_ports, general_ports)
+    session_index = result.get("sessionIndex") if isinstance(result, Mapping) else None
+    if isinstance(session_index, Mapping):
+        try:
+            remembered = dict(session_index)
+            remembered.pop("accepted", None)
+            remembered.pop("requestId", None)
+            context.session_index_payload = remembered
+        except (AttributeError, TypeError):
+            pass
+    return result
 
 __all__ = [
     "RuntimeCommandPorts",

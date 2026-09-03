@@ -6,8 +6,8 @@
   },
   "currentBundle": {
     "phase": "P6.7",
-    "sha256": "0e9edfce8335f4dc86c443c4c98f15935844c9db5a3e27a544c132f3a526e22d",
-    "byteLength": 1172012
+    "sha256": "54317e96e18c87e31cceedd4c4aa77c19c30e0b872ae43e4617076d587cf1b63",
+    "byteLength": 1180345
   },
   "sha256": "f83d65265c55143fa775f509f09ce109c2aa75a03946b42cf462cb6cbd4ea637",
   "byteLength": 548705,
@@ -42,7 +42,7 @@
     "mutationObservers": 8,
     "resizeObservers": 1,
     "setIntervals": 5,
-    "setTimeouts": 39,
+    "setTimeouts": 37,
     "kernelSetIntervals": 1,
     "kernelSetTimeouts": 1
   },
@@ -138,12 +138,12 @@
     "activity_round_expand_settle", "conversation_locate_pulse", "session_cleanup_scan_watchdog",
     "storage", "background_usage_policy", "background_usage_request", "background_usage_fetch",
     "codex_cli_launch_timeout", "codex_cli_launch_min_visible", "session_index_status_watchdog",
-    "session_index_progress", "session_index_progress_watchdog", "session_index_progress",
     "settings_restart", "layout_settle", "layout_settle", "layout_settle", "composer_layout",
     "layout_bootstrap", "layout_bootstrap", "composer_attachments", "layout_report",
     "active_session", "active_session", "active_session", "active_session",
     "active_session_bootstrap", "session_cleanup_search", "session_transfer_selection",
-    "session_transfer_select_all", "session_transfer_selection", "stale_guard"
+    "session_transfer_select_all", "session_transfer_selection", "session_index_control_watchdog",
+    "stale_guard"
   ],
   "timeoutInventory": [
     {"owner": "model_picker", "creation": "ctx.lifecycle.timeout(\"model_picker\", patchCodexModelPicker, delay)", "cleanup": "ctx.lifecycle.clearTimeout(timer)"},

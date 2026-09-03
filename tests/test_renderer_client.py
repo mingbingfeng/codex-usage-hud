@@ -79,6 +79,35 @@ def test_client_uses_its_payload_and_support_owners(monkeypatch) -> None:
     assert captured["settings_path"] is None
 
 
+def test_client_passes_session_index_to_payload_builder(monkeypatch) -> None:
+    client = renderer_client.RendererHudClient(enabled=True)
+    client._theme_snapshot = object()  # noqa: SLF001
+    client.update_payload = lambda _payload: True  # type: ignore[method-assign]
+    captured: dict[str, object] = {}
+
+    class FakePayload:
+        def to_json(self) -> dict[str, object]:
+            return {"requestLine": "owner"}
+
+    def fake_builder(snapshot: ParsedSession, **kwargs: object) -> FakePayload:
+        del snapshot
+        captured.update(kwargs)
+        return FakePayload()
+
+    monkeypatch.setattr(renderer_client, "support_qr_payload", lambda: [])
+    monkeypatch.setattr(renderer_client, "_renderer_theme_payload", lambda _: {})
+    monkeypatch.setattr(renderer_client, "payload_from_snapshot", fake_builder)
+
+    assert client.update(
+        ParsedSession(status="waiting"),
+        session_index={"jobState": "attached", "builtCount": 2},
+    )
+    assert captured["session_index"] == {
+        "jobState": "attached",
+        "builtCount": 2,
+    }
+
+
 def test_client_quiesce_blocks_all_cdp_entrypoints_and_resume_reenables() -> None:
     from types import SimpleNamespace
     from unittest.mock import MagicMock

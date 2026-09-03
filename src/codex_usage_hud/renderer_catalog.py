@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -11,6 +12,7 @@ from .ui.renderer_script import _RENDERER_HUD_SCRIPT_TEMPLATE
 
 
 MODEL_CATALOG_JSON_ENV = "CODEX_USAGE_HUD_MODEL_CATALOG_JSON"
+_BUNDLE_FINGERPRINT_PLACEHOLDER = "__CODEX_USAGE_HUD_BUNDLE_FINGERPRINT__"
 
 
 def configured_model_catalog_path() -> Path | None:
@@ -157,7 +159,17 @@ def renderer_hud_script_with_model_catalog(
     catalog: list[dict[str, object]] | None = None,
 ) -> str:
     payload = model_catalog_payload() if catalog is None else catalog
-    return _RENDERER_HUD_SCRIPT_TEMPLATE.replace(
+    fingerprint = hashlib.sha256(
+        _RENDERER_HUD_SCRIPT_TEMPLATE.replace(
+            _BUNDLE_FINGERPRINT_PLACEHOLDER,
+            "",
+        ).encode("utf-8")
+    ).hexdigest()[:16]
+    template = _RENDERER_HUD_SCRIPT_TEMPLATE.replace(
+        _BUNDLE_FINGERPRINT_PLACEHOLDER,
+        fingerprint,
+    )
+    return template.replace(
         "__CODEX_MODEL_PICKER_CATALOG__",
         json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
     )

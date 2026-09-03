@@ -26,7 +26,6 @@ import os
 from pathlib import Path
 import threading
 import time
-from typing import Any
 
 from .session_search import (
     DEFAULT_RANGE,
@@ -238,6 +237,7 @@ class SessionIndexWarmJob:
         self._closed = False
         self._last_progress_emitted = 0.0
         self._run_range_key: str | None = None
+        self._range_reconciled = False
 
     # ------------------------------------------------------------------
     # status surface
@@ -250,6 +250,11 @@ class SessionIndexWarmJob:
     def snapshot(self) -> WarmJobSnapshot:
         with self._lock:
             return self._snapshot_locked()
+
+    def is_attached(self) -> bool:
+        """Return whether a renderer UI is subscribed to progress events."""
+        with self._lock:
+            return self._attached
 
     def _snapshot_dict_locked(self) -> dict[str, object]:
         snapshot = self._snapshot_locked()
@@ -373,6 +378,27 @@ class SessionIndexWarmJob:
             self._attached = False
             self._spawn_worker()
             return True
+
+    def _trim_index_to_range(self, range_key: str) -> None:
+        """Reconcile documents left by pre-progressive full indexing."""
+        entries_fn = self._capability("search_index_entries")
+        remove_fn = self._capability("remove_missing")
+        if not callable(entries_fn) or not callable(remove_fn):
+            return
+        try:
+            entries = list(entries_fn())
+            keep = {
+                str(entry[0] or "").strip()
+                for entry in range_candidates(
+                    entries, range_key, covered_ids=frozenset()
+                )
+                if str(entry[0] or "").strip()
+            }
+            remove_fn(keep)
+        except Exception:
+            # Scope reconciliation is a migration aid. Never block the warm
+            # worker if an older index cannot be opened or rewritten.
+            return
 
     def extend(self, range_key: str) -> bool:
         """Extend the coverage window; only appends older sessions (D3)."""
@@ -504,12 +530,21 @@ class SessionIndexWarmJob:
     def _publish_locked(self) -> None:
         if not callable(self._progress_callback) or self._closed:
             return
+        snapshot = self._snapshot_locked()
         now = self._clock()
-        if now - self._last_progress_emitted < 1.0 / PROGRESS_MAX_HZ:
+        # Never throttle terminal state transitions. A very small corpus can
+        # finish inside one throttle window; suppressing its final idle/error
+        # event would leave an attached Renderer showing stale "indexing" UI
+        # until the next explicit status request.
+        terminal = snapshot.job_state not in {"running", "attached"}
+        if (
+            not terminal
+            and now - self._last_progress_emitted < 1.0 / PROGRESS_MAX_HZ
+        ):
             return
         self._last_progress_emitted = now
         try:
-            self._progress_callback(self._snapshot_locked())
+            self._progress_callback(snapshot)
         except Exception:
             pass
 
@@ -581,24 +616,38 @@ class SessionIndexWarmJob:
                 self._finish_range(self._state.selected_range)
             return
 
-        covered_fn = self._capability("indexed_session_ids")
-        covered_ids = frozenset(covered_fn()) if callable(covered_fn) else frozenset()
         with self._lock:
             range_key = self._state.selected_range
+        if not self._range_reconciled:
+            self._trim_index_to_range(range_key)
+            self._range_reconciled = True
+        covered_fn = self._capability("indexed_session_ids")
+        covered_ids = frozenset(covered_fn()) if callable(covered_fn) else frozenset()
         pass_range = range_key
+        target_bucket = range_candidates(
+            list(candidates),
+            range_key,
+            covered_ids=frozenset(),
+        )
         bucket = range_candidates(
             list(candidates),
             range_key,
             covered_ids=covered_ids,
         )
+        target_total = len(target_bucket)
+        covered_target = max(0, target_total - len(bucket))
         if not bucket:
-            self._finish_range(pass_range)
+            self._finish_range(
+                pass_range,
+                target_total=target_total,
+                target_built=covered_target,
+            )
             return
         total = len(bucket)
 
         with self._lock:
-            self._state.total_count = total
-            self._state.built_count = 0
+            self._state.total_count = target_total
+            self._state.built_count = covered_target
             self._state.started_at = self._clock()
             self._state.updated_at = self._clock()
             self._state.job_state = "running"
@@ -612,8 +661,11 @@ class SessionIndexWarmJob:
 
         def report(processed: int, _total: int, _indexed: int) -> None:
             with self._lock:
-                self._state.built_count = max(0, int(processed))
-                self._state.total_count = max(0, int(_total)) or total
+                self._state.built_count = min(
+                    target_total,
+                    covered_target + max(0, int(processed)),
+                )
+                self._state.total_count = target_total
                 self._state.updated_at = self._clock()
                 self._publish_locked()
 
@@ -635,7 +687,11 @@ class SessionIndexWarmJob:
         if self._should_stop():
             self._persist_paused()
             return
-        self._finish_range(pass_range)
+        self._finish_range(
+            pass_range,
+            target_total=target_total,
+            target_built=target_total,
+        )
 
     def _persist_paused(self) -> None:
         with self._lock:
@@ -645,7 +701,13 @@ class SessionIndexWarmJob:
             self._maybe_persist_locked()
             self._publish_locked()
 
-    def _finish_range(self, pass_range: str) -> None:
+    def _finish_range(
+        self,
+        pass_range: str,
+        *,
+        target_total: int | None = None,
+        target_built: int | None = None,
+    ) -> None:
         covered_count: int | None = None
         covered_fn = self._capability("indexed_session_ids")
         if callable(covered_fn):
@@ -655,7 +717,13 @@ class SessionIndexWarmJob:
                 covered_count = None
         with self._lock:
             self._state.job_state = "idle"
-            if covered_count is not None and covered_count > 0:
+            if target_total is not None:
+                self._state.total_count = max(0, int(target_total))
+                self._state.built_count = min(
+                    self._state.total_count,
+                    max(0, int(target_built if target_built is not None else target_total)),
+                )
+            elif covered_count is not None and covered_count > 0:
                 self._state.built_count = covered_count
                 self._state.total_count = max(self._state.total_count, covered_count)
             else:

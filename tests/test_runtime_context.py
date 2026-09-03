@@ -2,8 +2,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import codex_usage_hud.runtime_context as runtime_context_module
 from codex_usage_hud.config import UserConfig, UserConfigStore
 from codex_usage_hud.core import JsonlSessionParser
+from codex_usage_hud.core.runtime_events import RuntimeEventBus
+from codex_usage_hud.core.session_index_job import WarmJobSnapshot
 from codex_usage_hud.runtime_context import RuntimeContext
 
 
@@ -104,3 +107,38 @@ def test_runtime_context_close_continues_after_one_resource_fails() -> None:
     ]
     assert context.session_cleanup_worker is None
     assert context.rest_reminder is None
+
+
+def test_session_index_progress_publishes_only_while_renderer_is_attached(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    event_bus = RuntimeEventBus()
+    context = SimpleNamespace(
+        runtime_events=event_bus,
+        session_index_warm_job=None,
+        session_index_payload={},
+        session_cleanup_manager=object(),
+    )
+    monkeypatch.setattr(runtime_context_module, "hud_runtime_dir", lambda: tmp_path)
+    job = runtime_context_module._build_session_index_warm_job(context)
+    context.session_index_warm_job = job
+    snapshot = WarmJobSnapshot(
+        coverage="partial(1m)",
+        job_state="attached",
+        built_count=2,
+        total_count=5,
+        selected_range="1m",
+    )
+
+    job._progress_callback(snapshot)
+    assert event_bus.drain() == []
+    context.session_index_warm_job._state.job_state = "running"
+    assert job.attach() is True
+    job._progress_callback(snapshot)
+    events = event_bus.drain()
+    assert len(events) == 1
+    assert events[0].type == "session_index_progress"
+    assert events[0].context["builtCount"] == 2
+    assert context.session_index_payload["totalCount"] == 5
+    job.close()
