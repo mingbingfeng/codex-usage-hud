@@ -3745,12 +3745,20 @@ TEXT = r"""
           }
           #${rootId} .codex-usage-hud-session-tools-primary {
             min-width: 0;
+            display: grid;
+            grid-template-columns: minmax(0, 2fr) minmax(0, 1.5fr) minmax(0, 1.5fr);
+            align-items: center;
+            gap: 8px;
+          }
+          #${rootId} .codex-usage-hud-session-index-workdir {
+            grid-column: 2;
+            min-width: 0;
             display: flex;
             align-items: center;
             gap: 8px;
           }
           #${rootId} .codex-usage-hud-session-search {
-            flex: 1 1 260px;
+            grid-column: 1;
             min-width: 0;
             min-height: 32px;
             display: flex;
@@ -3772,7 +3780,8 @@ TEXT = r"""
             color: var(--codex-usage-hud-warning, #ffb86b);
           }
           #${rootId} .codex-usage-hud-session-workdir-filter {
-            flex: 0 1 220px;
+            flex: 1 1 auto;
+            min-width: 0;
           }
           #${rootId} .codex-usage-hud-session-search input[type="search"] {
             min-width: 0;
@@ -3849,8 +3858,8 @@ TEXT = r"""
             animation: codex-usage-hud-session-index-indet 1.35s ease-in-out infinite;
           }
           #${rootId} .codex-usage-hud-session-date-filter {
+            grid-column: 3;
             position: relative;
-            flex: 0 1 286px;
             min-width: 0;
           }
           #${rootId} .codex-usage-hud-session-date-trigger,
@@ -6083,6 +6092,23 @@ TEXT = r"""
             #${rootId} .codex-usage-hud-session-tools {
               grid-template-columns: minmax(0, 1fr);
             }
+            #${rootId} .codex-usage-hud-session-tools-primary {
+              grid-template-columns: minmax(0, 1fr);
+            }
+            #${rootId} .codex-usage-hud-session-search,
+            #${rootId} .codex-usage-hud-session-index-workdir,
+            #${rootId} .codex-usage-hud-session-date-filter {
+              grid-column: auto;
+              width: 100%;
+            }
+            #${rootId} .codex-usage-hud-session-index-workdir {
+              flex-direction: column;
+              align-items: stretch;
+            }
+            #${rootId} .codex-usage-hud-session-index-toggle,
+            #${rootId} .codex-usage-hud-session-workdir-filter {
+              width: 100%;
+            }
             #${rootId} .codex-usage-hud-session-filters { width: 100%; }
             #${rootId} .codex-usage-hud-session-head,
             #${rootId} .codex-usage-hud-session-row {
@@ -6237,19 +6263,22 @@ TEXT = r"""
               grid-template-columns: minmax(0, 1fr);
             }
             #${rootId} .codex-usage-hud-session-tools-primary {
+              grid-template-columns: minmax(0, 1fr);
               align-items: stretch;
-              flex-direction: column;
             }
-            #${rootId} .codex-usage-hud-session-search {
-              flex: 0 0 auto;
-              width: 100%;
-            }
-            #${rootId} .codex-usage-hud-session-workdir-filter {
-              flex: 0 0 auto;
-              width: 100%;
-            }
+            #${rootId} .codex-usage-hud-session-search,
+            #${rootId} .codex-usage-hud-session-index-workdir,
             #${rootId} .codex-usage-hud-session-date-filter {
-              flex-basis: auto;
+              grid-column: auto;
+              width: 100%;
+            }
+            #${rootId} .codex-usage-hud-session-index-workdir {
+              flex-direction: column;
+              align-items: stretch;
+            }
+            #${rootId} .codex-usage-hud-session-index-toggle,
+            #${rootId} .codex-usage-hud-session-workdir-filter {
+              width: 100%;
             }
             #${rootId} .codex-usage-hud-session-date-popover {
               left: 0;
