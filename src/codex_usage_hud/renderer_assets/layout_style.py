@@ -3673,12 +3673,29 @@ TEXT = r"""
             background: linear-gradient(90deg, #5ea7ff, #9ccbff);
             box-shadow: 0 0 12px rgba(94, 167, 255, .35);
             transition: width .28s ease;
+            position: relative;
+            overflow: hidden;
           }
           #${rootId} .codex-usage-hud-session-index-fill[data-indeterminate="true"] {
             width: 38% !important;
             animation: codex-usage-hud-session-index-indet 1.35s ease-in-out infinite;
           }
           @keyframes codex-usage-hud-session-index-indet {
+            0% { transform: translateX(-120%); }
+            100% { transform: translateX(320%); }
+          }
+          #${rootId} .codex-usage-hud-session-index-fill[data-phase="indexing"]::after {
+            content: "";
+            position: absolute;
+            top: 0;
+            bottom: 0;
+            left: 0;
+            width: 42%;
+            background: linear-gradient(90deg, transparent, rgba(255, 255, 255, .7), transparent);
+            transform: translateX(-120%);
+            animation: codex-usage-hud-session-index-shimmer 1.6s ease-in-out infinite;
+          }
+          @keyframes codex-usage-hud-session-index-shimmer {
             0% { transform: translateX(-120%); }
             100% { transform: translateX(320%); }
           }
@@ -3852,6 +3869,8 @@ TEXT = r"""
             border-radius: inherit;
             background: linear-gradient(90deg, #5ea7ff, #9ccbff);
             transition: width .28s ease;
+            position: relative;
+            overflow: hidden;
           }
           #${rootId} .codex-usage-hud-session-index-toggle-fill[data-indeterminate="true"] {
             width: 38% !important;

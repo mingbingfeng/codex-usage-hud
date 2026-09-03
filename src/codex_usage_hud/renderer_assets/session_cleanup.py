@@ -524,6 +524,49 @@ TEXT = r"""
         return true;
       }
 
+      // --- Session-index progress elapsed timer -------------------------------
+      // Mirrors the cleanup-scan elapsed ticker: while the warm index job is
+      // running, tick a "已用时" readout every second so the UI never looks
+      // frozen during the silent enumeration/indexing windows.
+      function stopSessionIndexElapsedTicker() {
+        if (sessionCleanupState.sessionIndexElapsedTimer) {
+          ctx.lifecycle.clearInterval(sessionCleanupState.sessionIndexElapsedTimer);
+          sessionCleanupState.sessionIndexElapsedTimer = 0;
+        }
+      }
+
+      function syncSessionIndexElapsed() {
+        const modal = document.getElementById(settingsModalId);
+        const sessionIndex = sessionIndexDomainState();
+        const running = sessionIndex
+          && new Set(["running", "attached"]).has(String(sessionIndex.jobState || ""))
+          && Number(sessionIndex.startedAt || 0) > 0;
+        if (
+          !modal
+          || modal.hidden
+          || settingsActiveTab !== "storage"
+          || !running
+        ) {
+          stopSessionIndexElapsedTicker();
+          return false;
+        }
+        const node = modal.querySelector('[data-session-index-elapsed="true"]');
+        if (node) node.textContent = formatSessionCleanupElapsed(Number(sessionIndex.startedAt));
+        return true;
+      }
+
+      function ensureSessionIndexElapsedTicker() {
+        if (!syncSessionIndexElapsed()) return false;
+        if (!sessionCleanupState.sessionIndexElapsedTimer) {
+          sessionCleanupState.sessionIndexElapsedTimer = ctx.lifecycle.interval(
+            "session_index_elapsed",
+            syncSessionIndexElapsed,
+            1000,
+          );
+        }
+        return true;
+      }
+
       function formatSessionIndexEta(seconds) {
         const value = Math.max(0, Math.round(Number(seconds) || 0));
         if (value <= 0) return "";
@@ -585,7 +628,7 @@ TEXT = r"""
           title = "尚未建立搜索索引";
         }
         const progress = active
-          ? `<span class="codex-usage-hud-session-index-toggle-track" role="progressbar" aria-valuenow="${percent}" aria-valuemin="0" aria-valuemax="100" aria-label="搜索索引建立进度"><span class="codex-usage-hud-session-index-toggle-fill" data-indeterminate="${total <= 0 || phase === 'scanning'}" style="width:${phase === 'scanning' ? 8 : Math.max(percent, total > 0 ? 8 : 38)}%"></span></span>`
+          ? `<span class="codex-usage-hud-session-index-toggle-track" role="progressbar" aria-valuenow="${percent}" aria-valuemin="0" aria-valuemax="100" aria-label="搜索索引建立进度"><span class="codex-usage-hud-session-index-toggle-fill" data-phase="${phase === 'indexing' ? 'indexing' : ''}" data-indeterminate="${total <= 0 || phase === 'scanning'}" style="width:${phase === 'scanning' ? 8 : Math.max(percent, total > 0 ? 8 : 38)}%"></span></span>`
           : "";
         return `<button type="button" class="codex-usage-hud-session-index-toggle" data-action="session-index-toggle" aria-expanded="${expanded ? "true" : "false"}" aria-label="${escapeHtml(title)}" title="${escapeHtml(title)}">${cleanupIconSvg("search")}<span class="codex-usage-hud-session-index-toggle-label">${escapeHtml(label)}</span>${progress}</button>`;
       }
@@ -626,6 +669,11 @@ TEXT = r"""
         const indexing = running || paused;
         const percent = sessionIndexProgressPercent(sessionIndex);
         const remaining = Math.max(0, Number(sessionIndex.estimatedRemainingSec || 0));
+        // Live "已用时" readout: a per-second ticker refreshes the span so the
+        // UI never looks frozen during the silent enumeration/indexing windows.
+        const elapsedSpan = Number(sessionIndex.startedAt || 0) > 0
+          ? ` · 已用时 <span data-session-index-elapsed="true">${formatSessionCleanupElapsed(Number(sessionIndex.startedAt))}</span>`
+          : "";
         const controlPending = Boolean(sessionCleanupState.sessionIndexControlRequestId);
         const disabled = controlPending ? " disabled aria-disabled=\"true\"" : "";
         let message = "";
@@ -637,9 +685,9 @@ TEXT = r"""
         } else if (paused) {
           message = `索引已暂停：${rangeLabel} · ${built}/${total} 个会话`;
         } else if (running && phase === "scanning") {
-          message = `正在扫描会话文件… · 准备为「${rangeLabel}」建立索引`;
+          message = `正在扫描会话文件… · 准备为「${rangeLabel}」建立索引${elapsedSpan}`;
         } else if (running && total > 0) {
-          message = `正在建立索引：${rangeLabel} · ${built}/${total} 个会话 · ${percent}%${remaining > 0 ? ` · 预计剩余 ${sessionIndexEtaLabel(remaining)}` : ""}`;
+          message = `正在建立索引：${rangeLabel} · ${built}/${total} 个会话 · ${percent}%${remaining > 0 ? ` · 预计剩余 ${sessionIndexEtaLabel(remaining)}` : ""}${elapsedSpan}`;
         } else if (coverage === "full") {
           message = `已建立全部会话索引${total ? ` · ${total} 个会话` : ""}`;
         } else if (coverage.indexOf("range_done") === 0) {
@@ -664,7 +712,7 @@ TEXT = r"""
           actions.push(`<button type="button" class="codex-usage-hud-settings-action codex-usage-hud-session-index-action" data-action="session-index-extend" data-size="small"${disabled}>${controlPending ? "处理中..." : "扩展索引"}</button>`);
         }
         const progressHtml = indexing || total > 0
-          ? `<div class="codex-usage-hud-session-index-track" role="progressbar" aria-valuenow="${percent}" aria-valuemin="0" aria-valuemax="100" aria-label="搜索索引建立进度"><div class="codex-usage-hud-session-index-fill" data-indeterminate="${indexing && (total <= 0 || phase === 'scanning')}" style="width:${phase === 'scanning' ? 8 : Math.max(percent, indexing ? 6 : 0)}%"></div></div>`
+          ? `<div class="codex-usage-hud-session-index-track" role="progressbar" aria-valuenow="${percent}" aria-valuemin="0" aria-valuemax="100" aria-label="搜索索引建立进度"><div class="codex-usage-hud-session-index-fill" data-phase="${phase === 'indexing' ? 'indexing' : ''}" data-indeterminate="${indexing && (total <= 0 || phase === 'scanning')}" style="width:${phase === 'scanning' ? 8 : Math.max(percent, indexing ? 6 : 0)}%"></div></div>`
           : "";
         const panelClass = notice
           ? "codex-usage-hud-session-index-coverage codex-usage-hud-session-coverage-hint"
@@ -937,6 +985,9 @@ TEXT = r"""
         body.innerHTML = storagePanelHtml();
         restoreStorageUiState();
         restoreStorageFocus(body, focus);
+        // Keep the index "已用时" readout ticking while the job runs; the
+        // function stops its own timer once the job leaves the running state.
+        ensureSessionIndexElapsedTicker();
         return true;
       }
 

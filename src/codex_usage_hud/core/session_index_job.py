@@ -43,8 +43,12 @@ THROUGHPUT_SESSIONS_PER_SEC = 13.6
 # Progress refresh cadence (PRD §9.3): no more than 4 Hz.
 PROGRESS_MAX_HZ = 4.0
 
-# Batch size for the warm job's ``sync_batches`` call.
-WARM_BATCH_SIZE = 64
+# Batch size for the warm job's ``sync_batches`` call. Smaller batches make
+# the progress callback fire more often so the UI shows finer, more frequent
+# increments instead of a few large jumps (UX: avoids the "frozen" feel during
+# a long single-session tokenisation). Commit cost per batch stays negligible
+# versus the total build time.
+WARM_BATCH_SIZE = 24
 
 # Max process-pool parallelism while building (resource governance §11).
 MAX_BUILD_WORKERS = max(1, min(8, (os.cpu_count() or 4) // 2))
@@ -202,6 +206,7 @@ class WarmJobSnapshot:
     built_count: int = 0
     total_count: int = 0
     phase: str = ""  # "" | scanning | indexing
+    started_at: float = 0.0
     estimated_remaining_sec: float = 0.0
     selected_range: str = DEFAULT_RANGE
     can_extend: bool = False
@@ -269,6 +274,7 @@ class SessionIndexWarmJob:
             "builtCount": snapshot.built_count,
             "totalCount": snapshot.total_count,
             "phase": snapshot.phase,
+            "startedAt": snapshot.started_at,
             "estimatedRemainingSec": snapshot.estimated_remaining_sec,
             "selectedRange": snapshot.selected_range,
             "canExtend": snapshot.can_extend,
@@ -284,6 +290,7 @@ class SessionIndexWarmJob:
             built_count=state.built_count,
             total_count=state.total_count,
             phase=state.phase,
+            started_at=state.started_at,
             estimated_remaining_sec=self._estimated_remaining_locked(),
             selected_range=state.selected_range,
             can_extend=state.selected_range != "all",
@@ -683,7 +690,12 @@ class SessionIndexWarmJob:
         with self._lock:
             self._state.total_count = target_total
             self._state.built_count = covered_target
-            self._state.started_at = self._clock()
+            # NOTE: ``started_at`` is set at ``start()``/``extend()`` (the user's
+            # click) and intentionally NOT reset here, so the UI "已用时" timer is
+            # monotonic from the click instead of jumping back to 0 when indexing
+            # begins. It is only consumed by the ETA throughput rate, where the
+            # brief scan window is negligible (<12%) and biases the estimate
+            # slightly conservative.
             self._state.updated_at = self._clock()
             self._state.job_state = "running"
             self._maybe_persist_locked()
