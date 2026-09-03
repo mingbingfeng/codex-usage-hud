@@ -247,6 +247,9 @@ class SessionIndexWarmJob:
         self._last_progress_emitted = 0.0
         self._run_range_key: str | None = None
         self._range_reconciled = False
+        # Set after a successful ``sync_batches`` build so _finish_range knows
+        # to defer the heavy snapshot pickle off-thread (see _finalize_off_thread).
+        self._pending_snapshot_write = False
 
     # ------------------------------------------------------------------
     # status surface
@@ -650,6 +653,7 @@ class SessionIndexWarmJob:
         # during the silent window. ``start``/``extend`` already force-published
         # ``scanning``; we only re-set it here defensively without an extra
         # publish so the 4 Hz streaming throttle is preserved.
+        self._pending_snapshot_write = False
         with self._lock:
             self._state.phase = "scanning"
         entries_fn = self._capability("search_index_entries")
@@ -731,7 +735,13 @@ class SessionIndexWarmJob:
                 batch_size=WARM_BATCH_SIZE,
                 progress_callback=report,
                 cancelled=self._should_stop,
+                # Defer the ~200 MB pickle (sync_batches skips it); _finish_range
+                # publishes "done" first, then defers the serialisation off-thread
+                # so the UI is never frozen at 100%.
+                write_snapshot=False,
             )
+            # A real build happened: the resident snapshot needs rewriting.
+            self._pending_snapshot_write = True
         except Exception as exc:
             if self._should_stop():
                 pass
@@ -790,17 +800,39 @@ class SessionIndexWarmJob:
             self._state.updated_at = self._clock()
             self._maybe_persist_locked()
             self._publish_locked()
-        # Pre-load the resident search snapshot on a separate daemon thread.
-        # ``load()`` deserialises the ~200 MB pickle and is GIL-heavy; running
-        # it inline here would starve the renderer main thread and leave the UI
-        # frozen at 100% after the job already reported "done".  Off the worker
-        # thread the published idle/coverage state paints immediately, while
-        # warm-up stays best-effort (PRD §14.1 / §12).
+            pending_write = self._pending_snapshot_write
+            self._pending_snapshot_write = False
+        # Hand the heavy post-build work to a background thread ONLY AFTER the
+        # "done" state is published.  Pickling the ~200 MB snapshot (and, on a
+        # cold cache, deserialising it via _warm_memory) is GIL-heavy; if it ran
+        # inline the renderer main thread could not push the final idle state
+        # over CDP and the UI would freeze at 100% for seconds.  Yield the GIL
+        # briefly first so the main thread gets a slice to deliver "done" before
+        # the background serialisation starts saturating the GIL.
+        time.sleep(0.05)
         threading.Thread(
-            target=self._warm_memory,
-            name="session-index-warm-memory",
+            target=self._finalize_off_thread,
+            args=(pending_write,),
+            name="session-index-finalize",
             daemon=True,
         ).start()
+
+    def _finalize_off_thread(self, pending_write: bool) -> None:
+        """Best-effort post-build finalisation, off the worker thread.
+
+        Rewrites the resident pickle snapshot (only when a build mutated it)
+        and pre-loads it into the search index.  Both are GIL-heavy and must
+        not block the renderer main thread's delivery of the "done" state
+        (PRD §14.1 / §12).
+        """
+        if pending_write:
+            try:
+                write_fn = self._capability("write_snapshot")
+                if callable(write_fn):
+                    write_fn(force=True)
+            except Exception:
+                pass
+        self._warm_memory()
 
     def _warm_memory(self) -> None:
         """Pre-load the resident search snapshot in the background.

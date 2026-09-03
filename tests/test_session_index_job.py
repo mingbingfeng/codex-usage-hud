@@ -104,8 +104,9 @@ class _FakeSearchIndex:
         batch_size: int = 24,
         progress_callback=None,
         cancelled=None,
+        write_snapshot: bool = True,
     ) -> int:
-        del batch_size
+        del batch_size, write_snapshot
         ids = [str(entry[0]).strip() for entry in entries]
         self.sync_calls.append(ids)
         processed = 0
@@ -324,8 +325,9 @@ def test_warm_job_skips_preload_without_load_capability(tmp_path: Path) -> None:
             return frozenset(self._committed)
 
         def sync_batches(self, entries, *, total=None, batch_size=24,
-                         progress_callback=None, cancelled=None) -> int:
-            del total, batch_size, progress_callback, cancelled
+                         progress_callback=None, cancelled=None,
+                         write_snapshot: bool = True) -> int:
+            del total, batch_size, progress_callback, cancelled, write_snapshot
             self._committed.extend(str(e[0]) for e in entries)
             return len(entries)
 

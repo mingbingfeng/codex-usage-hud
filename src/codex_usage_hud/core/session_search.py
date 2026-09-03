@@ -1448,8 +1448,16 @@ class SessionSearchIndex:
         batch_size: int = 24,
         progress_callback: Callable[[int, int, int], None] | None = None,
         cancelled: Callable[[], bool] | None = None,
+        write_snapshot: bool = True,
     ) -> int:
-        """Update the snapshot in cancellable, resident-memory batches."""
+        """Update the snapshot in cancellable, resident-memory batches.
+
+        ``write_snapshot=True`` (default) persists the resident pickle inline,
+        as before.  Pass ``write_snapshot=False`` to defer the (GIL-heavy,
+        ~200 MB) pickle to a background daemon thread so the caller's thread is
+        free to publish its post-build "done" state immediately instead of
+        freezing the UI at 100% while the snapshot serialises.
+        """
 
         self._load_memory()
         values = list(entries)
@@ -1512,10 +1520,17 @@ class SessionSearchIndex:
                     commit_batch()
             commit_batch()
             if mutated or not self._snapshot_path().exists():
-                self._write_snapshot(
-                    connection,
-                    force=len(values) >= _PARALLEL_PARSE_MIN_ENTRIES,
-                )
+                force_write = len(values) >= _PARALLEL_PARSE_MIN_ENTRIES
+                if write_snapshot:
+                    # Synchronous callers (tests, non-UI paths) keep the prior
+                    # inline behaviour.
+                    self._write_snapshot(
+                        connection,
+                        force=force_write,
+                    )
+                # else: the caller (UI warm job) defers the heavy ~200 MB
+                # pickle off-thread itself, after publishing its "done" state,
+                # so the renderer main thread is never frozen at 100%.
             return count
         except Exception:
             connection.rollback()
