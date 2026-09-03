@@ -274,7 +274,11 @@ class SessionIndexWarmJob:
             "builtCount": snapshot.built_count,
             "totalCount": snapshot.total_count,
             "phase": snapshot.phase,
-            "startedAt": snapshot.started_at,
+            # Frontend ``formatSessionCleanupElapsed`` expects an epoch in
+            # MILLISECONDS (it subtracts from ``Date.now()``); the internal
+            # ``started_at`` is seconds (``time.time``), so convert at the
+            # boundary. Internal ETA math keeps using seconds untouched.
+            "startedAt": snapshot.started_at * 1000.0,
             "estimatedRemainingSec": snapshot.estimated_remaining_sec,
             "selectedRange": snapshot.selected_range,
             "canExtend": snapshot.can_extend,
@@ -786,7 +790,17 @@ class SessionIndexWarmJob:
             self._state.updated_at = self._clock()
             self._maybe_persist_locked()
             self._publish_locked()
-        self._warm_memory()
+        # Pre-load the resident search snapshot on a separate daemon thread.
+        # ``load()`` deserialises the ~200 MB pickle and is GIL-heavy; running
+        # it inline here would starve the renderer main thread and leave the UI
+        # frozen at 100% after the job already reported "done".  Off the worker
+        # thread the published idle/coverage state paints immediately, while
+        # warm-up stays best-effort (PRD §14.1 / §12).
+        threading.Thread(
+            target=self._warm_memory,
+            name="session-index-warm-memory",
+            daemon=True,
+        ).start()
 
     def _warm_memory(self) -> None:
         """Pre-load the resident search snapshot in the background.
