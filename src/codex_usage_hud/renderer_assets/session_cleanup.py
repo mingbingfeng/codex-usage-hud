@@ -375,10 +375,17 @@ TEXT = r"""
           "1y": "最近 1 年", "all": "全部",
         }[range] || "最近 1 个月";
         const running = new Set(["running", "attached"]).has(jobState);
+        const phase = String(sessionIndex.phase || "");
         if (running && total > 0) {
           const percent = Math.min(100, Math.round((built / total) * 100));
           const remaining = Math.max(0, Number(sessionIndex.estimatedRemainingSec || 0));
           const remainingLabel = remaining > 0 ? ` · 预计剩余 ${sessionIndexEtaLabel(remaining)}` : "";
+          if (phase === "scanning") {
+            // The warm job is re-enumerating candidate sessions (a separate,
+            // potentially slow scan from the cleanup scan). Show an explicit
+            // status so the silent window never looks frozen at a stale 100%.
+            return `<div class="codex-usage-hud-cleanup-scan-stage" data-merged="session-index"><span><span class="codex-usage-hud-cleanup-mini-spinner"></span><strong>正在扫描会话文件</strong> · ${rangeLabel}</span><span data-secondary="true">准备建立搜索索引，请稍候</span></div>`;
+          }
           return `<div class="codex-usage-hud-cleanup-scan-stage" data-merged="session-index"><span><span class="codex-usage-hud-cleanup-mini-spinner"></span><strong>建立搜索索引</strong> · ${rangeLabel}</span><span data-secondary="true">${built}/${total} 个会话 · ${percent}%${remainingLabel}</span></div>`;
         }
         if (coverage === "full") {
@@ -554,13 +561,19 @@ TEXT = r"""
         const percent = sessionIndexProgressPercent(sessionIndex);
         const active = new Set(["running", "attached", "paused"]).has(jobState);
         const rangeLabel = sessionIndexRangeLabel(sessionIndex?.selectedRange);
+        const phase = String(sessionIndex?.phase || "");
         let label = "索引";
         let title = "显示或隐藏搜索索引状态";
         if (active) {
-          label = total > 0 ? `索引 ${percent}%` : "索引中";
-          title = total > 0
-            ? `正在建立搜索索引：${built}/${total} 个会话 · ${percent}%`
-            : "正在建立搜索索引";
+          if (phase === "scanning") {
+            label = "索引中";
+            title = "正在扫描会话文件，准备建立搜索索引";
+          } else {
+            label = total > 0 ? `索引 ${percent}%` : "索引中";
+            title = total > 0
+              ? `正在建立搜索索引：${built}/${total} 个会话 · ${percent}%`
+              : "正在建立搜索索引";
+          }
         } else if (coverage === "full") {
           label = "索引 · 全部";
           title = "当前已索引范围：全部会话";
@@ -572,7 +585,7 @@ TEXT = r"""
           title = "尚未建立搜索索引";
         }
         const progress = active
-          ? `<span class="codex-usage-hud-session-index-toggle-track" role="progressbar" aria-valuenow="${percent}" aria-valuemin="0" aria-valuemax="100" aria-label="搜索索引建立进度"><span class="codex-usage-hud-session-index-toggle-fill" data-indeterminate="${total <= 0}" style="width:${Math.max(percent, total > 0 ? 8 : 38)}%"></span></span>`
+          ? `<span class="codex-usage-hud-session-index-toggle-track" role="progressbar" aria-valuenow="${percent}" aria-valuemin="0" aria-valuemax="100" aria-label="搜索索引建立进度"><span class="codex-usage-hud-session-index-toggle-fill" data-indeterminate="${total <= 0 || phase === 'scanning'}" style="width:${phase === 'scanning' ? 8 : Math.max(percent, total > 0 ? 8 : 38)}%"></span></span>`
           : "";
         return `<button type="button" class="codex-usage-hud-session-index-toggle" data-action="session-index-toggle" aria-expanded="${expanded ? "true" : "false"}" aria-label="${escapeHtml(title)}" title="${escapeHtml(title)}">${cleanupIconSvg("search")}<span class="codex-usage-hud-session-index-toggle-label">${escapeHtml(label)}</span>${progress}</button>`;
       }
@@ -603,6 +616,7 @@ TEXT = r"""
         }
         const coverage = String(sessionIndex.coverage || "empty");
         const jobState = String(sessionIndex.jobState || "idle");
+        const phase = String(sessionIndex.phase || "");
         const range = String(sessionIndex.selectedRange || "1m");
         const rangeLabel = sessionIndexRangeLabel(range);
         const built = Math.max(0, Number(sessionIndex.builtCount || 0));
@@ -615,8 +629,15 @@ TEXT = r"""
         const controlPending = Boolean(sessionCleanupState.sessionIndexControlRequestId);
         const disabled = controlPending ? " disabled aria-disabled=\"true\"" : "";
         let message = "";
-        if (paused) {
+        if (controlPending && !running) {
+          // Command just sent but the live domain hasn't flipped to running
+          // yet: surface the pending label immediately so the click feels
+          // responsive even before the first backend frame arrives.
+          message = sessionCleanupState.sessionIndexControlLabel || "正在更新搜索索引...";
+        } else if (paused) {
           message = `索引已暂停：${rangeLabel} · ${built}/${total} 个会话`;
+        } else if (running && phase === "scanning") {
+          message = `正在扫描会话文件… · 准备为「${rangeLabel}」建立索引`;
         } else if (running && total > 0) {
           message = `正在建立索引：${rangeLabel} · ${built}/${total} 个会话 · ${percent}%${remaining > 0 ? ` · 预计剩余 ${sessionIndexEtaLabel(remaining)}` : ""}`;
         } else if (coverage === "full") {
@@ -643,7 +664,7 @@ TEXT = r"""
           actions.push(`<button type="button" class="codex-usage-hud-settings-action codex-usage-hud-session-index-action" data-action="session-index-extend" data-size="small"${disabled}>${controlPending ? "处理中..." : "扩展索引"}</button>`);
         }
         const progressHtml = indexing || total > 0
-          ? `<div class="codex-usage-hud-session-index-track" role="progressbar" aria-valuenow="${percent}" aria-valuemin="0" aria-valuemax="100" aria-label="搜索索引建立进度"><div class="codex-usage-hud-session-index-fill" data-indeterminate="${indexing && total <= 0}" style="width:${Math.max(percent, indexing ? 6 : 0)}%"></div></div>`
+          ? `<div class="codex-usage-hud-session-index-track" role="progressbar" aria-valuenow="${percent}" aria-valuemin="0" aria-valuemax="100" aria-label="搜索索引建立进度"><div class="codex-usage-hud-session-index-fill" data-indeterminate="${indexing && (total <= 0 || phase === 'scanning')}" style="width:${phase === 'scanning' ? 8 : Math.max(percent, indexing ? 6 : 0)}%"></div></div>`
           : "";
         const panelClass = notice
           ? "codex-usage-hud-session-index-coverage codex-usage-hud-session-coverage-hint"

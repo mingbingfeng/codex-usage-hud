@@ -70,6 +70,7 @@ class WarmJobState:
     cursor: str = ""
     built_count: int = 0
     total_count: int = 0
+    phase: str = ""  # "" | scanning | indexing (transient work signal)
     started_at: float = 0.0
     updated_at: float = 0.0
     last_error: str = ""
@@ -100,6 +101,7 @@ class WarmJobState:
         state.cursor = str(data.get("cursor") or "").strip()
         state.built_count = max(0, int(data.get("built_count") or 0))
         state.total_count = max(0, int(data.get("total_count") or 0))
+        state.phase = str(data.get("phase") or "").strip()
         try:
             state.started_at = float(data.get("started_at") or 0.0)
             state.updated_at = float(data.get("updated_at") or 0.0)
@@ -118,6 +120,7 @@ class WarmJobState:
             "cursor": self.cursor,
             "built_count": self.built_count,
             "total_count": self.total_count,
+            "phase": self.phase,
             "started_at": self.started_at,
             "updated_at": self.updated_at,
             "last_error": self.last_error,
@@ -198,6 +201,7 @@ class WarmJobSnapshot:
     job_state: str = "idle"  # idle | running | attached | paused | error
     built_count: int = 0
     total_count: int = 0
+    phase: str = ""  # "" | scanning | indexing
     estimated_remaining_sec: float = 0.0
     selected_range: str = DEFAULT_RANGE
     can_extend: bool = False
@@ -264,6 +268,7 @@ class SessionIndexWarmJob:
             "jobState": snapshot.job_state,
             "builtCount": snapshot.built_count,
             "totalCount": snapshot.total_count,
+            "phase": snapshot.phase,
             "estimatedRemainingSec": snapshot.estimated_remaining_sec,
             "selectedRange": snapshot.selected_range,
             "canExtend": snapshot.can_extend,
@@ -278,6 +283,7 @@ class SessionIndexWarmJob:
             job_state=self._job_state_locked(),
             built_count=state.built_count,
             total_count=state.total_count,
+            phase=state.phase,
             estimated_remaining_sec=self._estimated_remaining_locked(),
             selected_range=state.selected_range,
             can_extend=state.selected_range != "all",
@@ -344,6 +350,11 @@ class SessionIndexWarmJob:
         with self._lock:
             if self._closed:
                 return False
+            # Mark the transient work phase immediately so the UI can show
+            # "scanning" before the first real progress frame lands (the
+            # worker re-enumerates candidate sessions, which can take several
+            # seconds on a large corpus and would otherwise look frozen).
+            self._state.phase = "scanning"
             key = str(range_key or DEFAULT_RANGE).strip().casefold()
             if key not in RANGE_OPTIONS:
                 key = DEFAULT_RANGE
@@ -421,11 +432,14 @@ class SessionIndexWarmJob:
                 # then the next start() re-buckets; update the label now so
                 # the UI is honest about the selected target.
                 self._state.selected_range = key
+                self._state.phase = "scanning"
                 self._state.updated_at = self._clock()
                 self._maybe_persist_locked()
+                self._publish_locked(force=True)
                 return True
             self._state.selected_range = key
             self._state.job_state = "running"
+            self._state.phase = "scanning"
             self._state.cursor = ""
             self._state.last_error = ""
             self._state.started_at = self._clock()
@@ -620,6 +634,13 @@ class SessionIndexWarmJob:
                     return
 
     def _run_once(self) -> None:
+        # Re-affirm the scan phase before the (potentially slow) candidate
+        # enumeration so the UI shows active work instead of a frozen 100%
+        # during the silent window. ``start``/``extend`` already force-published
+        # ``scanning``; we only re-set it here defensively without an extra
+        # publish so the 4 Hz streaming throttle is preserved.
+        with self._lock:
+            self._state.phase = "scanning"
         entries_fn = self._capability("search_index_entries")
         if not callable(entries_fn):
             self._fail("search_index_entries unavailable")
@@ -675,6 +696,10 @@ class SessionIndexWarmJob:
 
         def report(processed: int, _total: int, _indexed: int) -> None:
             with self._lock:
+                # First real indexing work flips the phase from "scanning" to
+                # "indexing" so the UI reflects the transition into measured
+                # progress.
+                self._state.phase = "indexing"
                 self._state.built_count = min(
                     target_total,
                     covered_target + max(0, int(processed)),
@@ -731,6 +756,7 @@ class SessionIndexWarmJob:
                 covered_count = None
         with self._lock:
             self._state.job_state = "idle"
+            self._state.phase = ""
             if target_total is not None:
                 self._state.total_count = max(0, int(target_total))
                 self._state.built_count = min(
@@ -779,6 +805,7 @@ class SessionIndexWarmJob:
     def _fail(self, message: str) -> None:
         with self._lock:
             self._state.job_state = "error"
+            self._state.phase = ""
             self._state.last_error = str(message) or "internal error"
             self._state.updated_at = self._clock()
             self._maybe_persist_locked()

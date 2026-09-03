@@ -207,6 +207,74 @@ def test_warm_job_builds_default_range_and_finishes(tmp_path: Path) -> None:
         job.close()
 
 
+def test_warm_job_start_announces_scanning_phase_immediately(tmp_path: Path) -> None:
+    # The UI must see an explicit "scanning" phase the instant start() is
+    # called, before the first real progress frame, so the silent enumeration
+    # window never looks frozen (UX regression guard).
+    entries = _make_entries(tmp_path, {"a": 5, "b": 10})
+    index = _FakeSearchIndex(entries)
+    seen_phases: list[str] = []
+    job = SessionIndexWarmJob(
+        index,
+        state_path=tmp_path / "warm.json",
+        progress_callback=lambda s: seen_phases.append(s.phase),
+    )
+    try:
+        # start() force-publishes under the same lock, so the callback fires
+        # synchronously before start() returns.
+        assert job.start("1m") is True
+        assert job.status()["phase"] == "scanning"
+        assert "scanning" in seen_phases
+        assert _wait_until(lambda: job.status()["jobState"] == "idle")
+        assert job.status()["phase"] == ""
+    finally:
+        job.close()
+
+
+def test_warm_job_extend_announces_scanning_phase_immediately(tmp_path: Path) -> None:
+    entries = _make_entries(tmp_path, {"a": 5, "b": 10, "c": 20, "d": 200})
+    index = _FakeSearchIndex(entries)
+    seen_phases: list[str] = []
+    job = SessionIndexWarmJob(
+        index,
+        state_path=tmp_path / "warm.json",
+        progress_callback=lambda s: seen_phases.append(s.phase),
+    )
+    try:
+        assert job.start("1m") is True
+        assert _wait_until(lambda: job.status()["jobState"] == "idle")
+        # Extend to a wider range: the live channel must flip to scanning at
+        # once, not stay on the completed idle state.
+        assert job.extend("3m") is True
+        assert job.status()["phase"] == "scanning"
+        assert _wait_until(lambda: job.status()["jobState"] == "idle")
+        assert job.status()["phase"] == ""
+    finally:
+        job.close()
+
+
+def test_warm_job_phase_transitions_scanning_to_indexing(tmp_path: Path) -> None:
+    # With a perceptible per-entry delay the streaming "indexing" phase must be
+    # observed between the initial "scanning" and the terminal "".
+    entries = _make_entries(tmp_path, {f"s{i}": i for i in range(6)})
+    index = _FakeSearchIndex(entries, delay_per_entry=0.12)
+    seen_phases: list[str] = []
+    job = SessionIndexWarmJob(
+        index,
+        state_path=tmp_path / "warm.json",
+        progress_callback=lambda s: seen_phases.append(s.phase),
+    )
+    try:
+        assert job.start("1m") is True
+        assert "scanning" in seen_phases
+        assert _wait_until(lambda: job.status()["phase"] == "indexing", timeout=6)
+        assert _wait_until(lambda: job.status()["jobState"] == "idle")
+        assert job.status()["phase"] == ""
+        assert "indexing" in seen_phases
+    finally:
+        job.close()
+
+
 def test_warm_job_preloads_resident_snapshot_after_finish(tmp_path: Path) -> None:
     # The warm job must pull the resident-snapshot deserialisation off the
     # interactive path by calling ``load()`` in the background worker once the

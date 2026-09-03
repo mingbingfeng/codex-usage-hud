@@ -1129,17 +1129,20 @@ TEXT = r"""
           extend: "正在扩展索引范围...",
         }[kind] || "正在更新搜索索引...";
         sessionCleanupState.sessionIndexControlRequestId = requestId;
+        sessionCleanupState.sessionIndexControlLabel = pendingLabel;
         const submitted = submitSettingsCommand(command, pendingLabel, { preserveOverlay: true });
         if (submitted) {
           refreshStoragePanelIfVisible();
           ctx.lifecycle.timeout("session_index_control_watchdog", () => {
             if (sessionCleanupState.sessionIndexControlRequestId !== requestId) return;
             sessionCleanupState.sessionIndexControlRequestId = "";
+            sessionCleanupState.sessionIndexControlLabel = "";
             refreshStoragePanelIfVisible();
             setSettingsStatus("索引控制命令未收到响应，请重试。", "error");
           }, 15000);
         } else {
           sessionCleanupState.sessionIndexControlRequestId = "";
+          sessionCleanupState.sessionIndexControlLabel = "";
           sessionCleanupState.sessionIndexUiAttached = wasAttached;
         }
       }
