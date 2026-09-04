@@ -34,6 +34,7 @@ from codex_usage_hud.core.session_search import (
     DEFAULT_RANGE,
     RANGE_OPTIONS,
     range_days,
+    wider_range_key,
 )
 from codex_usage_hud.settings_bridge import SettingsBridgeServer
 
@@ -79,6 +80,9 @@ class _FakeSearchIndex:
         self._committed: list[str] = []
         self._delay = delay_per_entry
         self.sync_calls: list[list[str]] = []
+        self.removed_keeps: list[set[str]] = []
+        self.write_calls: list[bool] = []
+        self.ensure_scan_index_calls = 0
         self.load_calls = 0
         self._load_side_effect = load_side_effect
 
@@ -87,6 +91,25 @@ class _FakeSearchIndex:
 
     def indexed_session_ids(self) -> frozenset[str]:
         return frozenset(self._committed)
+
+    def remove_missing(self, session_ids) -> None:
+        # Mirror the real index: ``session_ids`` is the keep set, everything
+        # else is deleted from the committed set.
+        keep = {
+            str(item).strip()
+            for item in session_ids
+            if str(item).strip()
+        }
+        self._committed = [sid for sid in self._committed if sid in keep]
+        self.removed_keeps.append(keep)
+
+    def write_snapshot(self, *, force: bool = False) -> bool:
+        self.write_calls.append(bool(force))
+        return True
+
+    def ensure_scan_index(self) -> bool:
+        self.ensure_scan_index_calls += 1
+        return True
 
     def load(self) -> dict[str, object]:
         self.load_calls += 1
@@ -159,6 +182,18 @@ def test_range_candidates_newest_first_mtime_window_and_delta(tmp_path: Path) ->
         covered_ids=frozenset({"newest"}),
     )
     assert [entry[0] for entry in delta] == ["recent"]
+
+
+def test_wider_range_key_picks_widest_valid_option() -> None:
+    assert wider_range_key("1m", "3m") == "3m"
+    assert wider_range_key("6m", "1m") == "6m"
+    assert wider_range_key("all", "1y") == "all"
+    assert wider_range_key("3m") == "3m"
+    assert wider_range_key("1m", "1m") == "1m"
+    # Unknown or empty keys degrade to the default month, never widen.
+    assert wider_range_key("bogus", "3m") == "3m"
+    assert wider_range_key("bogus") == DEFAULT_RANGE
+    assert wider_range_key("") == DEFAULT_RANGE
 
 
 # ---------------------------------------------------------------------------
@@ -310,6 +345,120 @@ def test_warm_job_preload_failure_never_fails_the_job(tmp_path: Path) -> None:
         job.close()
 
 
+def test_finalize_defers_preload_past_grace_window(tmp_path: Path) -> None:
+    # The finalize thread's snapshot unpickle is GIL-heavy; with a grace
+    # window configured it must not start (and starve the interactive
+    # startup payload) until the window has elapsed.
+    entries = _make_entries(tmp_path, {"a": 5})
+    index = _FakeSearchIndex(entries)
+    job = SessionIndexWarmJob(
+        index,
+        state_path=tmp_path / "warm.json",
+        preload_grace_seconds=0.6,
+    )
+    try:
+        assert job.start("1m") is True
+        assert _wait_until(lambda: job.status()["jobState"] == "idle")
+        time.sleep(0.25)
+        assert index.load_calls == 0
+        assert _wait_until(lambda: index.load_calls >= 1, timeout=4.0)
+    finally:
+        job.close()
+
+
+def test_finalize_skips_preload_when_closed_during_grace(tmp_path: Path) -> None:
+    entries = _make_entries(tmp_path, {"a": 5})
+    index = _FakeSearchIndex(entries)
+    job = SessionIndexWarmJob(
+        index,
+        state_path=tmp_path / "warm.json",
+        preload_grace_seconds=0.6,
+    )
+    try:
+        assert job.start("1m") is True
+        assert _wait_until(lambda: job.status()["jobState"] == "idle")
+        job.close()
+        time.sleep(1.0)
+        assert index.load_calls == 0
+    finally:
+        job.close()
+
+
+def test_finalize_rewrites_snapshot_after_load_repair(tmp_path: Path) -> None:
+    # When the load reconciled stale/missing documents from SQLite rows, the
+    # finalize thread must rewrite the pickle so the repair is not repeated
+    # on every restart.
+    class RepairingIndex(_FakeSearchIndex):
+        def load(self) -> dict[str, object]:
+            self.load_calls += 1
+            return {"indexed": 3, "memoryLoaded": True, "reconciled": 3}
+
+    entries = _make_entries(tmp_path, {"a": 5})
+    index = RepairingIndex(entries)
+    job = SessionIndexWarmJob(index, state_path=tmp_path / "warm.json")
+    try:
+        assert job.start("1m") is True
+        assert _wait_until(lambda: index.load_calls >= 1)
+        assert _wait_until(lambda: index.write_calls.count(True) >= 1)
+        assert index.ensure_scan_index_calls >= 1
+    finally:
+        job.close()
+
+
+def test_finalize_skips_snapshot_write_without_repair(tmp_path: Path) -> None:
+    # A clean load (nothing reconciled) after a no-op pass must not rewrite
+    # the ~100 MB pickle. Pre-committing the only candidate makes the warm
+    # job take the empty-bucket path: no build mutates the index, so
+    # ``pending_write`` stays False and the finalize thread only loads.
+    entries = _make_entries(tmp_path, {"a": 5})
+    index = _FakeSearchIndex(entries)
+    index._committed = ["a"]
+    job = SessionIndexWarmJob(
+        index,
+        state_path=tmp_path / "warm.json",
+        preload_grace_seconds=0.6,
+    )
+    try:
+        assert job.start("1m") is True
+        assert _wait_until(lambda: index.load_calls >= 1)
+        time.sleep(0.1)
+        assert index.write_calls == []
+    finally:
+        job.close()
+
+
+def test_finalize_rewrites_snapshot_on_reconcile_without_build(tmp_path: Path) -> None:
+    # The reconcile-driven convergence write must fire even when no build
+    # mutated the index (``pending_write`` is False): a stale/missing snapshot
+    # that ``load`` had to rebuild from SQLite rows is repaired once, then the
+    # pickle is rewritten so the rebuild cost is not paid on every restart.
+    class ReconcilingNoBuild(_FakeSearchIndex):
+        def load(self) -> dict[str, object]:
+            self.load_calls += 1
+            return {
+                "indexed": 3,
+                "indexAvailable": True,
+                "memoryLoaded": True,
+                "reconciled": 3,
+            }
+
+    entries = _make_entries(tmp_path, {"a": 5})
+    index = ReconcilingNoBuild(entries)
+    index._committed = ["a"]  # no-op pass -> pending_write stays False
+    job = SessionIndexWarmJob(
+        index,
+        state_path=tmp_path / "warm.json",
+        preload_grace_seconds=0.6,
+    )
+    try:
+        assert job.start("1m") is True
+        assert _wait_until(lambda: index.load_calls >= 1)
+        assert _wait_until(lambda: index.write_calls.count(True) >= 1)
+        assert index.ensure_scan_index_calls >= 1
+    finally:
+        job.close()
+
+
 def test_warm_job_skips_preload_without_load_capability(tmp_path: Path) -> None:
     # A surface without ``load`` (e.g. a partial manager that only exposes
     # search_index_entries/sync_batches) must not crash the warm job.
@@ -394,6 +543,45 @@ def test_restart_resumes_from_persisted_paused_state(tmp_path: Path) -> None:
         job.close()
 
 
+def test_persisted_running_state_loads_as_paused_and_resumes_range(
+    tmp_path: Path,
+) -> None:
+    # A ``running`` job_state on disk means the previous process died
+    # mid-build. It must load as ``paused`` so the next start() (the startup
+    # prime passes the configured default) resumes the persisted wider range
+    # from the covered set instead of resetting to the default month
+    # (PRD §7.2: unfinished ranges resume across restarts).
+    entries = _make_entries(
+        tmp_path, {"a": 5, "b": 10, "c": 45, "d": 60, "e": 75, "old": 200}
+    )
+    state_path = tmp_path / "warm.json"
+    WarmJobState(
+        selected_range="3m",
+        job_state="running",
+        built_count=4,
+        total_count=5,
+        started_at=time.time() - 30,
+        updated_at=time.time() - 1,
+    ).dump(state_path)
+    index = _FakeSearchIndex(entries)
+    # The real database keeps everything the killed run had committed.
+    index._committed = ["a", "b", "c", "d"]
+    assert WarmJobState.load(state_path).job_state == "paused"
+    job = SessionIndexWarmJob(index, state_path=state_path)
+    try:
+        assert job.status()["jobState"] == "paused"
+        assert job.status()["selectedRange"] == "3m"
+        assert job.start("1m") is True
+        assert _wait_until(
+            lambda: job.status()["jobState"] == "idle"
+            and job.status()["coverage"] == "range_done(3m)"
+        )
+        assert index.sync_calls == [["e"]]
+        assert sorted(index.indexed_session_ids()) == ["a", "b", "c", "d", "e"]
+    finally:
+        job.close()
+
+
 def test_extend_appends_only_older_sessions(tmp_path: Path) -> None:
     entries = _make_entries(
         tmp_path,
@@ -470,6 +658,102 @@ def test_extend_while_running_never_claims_unbuilt_range(tmp_path: Path) -> None
         assert not seen_range_done_while_busy
         assert saw_honest_partial
         assert sorted(index.indexed_session_ids()) == ["a", "b", "c", "d"]
+    finally:
+        job.close()
+
+
+def test_extend_narrower_than_selected_is_noop(tmp_path: Path) -> None:
+    # A narrower extend is already satisfied by the selected wider range:
+    # accepted as a no-op, never shrinking the coverage window (PRD §5.1).
+    entries = _make_entries(tmp_path, {"a": 5, "b": 45})
+    index = _FakeSearchIndex(entries)
+    job = SessionIndexWarmJob(index, state_path=tmp_path / "warm.json")
+    try:
+        assert job.start("1m") is True
+        assert _wait_until(lambda: job.status()["jobState"] == "idle")
+        assert job.extend("3m") is True
+        assert _wait_until(
+            lambda: job.status()["jobState"] == "idle"
+            and job.status()["coverage"] == "range_done(3m)"
+        )
+        assert index.sync_calls == [["a"], ["b"]]
+
+        assert job.extend("1m") is True
+        assert job.status()["selectedRange"] == "3m"
+        assert job.status()["jobState"] == "idle"
+        assert index.sync_calls == [["a"], ["b"]]
+    finally:
+        job.close()
+
+
+def test_start_never_narrows_completed_range(tmp_path: Path) -> None:
+    # PRD §5.1: an extension is remembered as the new coverage boundary. A
+    # later start() with a narrower range (e.g. the configured default passed
+    # at startup) must keep the wider selection and degenerate to a no-op diff
+    # instead of relabelling -- and trimming -- the managed index.
+    entries = _make_entries(tmp_path, {"a": 5, "b": 10, "c": 45, "d": 60})
+    index = _FakeSearchIndex(entries)
+    job = SessionIndexWarmJob(index, state_path=tmp_path / "warm.json")
+    try:
+        assert job.start("1m") is True
+        assert _wait_until(lambda: job.status()["jobState"] == "idle")
+        assert job.extend("3m") is True
+        assert _wait_until(
+            lambda: job.status()["jobState"] == "idle"
+            and job.status()["coverage"] == "range_done(3m)"
+        )
+        assert index.sync_calls == [["a", "b"], ["c", "d"]]
+
+        assert job.start("1m") is True
+        assert _wait_until(lambda: job.status()["jobState"] == "idle")
+        status = job.status()
+        assert status["selectedRange"] == "3m"
+        assert status["coverage"] == "range_done(3m)"
+        assert index.sync_calls == [["a", "b"], ["c", "d"]]
+        assert sorted(index.indexed_session_ids()) == ["a", "b", "c", "d"]
+    finally:
+        job.close()
+
+
+def test_trim_reconciliation_migrates_legacy_index_once(tmp_path: Path) -> None:
+    # A pre-progressive full index holds documents beyond the selected range;
+    # the first warm pass reconciles them away so coverage stays honest.
+    entries = _make_entries(tmp_path, {"a": 5, "b": 10, "legacy": 200})
+    index = _FakeSearchIndex(entries)
+    index._committed = ["a", "legacy"]
+    job = SessionIndexWarmJob(index, state_path=tmp_path / "warm.json")
+    try:
+        assert job.start("1m") is True
+        assert _wait_until(lambda: job.status()["jobState"] == "idle")
+        assert index.removed_keeps == [{"a", "b"}]
+        assert sorted(index.indexed_session_ids()) == ["a", "b"]
+        assert job.status()["coverage"] == "range_done(1m)"
+    finally:
+        job.close()
+
+
+def test_trim_reconciliation_skips_warm_job_owned_index(tmp_path: Path) -> None:
+    # Once the warm job completed a range (completed_range set) the index is
+    # warm-job-owned: reconciliation must not delete documents that merely
+    # aged out of the current window (PRD D3: committed batches are kept).
+    entries = _make_entries(tmp_path, {"a": 5, "b": 10, "aged-out": 200})
+    state_path = tmp_path / "warm.json"
+    WarmJobState(
+        selected_range="1m",
+        completed_range="1m",
+        job_state="idle",
+        built_count=2,
+        total_count=2,
+    ).dump(state_path)
+    index = _FakeSearchIndex(entries)
+    index._committed = ["a", "b", "aged-out"]
+    job = SessionIndexWarmJob(index, state_path=state_path)
+    try:
+        assert job.start("1m") is True
+        assert _wait_until(lambda: job.status()["jobState"] == "idle")
+        assert index.removed_keeps == []
+        assert sorted(index.indexed_session_ids()) == ["a", "aged-out", "b"]
+        assert job.status()["coverage"] == "range_done(1m)"
     finally:
         job.close()
 

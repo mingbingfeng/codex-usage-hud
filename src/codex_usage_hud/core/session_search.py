@@ -33,6 +33,7 @@ MAX_MATCHES = 100_000
 
 _FTS_TABLE = "session_search_fts"
 _DOC_TABLE = "session_search_documents"
+_STAMPS_INDEX = "session_search_doc_stamps"
 
 _USER_MESSAGE_TYPES = {"user_message", "user_message_item"}
 _ASSISTANT_MESSAGE_TYPES = {"agent_message", "assistant_message"}
@@ -261,6 +262,27 @@ def range_label(range_key: str) -> str:
         "1y": "最近 1 年",
         "all": "全部",
     }.get(str(range_key or "").strip().casefold(), "最近 1 个月")
+
+
+def wider_range_key(*range_keys: str) -> str:
+    """Return the widest valid range among the given keys.
+
+    The coverage window never narrows (PRD §5.1: a user extension is remembered
+    as the new boundary), so callers that must reconcile two range sources --
+    e.g. the persisted ``selected_range`` vs the configured default at startup --
+    resolve them to their wider option instead of letting one clobber the
+    other. Unknown keys fall back to the default month.
+    """
+    best = DEFAULT_RANGE
+    best_rank = -1
+    for raw in range_keys:
+        key = str(raw or "").strip().casefold()
+        if key not in RANGE_OPTIONS:
+            key = DEFAULT_RANGE
+        rank = RANGE_OPTIONS.index(key)
+        if rank > best_rank:
+            best, best_rank = key, rank
+    return best
 
 
 def entries_in_range(
@@ -872,6 +894,35 @@ class SessionSearchIndex:
         self._documents: dict[str, _MemoryDocument] = {}
         self._postings: dict[str, set[str]] = defaultdict(set)
         self._snapshot_last_write = 0.0
+        # Documents the most recent load had to rebuild from SQLite rows
+        # (snapshot stale or missing); >0 means the pickle should be rewritten
+        # so the repair cost is not paid again on every restart.
+        self._last_load_reconciled = 0
+
+    def ensure_scan_index(self) -> bool:
+        """Create the covering (session_id, indexed_at) scan index if missing.
+
+        The document table stores multi-megabyte text columns, so even a
+        two-column full scan walks every overflow page of a multi-gigabyte
+        database (~8.5 s measured on 2.89 GB / 537 rows). This covering index
+        lets the warm job's stamp and reconcile scans read a few hundred
+        kilobytes instead. Building it costs one full table read, so it is
+        created by the background warm-up only, never on an interactive
+        connection.
+        """
+        try:
+            connection = self._connect()
+            try:
+                connection.execute(
+                    f"CREATE INDEX IF NOT EXISTS {_STAMPS_INDEX} "
+                    f"ON {_DOC_TABLE}(session_id, indexed_at)"
+                )
+                connection.commit()
+            finally:
+                connection.close()
+            return True
+        except sqlite3.Error:
+            return False
 
     def _connect(self) -> sqlite3.Connection:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -1195,6 +1246,9 @@ class SessionSearchIndex:
                 stale_ids.append(session_id)
         if not stale_ids:
             return True
+        # Re-fetching stale rows from SQLite is the repair cost the next
+        # snapshot write eliminates; account it for the convergence decision.
+        self._last_load_reconciled = len(stale_ids)
         connection = self._connect()
         try:
             placeholders = ",".join("?" for _ in stale_ids)
@@ -1215,6 +1269,7 @@ class SessionSearchIndex:
 
     def _load_memory(self) -> int:
         with self._lock:
+            self._last_load_reconciled = 0
             if self._memory_loaded:
                 return len(self._documents)
             if self._load_snapshot_locked():
@@ -1237,6 +1292,9 @@ class SessionSearchIndex:
             for document in documents:
                 self._add_memory_document_locked(document)
             self._memory_loaded = True
+            # A full row rebuild means the snapshot was missing or unusable;
+            # report it so the caller can converge the pickle.
+            self._last_load_reconciled = len(documents)
             return len(self._documents)
 
     def load(self) -> dict[str, object]:
@@ -1247,6 +1305,7 @@ class SessionSearchIndex:
             "indexed": count,
             "indexAvailable": True,
             "memoryLoaded": True,
+            "reconciled": self._last_load_reconciled,
         }
 
     @property
@@ -1758,6 +1817,7 @@ __all__ = [
     "range_candidates",
     "range_days",
     "range_label",
+    "wider_range_key",
     "rollout_fingerprints",
     "search_terms",
     "workdir_identity",

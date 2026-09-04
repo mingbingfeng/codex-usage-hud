@@ -32,6 +32,7 @@ from .session_search import (
     RANGE_OPTIONS,
     range_candidates,
     range_label,
+    wider_range_key,
 )
 
 # Throughput baselines measured on a real corpus (PRD §5.3): a full 971-session
@@ -102,6 +103,13 @@ class WarmJobState:
             boundary = 0.0
         state.coverage_boundary = boundary
         state.job_state = str(data.get("job_state") or "idle").strip()
+        # A ``running`` job_state on disk can only mean the process died
+        # mid-run: the live state machine always lands on idle/paused/error
+        # before its worker exits. Load it as ``paused`` so the next start()
+        # takes the resume branch (keeps selected_range and the covered set)
+        # instead of treating the interrupted build as fresh (PRD §7.2).
+        if state.job_state in ("running", "attached"):
+            state.job_state = "paused"
         state.cursor = str(data.get("cursor") or "").strip()
         state.built_count = max(0, int(data.get("built_count") or 0))
         state.total_count = max(0, int(data.get("total_count") or 0))
@@ -228,6 +236,7 @@ class SessionIndexWarmJob:
         state_path: Path | str,
         clock: Callable[[], float] = time.time,
         progress_callback: Callable[[WarmJobSnapshot], None] | None = None,
+        preload_grace_seconds: float = 0.0,
     ) -> None:
         self._search_index = search_index
         # The production wiring passes the cleanup manager, which owns the
@@ -238,6 +247,12 @@ class SessionIndexWarmJob:
         self._state_path = Path(state_path)
         self._clock = clock
         self._progress_callback = progress_callback
+        # Seconds the finalize thread waits before starting its GIL/IO-heavy
+        # work (snapshot unpickle, scan-index build). Production wiring sets
+        # this past the cold-start interactive window so the authoritative
+        # HUD payload push is never starved (measured: ~3 s unpickle for a
+        # 117 MB pickle + ~8.5 s doc-table scan on a 2.89 GB database).
+        self._preload_grace_seconds = max(0.0, float(preload_grace_seconds))
         self._lock = threading.RLock()
         self._state = WarmJobState.load(self._state_path)
         self._attached = False
@@ -369,9 +384,11 @@ class SessionIndexWarmJob:
             # worker re-enumerates candidate sessions, which can take several
             # seconds on a large corpus and would otherwise look frozen).
             self._state.phase = "scanning"
-            key = str(range_key or DEFAULT_RANGE).strip().casefold()
-            if key not in RANGE_OPTIONS:
-                key = DEFAULT_RANGE
+            # The coverage window never narrows (PRD §5.1: an extension is
+            # remembered as the new boundary): a start() asking for a range
+            # narrower than the already-selected one is satisfied by the wider
+            # selection, and its pass degenerates to a fingerprint diff.
+            key = wider_range_key(range_key, self._state.selected_range)
             if self._worker is not None and self._worker.is_alive():
                 # Already running/attached: reuse it unchanged.
                 self._state.selected_range = key
@@ -439,6 +456,15 @@ class SessionIndexWarmJob:
             key = str(range_key or "").strip().casefold()
             if key not in RANGE_OPTIONS:
                 return False
+            # A narrower extend is already satisfied by the selected wider
+            # range; accepting it as a no-op keeps the window monotonic
+            # instead of silently shrinking the coverage (PRD §5.1).
+            if RANGE_OPTIONS.index(key) < RANGE_OPTIONS.index(
+                self._state.selected_range
+                if self._state.selected_range in RANGE_OPTIONS
+                else DEFAULT_RANGE
+            ):
+                return True
             if self._state.job_state in ("running", "attached") and self._worker is not None and self._worker.is_alive():
                 if self._state.selected_range == key:
                     return True
@@ -669,8 +695,16 @@ class SessionIndexWarmJob:
         with self._lock:
             range_key = self._state.selected_range
         if not self._range_reconciled:
-            self._trim_index_to_range(range_key)
             self._range_reconciled = True
+            # Scope reconciliation is a one-time migration aid for indexes left
+            # behind by pre-progressive full builds. Once the warm job itself
+            # has completed a range (``completed_range`` set), the index is
+            # warm-job-owned: trimming here would delete legitimately built
+            # documents that simply aged out of the current window, so the
+            # reconciliation only runs while coverage was never established
+            # (PRD D3: extension is incremental; committed batches are kept).
+            if not self._state.completed_range:
+                self._trim_index_to_range(range_key)
         covered_fn = self._capability("indexed_session_ids")
         covered_ids = frozenset(covered_fn()) if callable(covered_fn) else frozenset()
         pass_range = range_key
@@ -823,18 +857,56 @@ class SessionIndexWarmJob:
         Rewrites the resident pickle snapshot (only when a build mutated it)
         and pre-loads it into the search index.  Both are GIL-heavy and must
         not block the renderer main thread's delivery of the "done" state
-        (PRD §14.1 / §12).
+        (PRD §14.1 / §12).  The whole routine additionally waits out
+        ``preload_grace_seconds`` first: at cold start the interactive
+        startup (startup bubble steps, first full HUD payload) is still in
+        flight, and the unpickle/scan work measured here (seconds of GIL
+        saturation plus multi-GB reads) delayed that payload by 10-20 s in
+        practice, leaving zeroed HUD panels behind the bubble until it
+        landed (PRD §11: the warm job yields while the UI is busy).
         """
-        if pending_write:
+        self._sleep_past_interactive_startup()
+        if self._closed:
+            return
+        # One full-table read on legacy multi-GB databases, then milliseconds
+        # forever after; safe on this already-background thread only.
+        ensure_fn = self._capability("ensure_scan_index")
+        if callable(ensure_fn):
             try:
-                write_fn = self._capability("write_snapshot")
-                if callable(write_fn):
-                    write_fn(force=True)
+                ensure_fn()
             except Exception:
                 pass
-        self._warm_memory()
+        if pending_write:
+            self._write_snapshot_best_effort()
+        result = self._warm_memory()
+        try:
+            reconciled = int(result.get("reconciled") or 0)
+        except (AttributeError, TypeError, ValueError):
+            reconciled = 0
+        if reconciled > 0:
+            # The load repaired stale/missing snapshot documents from SQLite
+            # rows; rewrite the pickle so the repair is not repeated on every
+            # restart.
+            self._write_snapshot_best_effort()
 
-    def _warm_memory(self) -> None:
+    def _sleep_past_interactive_startup(self) -> None:
+        """Wait out the grace window in small, close-interruptible slices."""
+        remaining = self._preload_grace_seconds
+        while remaining > 0.0 and not self._closed:
+            step = min(0.25, remaining)
+            time.sleep(step)
+            remaining -= step
+
+    def _write_snapshot_best_effort(self) -> None:
+        write_fn = self._capability("write_snapshot")
+        if not callable(write_fn):
+            return
+        try:
+            write_fn(force=True)
+        except Exception:
+            pass
+
+    def _warm_memory(self) -> dict[str, object]:
         """Pre-load the resident search snapshot in the background.
 
         The resident index is a pickled snapshot (``.memory``, ~200 MB on a
@@ -849,16 +921,19 @@ class SessionIndexWarmJob:
 
         This must never block the worker's state transitions or fail the job:
         a missing ``load`` capability, an already-loaded index, or any error
-        is simply skipped (PRD §12: warm-up is best-effort).
+        is simply skipped (PRD §12: warm-up is best-effort).  Returns the
+        ``load()`` result dict (empty when skipped) so the caller can decide
+        whether a convergence snapshot write is warranted.
         """
         load_fn = self._capability("load")
         if not callable(load_fn):
-            return
+            return {}
         try:
-            load_fn()
+            result = load_fn()
         except Exception:
             # Best-effort only; the indexer already surfaced any real error.
-            pass
+            return {}
+        return result if isinstance(result, dict) else {}
 
     def _fail(self, message: str) -> None:
         with self._lock:

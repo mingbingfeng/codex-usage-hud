@@ -287,3 +287,43 @@ def test_large_batch_parses_in_worker_processes(tmp_path: Path) -> None:
     assert processed == 30
     assert index.count() == 30
     assert index.search("parallel-worker-marker-17")["matches"][0]["sessionId"] == "session-17"
+
+
+def test_ensure_scan_index_covers_stamp_scans_and_reports_repairs(tmp_path: Path) -> None:
+    # The document table stores multi-megabyte text columns, so a two-column
+    # full scan walks every overflow page of a multi-GB database (~8.5 s
+    # measured). The covering index keeps the warm job's stamp scans off that
+    # path, and must be idempotent so the background finalize can call it on
+    # every completion.
+    import sqlite3
+
+    rollout = tmp_path / "covered.jsonl"
+    _write_rollout(rollout, "covering-index-marker")
+
+    index = SessionSearchIndex(tmp_path / "covered.sqlite")
+    index.upsert("session", (rollout,))
+
+    assert index.ensure_scan_index() is True
+    assert index.ensure_scan_index() is True  # idempotent
+
+    connection = sqlite3.connect(index.path)
+    try:
+        names = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'"
+            ).fetchall()
+        }
+        assert session_search_module._STAMPS_INDEX in names
+        plan = connection.execute(
+            "EXPLAIN QUERY PLAN SELECT session_id, indexed_at "
+            "FROM session_search_documents"
+        ).fetchall()
+        assert any("COVERING INDEX" in str(row) for row in plan)
+    finally:
+        connection.close()
+
+    # A clean cold load of a matching snapshot reports nothing reconciled.
+    result = index.load()
+    assert result["memoryLoaded"] is True
+    assert result["reconciled"] == 0
