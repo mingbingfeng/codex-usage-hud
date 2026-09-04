@@ -329,11 +329,24 @@ def _build_session_index_warm_job(context: RuntimeContext) -> object:
                 context=payload,
             )
 
+    def prepare_search_index_clear() -> bool:
+        worker = getattr(context, "session_cleanup_worker", None)
+        prepare = getattr(worker, "prepare_search_index_clear", None)
+        return bool(prepare()) if callable(prepare) else True
+
+    def finish_search_index_clear() -> None:
+        worker = getattr(context, "session_cleanup_worker", None)
+        finish = getattr(worker, "finish_search_index_clear", None)
+        if callable(finish):
+            finish()
+
     job = SessionIndexWarmJob(
         manager,
         state_path=state_path,
         progress_callback=publish_progress,
         preload_grace_seconds=_SESSION_INDEX_PRELOAD_GRACE_SECONDS,
+        before_clear=prepare_search_index_clear,
+        after_clear=finish_search_index_clear,
     )
     return job
 
@@ -348,6 +361,8 @@ def _session_index_snapshot_payload(snapshot: object) -> dict[str, object]:
         "jobState": str(getattr(snapshot, "job_state", "idle") or "idle"),
         "builtCount": max(0, int(getattr(snapshot, "built_count", 0) or 0)),
         "totalCount": max(0, int(getattr(snapshot, "total_count", 0) or 0)),
+        "phase": str(getattr(snapshot, "phase", "") or ""),
+        "startedAt": float(getattr(snapshot, "started_at", 0.0) or 0.0) * 1000.0,
         "estimatedRemainingSec": float(
             getattr(snapshot, "estimated_remaining_sec", 0.0) or 0.0
         ),
@@ -356,6 +371,8 @@ def _session_index_snapshot_payload(snapshot: object) -> dict[str, object]:
         ),
         "canExtend": bool(getattr(snapshot, "can_extend", False)),
         "error": str(getattr(snapshot, "error", "") or ""),
+        "enabled": bool(getattr(snapshot, "enabled", True)),
+        "diskBytes": max(0, int(getattr(snapshot, "disk_bytes", 0) or 0)),
     }
 
 

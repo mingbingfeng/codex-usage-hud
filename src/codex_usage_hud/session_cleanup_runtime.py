@@ -185,7 +185,14 @@ class SessionCleanupWorker:
         self._index_queue: queue.Queue[_SearchIndexJob | None] = queue.Queue()
         self._closed = Event()
         self._index_closed = Event()
+        self._index_idle = Event()
+        self._index_idle.set()
         self._index_schedule_lock = Lock()
+        self._index_generation = 0
+        self._index_clear_in_progress = False
+        self._index_operations_idle = Event()
+        self._index_operations_idle.set()
+        self._index_active_operations = 0
         self._pending_search_paths: set[Path] = set()
         self._pending_search_full = False
         self._search_change_timer: Timer | None = None
@@ -321,6 +328,33 @@ class SessionCleanupWorker:
         changed_paths: Sequence[Path] = (),
         prune_missing: bool = False,
     ) -> Mapping[str, object] | None:
+        with self._index_schedule_lock:
+            if self._index_clear_in_progress:
+                return None
+            self._index_active_operations += 1
+            if self._index_active_operations == 1:
+                self._index_operations_idle.clear()
+        try:
+            return self._schedule_search_index_impl(
+                snapshot,
+                changed_paths=changed_paths,
+                prune_missing=prune_missing,
+            )
+        finally:
+            with self._index_schedule_lock:
+                self._index_active_operations = max(
+                    0, self._index_active_operations - 1
+                )
+                if self._index_active_operations == 0:
+                    self._index_operations_idle.set()
+
+    def _schedule_search_index_impl(
+        self,
+        snapshot: Mapping[str, object],
+        *,
+        changed_paths: Sequence[Path] = (),
+        prune_missing: bool = False,
+    ) -> Mapping[str, object] | None:
         manager = self._real_search_manager()
         if manager is None:
             return None
@@ -329,19 +363,30 @@ class SessionCleanupWorker:
             return None
 
         # The progressive warm job is the canonical owner of the resident
-        # search index in Renderer mode.  The legacy worker below used to
-        # submit the entire inventory after every scan, silently turning a
-        # one-month warm-up into a full-history index.  Delegate to the warm
-        # job instead; it applies the selected time range and keeps extension
-        # progress observable through sessionIndexStatus.
+        # search index in Renderer mode for full inventory updates. File-change
+        # deltas still use the compatibility worker so already-indexed changed
+        # sessions are refreshed; both paths use the clear-operation lease
+        # above so deletion cannot overlap a database writer.
         warm_job = getattr(self._context, "session_index_warm_job", None)
+        try:
+            warm_status = (
+                warm_job.status()
+                if warm_job is not None
+                and callable(getattr(warm_job, "status", None))
+                else None
+            )
+        except Exception:
+            warm_status = None
+        if isinstance(warm_status, Mapping) and warm_status.get("enabled") is False:
+            # The feature switch applies to both full-scan and file-change
+            # paths. Do not let the compatibility worker build a changed-file
+            # delta while automatic indexing is disabled.
+            return manager.snapshot()
         if (
             not changed_paths
-            and warm_job is not None
-            and callable(getattr(warm_job, "status", None))
+            and isinstance(warm_status, Mapping)
         ):
             try:
-                warm_status = warm_job.status()
                 selected_range = str(
                     warm_status.get("selectedRange") or DEFAULT_RANGE
                 ).strip().casefold()
@@ -349,7 +394,11 @@ class SessionCleanupWorker:
                 if prune_missing or job_state not in {"running", "attached"}:
                     starter = getattr(warm_job, "start", None)
                     if callable(starter):
-                        starter(selected_range or DEFAULT_RANGE)
+                        if not bool(starter(selected_range or DEFAULT_RANGE)):
+                            # A concurrent clear/close can reject the start;
+                            # never let the cleanup-only reconciliation below
+                            # reopen the database after that rejection.
+                            return manager.snapshot()
                 if prune_missing:
                     remove_missing = getattr(manager._search_index, "remove_missing", None)
                     if callable(remove_missing):
@@ -373,15 +422,17 @@ class SessionCleanupWorker:
         if generation <= 0:
             return None
         with self._index_schedule_lock:
+            if self._index_clear_in_progress:
+                return None
             self._index_generation = generation
-        self._index_queue.put_nowait(
-            _SearchIndexJob(
-                revision=revision,
-                generation=generation,
-                entries=entries,
-                prune_missing=bool(prune_missing),
+            self._index_queue.put_nowait(
+                _SearchIndexJob(
+                    revision=revision,
+                    generation=generation,
+                    entries=entries,
+                    prune_missing=bool(prune_missing),
+                )
             )
-        )
         return manager.snapshot()
 
     def _search_index_job_current(self, job: _SearchIndexJob) -> bool:
@@ -391,6 +442,43 @@ class SessionCleanupWorker:
                 and not self._index_closed.is_set()
                 and self._index_generation == job.generation
             )
+
+    def prepare_search_index_clear(self, timeout_seconds: float = 15.0) -> bool:
+        """Invalidate and drain the compatibility index worker before clear.
+
+        Renderer warm jobs own normal indexing, but file-change updates can
+        still be queued on this compatibility worker during construction or a
+        fallback path.  Advancing its generation makes the active batch stop
+        at its next cancellation check and makes queued work stale; the idle
+        event prevents the caller from deleting SQLite while it still owns a
+        connection.
+        """
+        with self._index_schedule_lock:
+            self._index_clear_in_progress = True
+            self._index_generation += 1
+            timer = self._search_change_timer
+            self._search_change_timer = None
+            self._pending_search_paths.clear()
+            self._pending_search_full = False
+        if timer is not None:
+            timer.cancel()
+        timeout = max(0.0, float(timeout_seconds))
+        deadline = time.monotonic() + timeout
+        ready = True
+        for idle_event in (self._index_idle, self._index_operations_idle):
+            remaining = max(0.0, deadline - time.monotonic())
+            if not idle_event.wait(timeout=remaining):
+                ready = False
+                break
+        if not ready:
+            with self._index_schedule_lock:
+                self._index_clear_in_progress = False
+        return ready
+
+    def finish_search_index_clear(self) -> None:
+        """Allow new compatibility work after the index files are removed."""
+        with self._index_schedule_lock:
+            self._index_clear_in_progress = False
 
     def _run_search_indexer(self) -> None:
         manager = self._real_search_manager()
@@ -404,8 +492,19 @@ class SessionCleanupWorker:
             job = self._index_queue.get()
             if job is None:
                 return
-            if not self._search_index_job_current(job):
-                continue
+            with self._index_schedule_lock:
+                if (
+                    self._closed.is_set()
+                    or self._index_closed.is_set()
+                    or self._index_clear_in_progress
+                    or self._index_generation != job.generation
+                ):
+                    continue
+                # Checking the generation and marking the worker in-flight are
+                # one critical section. Otherwise clear could observe the idle
+                # event between these two operations and delete SQLite just
+                # before this worker opens it again.
+                self._index_idle.clear()
             try:
                 loaded = manager._search_index.load()
                 if not self._search_index_job_current(job):
@@ -472,6 +571,8 @@ class SessionCleanupWorker:
                         generation=job.generation,
                     )
                 )
+            finally:
+                self._index_idle.set()
 
     def _latest_queued_search(self, command: dict[str, object]) -> dict[str, object]:
         """Collapse consecutive keystroke searches before doing any work."""

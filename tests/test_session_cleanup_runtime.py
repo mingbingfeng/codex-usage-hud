@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import sqlite3
 import tempfile
+from threading import Event, Lock, Thread
 import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -25,6 +26,133 @@ def _operation(request_id: str, action: str, state: str, **extra: object) -> dic
             **extra,
         },
     }
+
+
+def test_prepare_search_index_clear_waits_for_inflight_compat_worker() -> None:
+    """Clear cannot pass the idle gate while a compatibility batch is active."""
+    worker = SessionCleanupWorker.__new__(SessionCleanupWorker)
+    worker._index_schedule_lock = Lock()
+    worker._index_idle = Event()
+    worker._index_idle.set()
+    worker._index_generation = 9
+    worker._index_clear_in_progress = False
+    worker._index_operations_idle = Event()
+    worker._index_operations_idle.set()
+    worker._index_active_operations = 0
+    worker._closed = Event()
+    worker._index_closed = Event()
+    worker._search_change_timer = None
+    worker._pending_search_paths = set()
+    worker._pending_search_full = False
+
+    entered = Event()
+    release = Event()
+
+    def compatibility_batch() -> None:
+        with worker._index_schedule_lock:
+            worker._index_idle.clear()
+            entered.set()
+        release.wait(timeout=2)
+        worker._index_idle.set()
+
+    batch = Thread(target=compatibility_batch)
+    batch.start()
+    assert entered.wait(timeout=1)
+
+    result: dict[str, bool] = {}
+
+    def clear() -> None:
+        result["ready"] = worker.prepare_search_index_clear(timeout_seconds=2)
+
+    clear_thread = Thread(target=clear)
+    clear_thread.start()
+    deadline = time.monotonic() + 1
+    while not worker._index_clear_in_progress and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert "ready" not in result
+    assert worker._index_clear_in_progress is True
+
+    release.set()
+    batch.join(timeout=2)
+    clear_thread.join(timeout=2)
+    assert result == {"ready": True}
+    worker.finish_search_index_clear()
+    assert worker._index_clear_in_progress is False
+
+
+def test_disabled_index_blocks_changed_file_compatibility_build() -> None:
+    worker = SessionCleanupWorker.__new__(SessionCleanupWorker)
+    worker._index_schedule_lock = Lock()
+    worker._index_generation = 1
+    worker._index_clear_in_progress = False
+    worker._index_operations_idle = Event()
+    worker._index_operations_idle.set()
+    worker._index_active_operations = 0
+    manager = MagicMock()
+    manager.snapshot.return_value = {"revision": "revision-1"}
+    worker._real_search_manager = lambda: manager
+    worker._context = SimpleNamespace(
+        session_index_warm_job=SimpleNamespace(
+            status=lambda: {"enabled": False, "jobState": "idle"}
+        )
+    )
+
+    result = worker._schedule_search_index(
+        {"revision": "revision-1"},
+        changed_paths={Path("changed.jsonl")},
+    )
+
+    assert result == {"revision": "revision-1"}
+    manager.search_index_entries.assert_not_called()
+
+
+def test_clear_gate_waits_for_direct_index_schedule_lease() -> None:
+    worker = SessionCleanupWorker.__new__(SessionCleanupWorker)
+    worker._index_schedule_lock = Lock()
+    worker._index_generation = 1
+    worker._index_clear_in_progress = False
+    worker._index_operations_idle = Event()
+    worker._index_operations_idle.set()
+    worker._index_active_operations = 0
+    worker._index_idle = Event()
+    worker._index_idle.set()
+    worker._closed = Event()
+    worker._index_closed = Event()
+    worker._search_change_timer = None
+    worker._pending_search_paths = set()
+    worker._pending_search_full = False
+    entered = Event()
+    release = Event()
+
+    def scheduled(*_args: object, **_kwargs: object) -> None:
+        entered.set()
+        release.wait(timeout=2)
+
+    worker._schedule_search_index_impl = scheduled
+    schedule_thread = Thread(
+        target=lambda: worker._schedule_search_index({"revision": "revision-1"})
+    )
+    schedule_thread.start()
+    assert entered.wait(timeout=1)
+
+    result: dict[str, bool] = {}
+
+    def clear() -> None:
+        result["ready"] = worker.prepare_search_index_clear(timeout_seconds=2)
+
+    clear_thread = Thread(target=clear)
+    clear_thread.start()
+    deadline = time.monotonic() + 1
+    while not worker._index_clear_in_progress and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert "ready" not in result
+    assert worker._index_clear_in_progress is True
+
+    release.set()
+    schedule_thread.join(timeout=2)
+    clear_thread.join(timeout=2)
+    assert result == {"ready": True}
+    worker.finish_search_index_clear()
 
 
 def test_session_cleanup_worker_refreshes_usage_after_verified_delete() -> None:

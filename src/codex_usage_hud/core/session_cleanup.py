@@ -883,6 +883,25 @@ class SessionCleanupManager:
             }
             return self.snapshot(include_sessions=False)
 
+    def reset_search_index_state(self) -> None:
+        """Forget cached search results after the resident index is cleared."""
+        with self._search_state_lock:
+            self._search_state = {
+                **self._search_state,
+                "state": "idle",
+                "processed": 0,
+                "indexTotal": 0,
+                "indexState": "idle",
+                "indexed": 0,
+                "matches": [],
+                "matchKinds": [],
+                "indexAvailable": True,
+                "requestId": "",
+                "revision": self._revision,
+                "generation": int(self._search_state.get("generation") or 0) + 1,
+                "error": "",
+            }
+
     def search(
         self,
         query: str,

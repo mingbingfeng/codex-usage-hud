@@ -6,8 +6,8 @@
   },
   "currentBundle": {
     "phase": "P6.7",
-    "sha256": "52d295671f1b383d84a13a0e71131bbaff3a46abcb835a28183d70dd0765f1f0",
-    "byteLength": 1186688
+    "sha256": "d4be8866808bdb7cf6c26a66801ebe078d02afee83574c8c050e436251a2e0b7",
+    "byteLength": 1197850
   },
   "sha256": "f83d65265c55143fa775f509f09ce109c2aa75a03946b42cf462cb6cbd4ea637",
   "byteLength": 548705,
@@ -136,14 +136,14 @@
     "model_picker", "theme", "session_view_progress", "copy_feedback", "activity_trail_locate",
     "activity_virtualization_frame", "activity_request_materialization",
     "activity_round_expand_settle", "conversation_locate_pulse", "session_cleanup_scan_watchdog",
-    "storage", "background_usage_policy", "background_usage_request", "background_usage_fetch",
-    "codex_cli_launch_timeout", "codex_cli_launch_min_visible", "session_index_status_watchdog",
-    "settings_restart", "layout_settle", "layout_settle", "layout_settle", "composer_layout",
-    "layout_bootstrap", "layout_bootstrap", "composer_attachments", "layout_report",
-    "active_session", "active_session", "active_session", "active_session",
-    "active_session_bootstrap", "session_cleanup_search", "session_transfer_selection",
-    "session_transfer_select_all", "session_transfer_selection", "session_index_control_watchdog",
-    "stale_guard"
+    "storage", "session_index_control_watchdog", "background_usage_policy",
+    "background_usage_request", "background_usage_fetch", "codex_cli_launch_timeout",
+    "codex_cli_launch_min_visible", "session_index_status_watchdog", "settings_restart",
+    "layout_settle", "layout_settle", "layout_settle", "composer_layout", "layout_bootstrap",
+    "layout_bootstrap", "composer_attachments", "layout_report", "active_session",
+    "active_session", "active_session", "active_session", "active_session_bootstrap",
+    "session_cleanup_search", "session_transfer_selection", "session_transfer_select_all",
+    "session_transfer_selection", "stale_guard"
   ],
   "timeoutInventory": [
     {"owner": "model_picker", "creation": "ctx.lifecycle.timeout(\"model_picker\", patchCodexModelPicker, delay)", "cleanup": "ctx.lifecycle.clearTimeout(timer)"},

@@ -79,6 +79,7 @@ class WarmJobState:
     started_at: float = 0.0
     updated_at: float = 0.0
     last_error: str = ""
+    enabled: bool = True
 
     @classmethod
     def load(cls, path: Path) -> WarmJobState:
@@ -120,6 +121,17 @@ class WarmJobState:
         except (TypeError, ValueError):
             pass
         state.last_error = str(data.get("last_error") or "").strip()
+        raw_enabled = data.get("enabled", True)
+        if isinstance(raw_enabled, str):
+            state.enabled = raw_enabled.strip().casefold() not in {
+                "0",
+                "false",
+                "off",
+                "disabled",
+                "no",
+            }
+        else:
+            state.enabled = raw_enabled is not False and raw_enabled != 0
         return state
 
     def dump(self, path: Path) -> None:
@@ -136,6 +148,7 @@ class WarmJobState:
             "started_at": self.started_at,
             "updated_at": self.updated_at,
             "last_error": self.last_error,
+            "enabled": bool(self.enabled),
         }
         # Atomic-ish write: temp file then rename so a crash can never leave a
         # half-written state that looks like a completed job.
@@ -219,6 +232,8 @@ class WarmJobSnapshot:
     selected_range: str = DEFAULT_RANGE
     can_extend: bool = False
     error: str = ""
+    enabled: bool = True
+    disk_bytes: int = 0
 
 
 class SessionIndexWarmJob:
@@ -237,6 +252,8 @@ class SessionIndexWarmJob:
         clock: Callable[[], float] = time.time,
         progress_callback: Callable[[WarmJobSnapshot], None] | None = None,
         preload_grace_seconds: float = 0.0,
+        before_clear: Callable[[], bool] | None = None,
+        after_clear: Callable[[], None] | None = None,
     ) -> None:
         self._search_index = search_index
         # The production wiring passes the cleanup manager, which owns the
@@ -247,6 +264,8 @@ class SessionIndexWarmJob:
         self._state_path = Path(state_path)
         self._clock = clock
         self._progress_callback = progress_callback
+        self._before_clear = before_clear
+        self._after_clear = after_clear
         # Seconds the finalize thread waits before starting its GIL/IO-heavy
         # work (snapshot unpickle, scan-index build). Production wiring sets
         # this past the cold-start interactive window so the authoritative
@@ -265,6 +284,9 @@ class SessionIndexWarmJob:
         # Set after a successful ``sync_batches`` build so _finish_range knows
         # to defer the heavy snapshot pickle off-thread (see _finalize_off_thread).
         self._pending_snapshot_write = False
+        self._lifecycle_generation = 0
+        self._clearing = False
+        self._finalize_threads: set[threading.Thread] = set()
 
     # ------------------------------------------------------------------
     # status surface
@@ -301,6 +323,8 @@ class SessionIndexWarmJob:
             "selectedRange": snapshot.selected_range,
             "canExtend": snapshot.can_extend,
             "error": snapshot.error,
+            "enabled": snapshot.enabled,
+            "diskBytes": snapshot.disk_bytes,
         }
 
     def _snapshot_locked(self) -> WarmJobSnapshot:
@@ -317,7 +341,18 @@ class SessionIndexWarmJob:
             selected_range=state.selected_range,
             can_extend=state.selected_range != "all",
             error=state.last_error,
+            enabled=bool(state.enabled),
+            disk_bytes=self._disk_bytes_locked(),
         )
+
+    def _disk_bytes_locked(self) -> int:
+        disk_usage = self._capability("disk_usage_bytes")
+        if not callable(disk_usage):
+            return 0
+        try:
+            return max(0, int(disk_usage()))
+        except (OSError, TypeError, ValueError):
+            return 0
 
     def _job_state_locked(self) -> str:
         state = self._state
@@ -377,7 +412,7 @@ class SessionIndexWarmJob:
         a new bucket.  Returns True when the job is running.
         """
         with self._lock:
-            if self._closed:
+            if self._closed or self._clearing or not self._state.enabled:
                 return False
             # Mark the transient work phase immediately so the UI can show
             # "scanning" before the first real progress frame lands (the
@@ -451,7 +486,7 @@ class SessionIndexWarmJob:
     def extend(self, range_key: str) -> bool:
         """Extend the coverage window; only appends older sessions (D3)."""
         with self._lock:
-            if self._closed:
+            if self._closed or self._clearing or not self._state.enabled:
                 return False
             key = str(range_key or "").strip().casefold()
             if key not in RANGE_OPTIONS:
@@ -523,6 +558,116 @@ class SessionIndexWarmJob:
     def detach(self) -> bool:
         return self.cancel_ui()
 
+    def set_enabled(self, enabled: bool, range_key: str = "") -> bool:
+        """Enable or disable automatic index maintenance.
+
+        Disabling preserves already-built documents so existing search results
+        remain available.  A running build observes the pause flag at its next
+        cancellable batch boundary; enabling starts/resumes the selected range.
+        """
+        desired = bool(enabled)
+        requested_range = str(range_key or "").strip().casefold()
+        if requested_range not in RANGE_OPTIONS:
+            requested_range = ""
+        with self._lock:
+            if self._closed or self._clearing:
+                return False
+            self._state.enabled = desired
+            self._state.updated_at = self._clock()
+            if not desired:
+                self._requested_pause.set()
+                if self._worker is None or not self._worker.is_alive():
+                    self._state.job_state = "idle"
+                    self._state.phase = ""
+            self._maybe_persist_locked()
+            self._publish_locked(force=True)
+            selected_range = requested_range or self._state.selected_range
+        if desired:
+            return self.start(selected_range)
+        return True
+
+    def clear_index(self) -> dict[str, object]:
+        """Safely clear only HUD-owned search-index artifacts."""
+        with self._lock:
+            if self._closed or self._clearing:
+                return {"accepted": False, "error": "busy"}
+            self._clearing = True
+            self._lifecycle_generation += 1
+            self._requested_pause.set()
+            worker = self._worker
+        prepared = False
+        try:
+            if worker is not None and worker is not threading.current_thread():
+                worker.join(timeout=15.0)
+            if worker is not None and worker.is_alive():
+                return {"accepted": False, "error": "index_job_busy"}
+            with self._lock:
+                finalizers = tuple(self._finalize_threads)
+            for finalizer in finalizers:
+                if finalizer is not threading.current_thread():
+                    finalizer.join(timeout=15.0)
+            if any(finalizer.is_alive() for finalizer in finalizers):
+                return {"accepted": False, "error": "index_finalize_busy"}
+            before_clear = self._before_clear
+            prepared = callable(before_clear)
+            if prepared:
+                try:
+                    ready = bool(before_clear())
+                except Exception:
+                    ready = False
+                if not ready:
+                    return {"accepted": False, "error": "index_job_busy"}
+            clear_fn = self._capability("clear_index")
+            if not callable(clear_fn):
+                return {"accepted": False, "error": "clear_unavailable"}
+            result = clear_fn()
+            cleared = result if isinstance(result, Mapping) else {}
+            reset_search_state = self._capability("reset_search_index_state")
+            if callable(reset_search_state):
+                reset_search_state()
+            with self._lock:
+                enabled = bool(self._state.enabled)
+                self._state.selected_range = DEFAULT_RANGE
+                self._state.completed_range = ""
+                self._state.coverage_boundary = 0.0
+                self._state.job_state = "idle"
+                self._state.cursor = ""
+                self._state.built_count = 0
+                self._state.total_count = 0
+                self._state.phase = ""
+                self._state.started_at = 0.0
+                self._state.updated_at = self._clock()
+                self._state.last_error = ""
+                self._state.enabled = enabled
+                self._range_reconciled = False
+                self._pending_snapshot_write = False
+                self._last_progress_emitted = 0.0
+                self._requested_pause.clear()
+                self._maybe_persist_locked()
+                self._publish_locked(force=True)
+            return {
+                "accepted": True,
+                "error": "",
+                "clearedBytes": max(0, int(cleared.get("clearedBytes") or 0)),
+                "removedFiles": max(0, int(cleared.get("removedFiles") or 0)),
+            }
+        except (OSError, TypeError, ValueError) as exc:
+            return {"accepted": False, "error": str(exc) or type(exc).__name__}
+        finally:
+            with self._lock:
+                self._clearing = False
+                self._requested_pause.clear()
+            if prepared:
+                after_clear = self._after_clear
+                if callable(after_clear):
+                    try:
+                        after_clear()
+                    except Exception:
+                        pass
+
+    def clear(self) -> bool:
+        return bool(self.clear_index().get("accepted"))
+
     def control(self, command: Mapping[str, object]) -> dict[str, object]:
         """Handle one ``sessionIndexControl`` payload (CDP and HTTP share this).
 
@@ -531,7 +676,16 @@ class SessionIndexWarmJob:
         (PRD §9.4).
         """
         control_action = str(command.get("control") or "").strip().casefold()
-        valid = {"start", "extend", "pause", "resume", "cancel_ui"}
+        valid = {
+            "start",
+            "extend",
+            "pause",
+            "resume",
+            "cancel_ui",
+            "enable",
+            "disable",
+            "clear",
+        }
         request_id = str(command.get("requestId") or command.get("id") or "")
         if control_action not in valid:
             payload = dict(self.status())
@@ -549,6 +703,13 @@ class SessionIndexWarmJob:
                 accepted = self.pause()
             elif control_action == "resume":
                 accepted = self.resume()
+            elif control_action == "enable":
+                accepted = self.set_enabled(True, range_key)
+            elif control_action == "disable":
+                accepted = self.set_enabled(False)
+            elif control_action == "clear":
+                clear_result = self.clear_index()
+                accepted = bool(clear_result.get("accepted"))
             else:
                 accepted = self.cancel_ui()
         except Exception as exc:
@@ -561,6 +722,15 @@ class SessionIndexWarmJob:
         payload["accepted"] = bool(accepted)
         payload["error"] = ""
         payload["requestId"] = request_id
+        if control_action == "clear":
+            payload.update(
+                {
+                    key: value
+                    for key, value in clear_result.items()
+                    if key not in {"accepted", "error"}
+                }
+            )
+            payload["error"] = str(clear_result.get("error") or "")
         return payload
 
     def close(self) -> None:
@@ -635,7 +805,10 @@ class SessionIndexWarmJob:
         if self._closed or self._requested_pause.is_set():
             return True
         with self._lock:
-            return self._state.job_state not in ("running", "attached")
+            return (
+                not self._state.enabled
+                or self._state.job_state not in ("running", "attached")
+            )
 
     def _run(self) -> None:
         try:
@@ -667,6 +840,8 @@ class SessionIndexWarmJob:
             with self._lock:
                 if self._state.job_state in ("paused", "error"):
                     return
+                if not self._state.enabled:
+                    return
                 if (
                     self._state.job_state == "idle"
                     and self._state.selected_range == self._run_range_key
@@ -682,14 +857,16 @@ class SessionIndexWarmJob:
         self._pending_snapshot_write = False
         with self._lock:
             self._state.phase = "scanning"
+        if self._closed or self._requested_pause.is_set() or not self._state.enabled:
+            self._persist_paused()
+            return
         entries_fn = self._capability("search_index_entries")
         if not callable(entries_fn):
             self._fail("search_index_entries unavailable")
             return
         candidates = entries_fn()
         if not candidates:
-            with self._lock:
-                self._finish_range(self._state.selected_range)
+            self._finish_range(self._state.selected_range)
             return
 
         with self._lock:
@@ -836,6 +1013,7 @@ class SessionIndexWarmJob:
             self._publish_locked()
             pending_write = self._pending_snapshot_write
             self._pending_snapshot_write = False
+            lifecycle_generation = self._lifecycle_generation
         # Hand the heavy post-build work to a background thread ONLY AFTER the
         # "done" state is published.  Pickling the ~200 MB snapshot (and, on a
         # cold cache, deserialising it via _warm_memory) is GIL-heavy; if it ran
@@ -844,14 +1022,17 @@ class SessionIndexWarmJob:
         # briefly first so the main thread gets a slice to deliver "done" before
         # the background serialisation starts saturating the GIL.
         time.sleep(0.05)
-        threading.Thread(
+        finalizer = threading.Thread(
             target=self._finalize_off_thread,
-            args=(pending_write,),
+            args=(pending_write, lifecycle_generation),
             name="session-index-finalize",
             daemon=True,
-        ).start()
+        )
+        with self._lock:
+            self._finalize_threads.add(finalizer)
+        finalizer.start()
 
-    def _finalize_off_thread(self, pending_write: bool) -> None:
+    def _finalize_off_thread(self, pending_write: bool, lifecycle_generation: int) -> None:
         """Best-effort post-build finalisation, off the worker thread.
 
         Rewrites the resident pickle snapshot (only when a build mutated it)
@@ -865,34 +1046,64 @@ class SessionIndexWarmJob:
         practice, leaving zeroed HUD panels behind the bubble until it
         landed (PRD §11: the warm job yields while the UI is busy).
         """
-        self._sleep_past_interactive_startup()
-        if self._closed:
-            return
-        # One full-table read on legacy multi-GB databases, then milliseconds
-        # forever after; safe on this already-background thread only.
-        ensure_fn = self._capability("ensure_scan_index")
-        if callable(ensure_fn):
-            try:
-                ensure_fn()
-            except Exception:
-                pass
-        if pending_write:
-            self._write_snapshot_best_effort()
-        result = self._warm_memory()
         try:
-            reconciled = int(result.get("reconciled") or 0)
-        except (AttributeError, TypeError, ValueError):
-            reconciled = 0
-        if reconciled > 0:
-            # The load repaired stale/missing snapshot documents from SQLite
-            # rows; rewrite the pickle so the repair is not repeated on every
-            # restart.
-            self._write_snapshot_best_effort()
+            self._sleep_past_interactive_startup(lifecycle_generation)
+            with self._lock:
+                current = (
+                    not self._closed
+                    and self._lifecycle_generation == lifecycle_generation
+                )
+            if not current:
+                return
+            # One full-table read on legacy multi-GB databases, then milliseconds
+            # forever after; safe on this already-background thread only.
+            ensure_fn = self._capability("ensure_scan_index")
+            if callable(ensure_fn):
+                try:
+                    ensure_fn()
+                except Exception:
+                    pass
+            if pending_write:
+                with self._lock:
+                    if self._lifecycle_generation != lifecycle_generation:
+                        return
+                self._write_snapshot_best_effort()
+            with self._lock:
+                if self._lifecycle_generation != lifecycle_generation:
+                    return
+            result = self._warm_memory()
+            try:
+                reconciled = int(result.get("reconciled") or 0)
+            except (AttributeError, TypeError, ValueError):
+                reconciled = 0
+            if reconciled > 0:
+                # The load repaired stale/missing snapshot documents from SQLite
+                # rows; rewrite the pickle so the repair is not repeated on every
+                # restart.
+                self._write_snapshot_best_effort()
+        finally:
+            with self._lock:
+                if (
+                    not self._closed
+                    and self._lifecycle_generation == lifecycle_generation
+                ):
+                    # Snapshot serialization happens after the terminal build
+                    # event; publish once more so the UI's diskBytes includes
+                    # the newly written .memory artifact.
+                    self._publish_locked(force=True)
+                self._finalize_threads.discard(threading.current_thread())
 
-    def _sleep_past_interactive_startup(self) -> None:
-        """Wait out the grace window in small, close-interruptible slices."""
+    def _sleep_past_interactive_startup(
+        self,
+        lifecycle_generation: int | None = None,
+    ) -> None:
+        """Wait out the grace window in small, clear-interruptible slices."""
         remaining = self._preload_grace_seconds
         while remaining > 0.0 and not self._closed:
+            if lifecycle_generation is not None:
+                with self._lock:
+                    if self._lifecycle_generation != lifecycle_generation:
+                        return
             step = min(0.25, remaining)
             time.sleep(step)
             remaining -= step

@@ -762,7 +762,8 @@ def handle_session_index_command(
 
     Both read the single warm job; control actions are validated against the
     action set from the PRD (§9.2): ``start | extend | pause | resume |
-    cancel_ui``.  ``cancel_ui`` only detaches the UI, never stops the job.
+    cancel_ui`` plus local index maintenance controls. ``cancel_ui`` only
+    detaches the UI, never stops the job.
     """
     action = str(command.get("action") or "").strip()
     if action not in runtime_settings.SESSION_INDEX_COMMANDS:
@@ -784,12 +785,23 @@ def handle_session_index_command(
         status["sessionIndex"] = payload
         return status
     control_action = str(command.get("control") or "").strip().casefold()
-    valid = {"start", "extend", "pause", "resume", "cancel_ui"}
+    valid = {
+        "start",
+        "extend",
+        "pause",
+        "resume",
+        "cancel_ui",
+        "enable",
+        "disable",
+        "clear",
+    }
     if control_action not in valid:
         status = _status("未知的索引控制动作。", kind="error")
         status["sessionIndex"] = {"accepted": False, "error": "unknown_action"}
         return status
     range_key = str(command.get("range") or "").strip().casefold()
+    clear_result: Mapping[str, object] = {}
+    control_error = ""
     try:
         if control_action == "start":
             accepted = bool(job.start(range_key))
@@ -799,6 +811,26 @@ def handle_session_index_command(
             accepted = bool(job.pause())
         elif control_action == "resume":
             accepted = bool(job.resume())
+        elif control_action == "enable":
+            setter = getattr(job, "set_enabled", None)
+            accepted = bool(setter(True, range_key)) if callable(setter) else False
+            if not callable(setter):
+                control_error = "enable_unavailable"
+        elif control_action == "disable":
+            setter = getattr(job, "set_enabled", None)
+            accepted = bool(setter(False, range_key)) if callable(setter) else False
+            if not callable(setter):
+                control_error = "disable_unavailable"
+        elif control_action == "clear":
+            clearer = getattr(job, "clear_index", None)
+            if callable(clearer):
+                value = clearer()
+                clear_result = value if isinstance(value, Mapping) else {}
+                accepted = bool(clear_result.get("accepted"))
+                control_error = str(clear_result.get("error") or "")
+            else:
+                accepted = False
+                control_error = "clear_unavailable"
         else:
             accepted = bool(job.cancel_ui())
     except Exception as exc:
@@ -811,13 +843,35 @@ def handle_session_index_command(
             "error": str(exc) or type(exc).__name__,
         }
         return status
-    if accepted and control_action in ("start", "extend", "resume"):
+    if accepted and control_action in ("start", "extend", "resume", "enable"):
         _session_index_attach(job)
-    status = _status("" if accepted else "索引控制未生效。", kind="" if accepted else "warning")
+    if accepted and control_action == "clear":
+        # Clearing also invalidates the manager's cached search matches. Push
+        # that reset through the existing session-cleanup domain so a visible
+        # query cannot keep showing ids from the removed index.
+        manager = getattr(ports, "cleanup_manager", None)
+        publisher = getattr(ports.cleanup_worker, "_publish", None)
+        snapshot_fn = getattr(manager, "snapshot", None)
+        if callable(publisher) and callable(snapshot_fn):
+            try:
+                publisher(snapshot_fn())
+            except Exception:
+                pass
+    status = _status(
+        "" if accepted else "索引控制未生效。",
+        kind="" if accepted else "warning",
+    )
     payload = dict(job.status()) if callable(getattr(job, "status", None)) else {}
     payload["accepted"] = bool(accepted)
-    payload["error"] = ""
+    payload["error"] = control_error
     payload["requestId"] = request_id
+    payload.update(
+        {
+            key: value
+            for key, value in clear_result.items()
+            if key not in {"accepted", "error"}
+        }
+    )
     status["sessionIndex"] = payload
     return status
 

@@ -150,6 +150,10 @@ def test_session_index_event_chain_and_status_sync_are_wired() -> None:
     assert 'data-action="session-index-background"' not in cleanup
     assert "sessionIndexToggleHtml" in cleanup
     assert "session-index-toggle-track" in cleanup
+    assert 'data-session-index-enabled="true"' in cleanup
+    assert 'data-action="session-index-clear"' in cleanup
+    assert "sessionIndexBuildOptions" in cleanup
+    assert "diskBytes" in cleanup
     assert "const sessionIndex = sessionIndexDomainState();" in cleanup
     # A status response must replace the cached state before rebuilding the
     # visible panel.
@@ -159,6 +163,10 @@ def test_session_index_event_chain_and_status_sync_are_wired() -> None:
         status_merge,
     )
     assert status_merge < unlock
+
+    assert "requestSessionIndexEnabled" in ROUTER
+    assert "requestSessionIndexClear" in ROUTER
+    assert 'control: desired ? "enable" : "disable"' in cleanup
 
 
 def test_session_index_extend_entry_matches_hint_container_and_copy() -> None:
@@ -179,6 +187,15 @@ def test_session_index_extend_entry_matches_hint_container_and_copy() -> None:
     assert "可搜索最近 ${rangeLabelText}" not in SESSION_CLEANUP
     assert "覆盖了最近 ${rangeLabel}" not in SESSION_CLEANUP
     assert "（${item.estimate}）" not in SESSION_CLEANUP
+
+
+def test_session_index_button_matches_adjacent_control_height() -> None:
+    start = LAYOUT_STYLE.index(".codex-usage-hud-session-index-toggle")
+    end = LAYOUT_STYLE.index(".codex-usage-hud-session-index-toggle[aria-expanded", start)
+    source = LAYOUT_STYLE[start:end]
+    assert "height: 32px;" in source
+    assert "min-height: 32px;" in source
+    assert "min-height: 32px;" in LAYOUT_STYLE[LAYOUT_STYLE.index(".codex-usage-hud-session-date-trigger,"):]
     assert 'data-action="session-index-toggle"' in SESSION_CLEANUP
     assert 'aria-expanded="${expanded ? "true" : "false"}"' in SESSION_CLEANUP
 

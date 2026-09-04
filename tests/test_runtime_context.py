@@ -140,5 +140,7 @@ def test_session_index_progress_publishes_only_while_renderer_is_attached(
     assert len(events) == 1
     assert events[0].type == "session_index_progress"
     assert events[0].context["builtCount"] == 2
+    assert events[0].context["enabled"] is True
+    assert events[0].context["diskBytes"] == 0
     assert context.session_index_payload["totalCount"] == 5
     job.close()

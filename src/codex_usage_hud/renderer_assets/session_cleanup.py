@@ -40,6 +40,7 @@ TEXT = r"""
           check: '<path d="m5 12 4 4L19 6"/>',
           alert: '<path d="m21 19-9-16-9 16h18Z"/><path d="M12 9v4M12 17h.01"/>',
           chevron: '<path d="m9 18 6-6-6-6"/>',
+          database: '<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v7c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12v7c0 1.7 3.6 3 8 3s8-1.3 8-3v-7"/>',
           copy: '<rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>',
           folder: '<path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.7-.9L9.6 3.9A2 2 0 0 0 7.9 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/><path d="M2 10h20"/>',
         };
@@ -648,6 +649,17 @@ TEXT = r"""
         });
       }
 
+      function sessionIndexBuildOptions(sessionIndex) {
+        const current = String(sessionIndex?.selectedRange || "1m").trim().toLowerCase();
+        return [
+          ["1m", "最近 1 个月"],
+          ["3m", "最近 3 个月"],
+          ["6m", "最近 6 个月"],
+          ["1y", "最近 1 年"],
+          ["all", "全部"],
+        ].map(([key, label]) => ({ key, label, selected: key === current }));
+      }
+
       function sessionIndexPanelHtml({ notice = "", forceVisible = false } = {}) {
         const sessionIndex = sessionIndexDomainState();
         if (
@@ -664,6 +676,8 @@ TEXT = r"""
         const rangeLabel = sessionIndexRangeLabel(range);
         const built = Math.max(0, Number(sessionIndex.builtCount || 0));
         const total = Math.max(0, Number(sessionIndex.totalCount || 0));
+        const enabled = sessionIndex.enabled !== false;
+        const diskBytes = Math.max(0, Number(sessionIndex.diskBytes || 0));
         const running = new Set(["running", "attached"]).has(jobState);
         const paused = jobState === "paused";
         const indexing = running || paused;
@@ -675,9 +689,14 @@ TEXT = r"""
           ? ` · 已用时 <span data-session-index-elapsed="true">${formatSessionCleanupElapsed(Number(sessionIndex.startedAt))}</span>`
           : "";
         const controlPending = Boolean(sessionCleanupState.sessionIndexControlRequestId);
-        const disabled = controlPending ? " disabled aria-disabled=\"true\"" : "";
+        const disabled = controlPending || !enabled ? " disabled aria-disabled=\"true\"" : "";
+        const controlDisabled = controlPending ? " disabled aria-disabled=\"true\"" : "";
         let message = "";
-        if (controlPending && !running) {
+        if (!enabled) {
+          message = built > 0
+            ? `索引功能已关闭 · 已保留 ${built} 个会话索引`
+            : "索引功能已关闭，不会自动建立或更新索引";
+        } else if (controlPending && !running) {
           // Command just sent but the live domain hasn't flipped to running
           // yet: surface the pending label immediately so the click feels
           // responsive even before the first backend frame arrives.
@@ -704,9 +723,18 @@ TEXT = r"""
         if (paused) {
           actions.push(`<button type="button" class="codex-usage-hud-settings-action codex-usage-hud-session-index-action" data-action="session-index-resume" data-size="small"${disabled}>继续</button>`);
         } else if (coverage === "empty" || jobState === "error") {
+          const options = sessionIndexBuildOptions(sessionIndex)
+            .map((item) => `<option value="${item.key}"${item.selected ? " selected" : ""}>${item.label}</option>`)
+            .join("");
+          actions.push(`<label class="codex-usage-hud-session-index-extend-label">建立范围<select data-session-index-start="true"${controlDisabled}>${options}</select></label>`);
           actions.push(`<button type="button" class="codex-usage-hud-settings-action codex-usage-hud-session-index-action" data-action="session-index-start" data-size="small"${disabled}>开始索引</button>`);
         }
-        if (sessionIndex.canExtend === true && extendOptions.length) {
+        if (
+          sessionIndex.canExtend === true
+          && extendOptions.length
+          && coverage !== "empty"
+          && jobState !== "error"
+        ) {
           const options = extendOptions.map((item) => `<option value="${item.key}">${item.label}</option>`).join("");
           actions.push(`<label class="codex-usage-hud-session-index-extend-label">扩展到<select data-session-index-extend="true"${disabled}>${options}</select></label>`);
           actions.push(`<button type="button" class="codex-usage-hud-settings-action codex-usage-hud-session-index-action" data-action="session-index-extend" data-size="small"${disabled}>${controlPending ? "处理中..." : "扩展索引"}</button>`);
@@ -720,7 +748,9 @@ TEXT = r"""
         const noticeAction = notice
           ? `<span class="codex-usage-hud-session-index-notice">${escapeHtml(notice)}</span>`
           : "";
-        return `<div class="${panelClass}" data-job-state="${escapeHtml(jobState)}" data-coverage="${escapeHtml(coverage)}">${noticeAction}<span class="codex-usage-hud-session-index-text">${message}</span>${progressHtml}<span class="codex-usage-hud-session-index-actions">${actions.join("")}</span></div>`;
+        const clearDisabled = controlPending ? " disabled aria-disabled=\"true\"" : "";
+        const controlBar = `<div class="codex-usage-hud-session-index-controls"><label class="codex-usage-hud-session-index-switch"><input type="checkbox" data-session-index-enabled="true" ${enabled ? "checked" : ""}${controlPending ? " disabled" : ""} aria-label="启用搜索索引"><span class="codex-usage-hud-session-index-switch-track" aria-hidden="true"><span></span></span><span>索引功能</span><strong>${enabled ? "已开启" : "已关闭"}</strong></label><span class="codex-usage-hud-session-index-storage">${cleanupIconSvg("database")}占用 ${storageFormatBytes(diskBytes)}</span><button type="button" class="codex-usage-hud-settings-action codex-usage-hud-session-index-clear" data-action="session-index-clear" data-size="small"${clearDisabled}>清除索引</button></div>`;
+        return `<div class="${panelClass}" data-job-state="${escapeHtml(jobState)}" data-coverage="${escapeHtml(coverage)}">${noticeAction}<div class="codex-usage-hud-session-index-summary"><span class="codex-usage-hud-session-index-text">${message}</span>${controlBar}</div>${progressHtml}<span class="codex-usage-hud-session-index-actions">${actions.join("")}</span></div>`;
       }
 
       function sessionIndexDomainState() {
@@ -913,6 +943,7 @@ TEXT = r"""
           "data-cleanup-auto-close",
           "data-session-cleanup-search",
           "data-session-cleanup-select-all",
+          "data-session-index-enabled",
         ];
         const identity = identityAttributes
           .filter((name) => active.hasAttribute(name))
@@ -1245,6 +1276,74 @@ TEXT = r"""
         return submitted;
       }
 
+      function requestSessionIndexControl(command = {}, pendingLabel = "正在更新搜索索引...") {
+        const wasAttached = sessionCleanupState.sessionIndexUiAttached === true;
+        const requestId = String(command?.requestId || typedSettingsRequestId("session-index"));
+        const request = {
+          ...command,
+          action: "sessionIndexControl",
+          requestId,
+        };
+        sessionCleanupState.sessionIndexUiAttached = true;
+        sessionCleanupState.sessionIndexControlRequestId = requestId;
+        sessionCleanupState.sessionIndexControlLabel = pendingLabel;
+        const submitted = submitSettingsCommand(request, pendingLabel, { preserveOverlay: true });
+        if (submitted) {
+          refreshStoragePanelIfVisible();
+          ctx.lifecycle.timeout("session_index_control_watchdog", () => {
+            if (sessionCleanupState.sessionIndexControlRequestId !== requestId) return;
+            sessionCleanupState.sessionIndexControlRequestId = "";
+            sessionCleanupState.sessionIndexControlLabel = "";
+            refreshStoragePanelIfVisible();
+            setSettingsStatus("索引控制命令未收到响应，请重试。", "error");
+          }, 15000);
+        } else {
+          sessionCleanupState.sessionIndexControlRequestId = "";
+          sessionCleanupState.sessionIndexControlLabel = "";
+          sessionCleanupState.sessionIndexUiAttached = wasAttached;
+        }
+        return submitted;
+      }
+
+      function requestSessionIndexEnabled(enabled) {
+        const desired = enabled === true;
+        const command = { control: desired ? "enable" : "disable" };
+        if (desired) {
+          const startSelect = document
+            .getElementById(settingsModalId)
+            ?.querySelector?.('select[data-session-index-start="true"]');
+          const range = String(startSelect?.value || "").trim().toLowerCase();
+          if (range) command.range = range;
+        }
+        return requestSessionIndexControl(
+          command,
+          desired ? "正在启用搜索索引..." : "正在关闭搜索索引...",
+        );
+      }
+
+      function requestSessionIndexClear() {
+        return requestSessionIndexControl(
+          { control: "clear" },
+          "正在清除搜索索引...",
+        );
+      }
+
+      function openSessionIndexClearConfirm() {
+        const dialog = settingsDialogRoot();
+        if (!dialog) return false;
+        const sessionIndex = sessionIndexDomainState() || {};
+        const diskBytes = Math.max(0, Number(sessionIndex.diskBytes || 0));
+        closeSettingsConfirm();
+        const layer = document.createElement("div");
+        layer.className = "codex-usage-hud-settings-confirm-layer";
+        layer.dataset.settingsConfirm = "true";
+        layer.dataset.sessionIndexClearConfirm = "true";
+        layer.innerHTML = `<div class="codex-usage-hud-settings-confirm-card" data-tone="danger" role="alertdialog" aria-modal="true" aria-label="确认清除搜索索引"><div class="codex-usage-hud-settings-confirm-kicker">本地搜索索引</div><div class="codex-usage-hud-settings-confirm-title">清除搜索索引？</div><div class="codex-usage-hud-settings-confirm-body">将删除当前索引及其本地快照（约 ${storageFormatBytes(diskBytes)}），但不会删除任何会话内容。清除后可重新选择最近 1 个月、3 个月、6 个月、1 年或全部范围建立索引。</div><div class="codex-usage-hud-settings-confirm-actions"><button type="button" class="codex-usage-hud-settings-action" data-action="session-index-clear-cancel" data-variant="ghost">取消</button><button type="button" class="codex-usage-hud-settings-action" data-action="session-index-clear-confirm" data-danger="true" data-primary="true">${cleanupIconSvg("trash")}清除索引</button></div></div>`;
+        dialog.appendChild(layer);
+        layer.querySelector('[data-action="session-index-clear-cancel"]')?.focus?.();
+        return true;
+      }
+
       function resetSessionCleanupPendingRequests() {
         stopSessionCleanupSearchTimer();
         sessionCleanupState.searchRequestId = "";
@@ -1417,6 +1516,7 @@ TEXT = r"""
       sessionIndexToggleHtml,
       sessionIndexScanMergeHtml,
       sessionIndexExtendOptions,
+      sessionIndexBuildOptions,
       formatSessionIndexEta,
       storagePanelHtml,
       sessionCleanupRows,
@@ -1443,6 +1543,10 @@ TEXT = r"""
       stopSessionCleanupSearchTimer,
       requestSessionCleanupSearch,
       requestSessionCleanupWorkdirOptions,
+      requestSessionIndexControl,
+      requestSessionIndexEnabled,
+      requestSessionIndexClear,
+      openSessionIndexClearConfirm,
       resetSessionCleanupPendingRequests,
       syncSessionCleanupElapsed,
       ensureSessionCleanupElapsedTicker,
@@ -1478,6 +1582,7 @@ TEXT = r"""
     sessionIndexToggleHtml,
     sessionIndexScanMergeHtml,
     sessionIndexExtendOptions,
+    sessionIndexBuildOptions,
     formatSessionIndexEta,
     storagePanelHtml,
     sessionCleanupRows,
@@ -1504,6 +1609,10 @@ TEXT = r"""
     stopSessionCleanupSearchTimer,
     requestSessionCleanupSearch,
     requestSessionCleanupWorkdirOptions,
+    requestSessionIndexControl,
+    requestSessionIndexEnabled,
+    requestSessionIndexClear,
+    openSessionIndexClearConfirm,
     resetSessionCleanupPendingRequests,
     syncSessionCleanupElapsed,
     ensureSessionCleanupElapsedTicker,

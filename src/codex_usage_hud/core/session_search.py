@@ -1073,6 +1073,87 @@ class SessionSearchIndex:
     def _snapshot_path(self) -> Path:
         return self.path.with_name(self.path.name + _SNAPSHOT_SUFFIX)
 
+    def index_artifact_paths(self) -> tuple[Path, ...]:
+        """Return the bounded set of files owned by the local search index.
+
+        The SQLite database can leave WAL/SHM or rollback-journal files behind
+        and the resident postings snapshot has its own atomic-write temporary
+        file.  Keep this list explicit: clearing the index must never broaden
+        into deleting user session data from the surrounding runtime directory.
+        """
+        snapshot = self._snapshot_path()
+        return tuple(
+            dict.fromkeys(
+                (
+                    self.path,
+                    self.path.with_name(self.path.name + "-wal"),
+                    self.path.with_name(self.path.name + "-shm"),
+                    self.path.with_name(self.path.name + "-journal"),
+                    self.path.with_name(self.path.name + ".tmp"),
+                    snapshot,
+                    snapshot.with_name(snapshot.name + ".tmp"),
+                )
+            )
+        )
+
+    def disk_usage_bytes(self) -> int:
+        """Return the current on-disk size of all owned index artifacts."""
+        total = 0
+        for path in self.index_artifact_paths():
+            try:
+                if path.is_file():
+                    total += max(0, int(path.stat().st_size))
+            except (OSError, ValueError):
+                continue
+        return total
+
+    def clear_index(self) -> dict[str, object]:
+        """Remove the search index and reset its resident state.
+
+        This only removes files returned by :meth:`index_artifact_paths`; the
+        Codex session rollouts, state database, and session catalog are not
+        touched.  Callers must stop concurrent index work before invoking this
+        method so Windows file handles cannot recreate an artifact after it is
+        removed.
+        """
+        artifacts = self.index_artifact_paths()
+        cleared_bytes = 0
+        removed_files = 0
+        errors: list[OSError] = []
+        with self._lock:
+            for path in artifacts:
+                try:
+                    if path.is_file():
+                        try:
+                            cleared_bytes += max(0, int(path.stat().st_size))
+                        except (OSError, ValueError):
+                            pass
+                        path.unlink()
+                        removed_files += 1
+                except FileNotFoundError:
+                    continue
+                except OSError as exc:
+                    errors.append(exc)
+            self._memory_loaded = False
+            self._documents.clear()
+            self._postings.clear()
+            self._snapshot_last_write = 0.0
+            self._last_load_reconciled = 0
+        if errors:
+            raise OSError(
+                "unable to clear one or more search-index artifacts"
+            ) from errors[0]
+        return {
+            "clearedBytes": cleared_bytes,
+            "diskBytes": self.disk_usage_bytes(),
+            "removedFiles": removed_files,
+        }
+
+    # Small compatibility alias for injected/test surfaces that use the
+    # shorter verb while the public manager-facing name remains explicit.
+    def clear(self) -> dict[str, object]:
+        return self.clear_index()
+
     def _write_snapshot(
         self,
         connection: sqlite3.Connection | None = None,
@@ -1801,6 +1882,7 @@ class SessionSearchIndex:
             "available": True,
             "indexed": count,
             "memoryLoaded": self.memory_loaded,
+            "diskBytes": self.disk_usage_bytes(),
         }
 
 

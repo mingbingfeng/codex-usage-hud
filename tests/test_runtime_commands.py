@@ -154,6 +154,88 @@ def test_session_index_status_keeps_request_correlation() -> None:
     job.attach.assert_called_once_with()
 
 
+@pytest.mark.parametrize(
+    ("control", "method", "argument"),
+    [
+        ("enable", "set_enabled", True),
+        ("disable", "set_enabled", False),
+    ],
+)
+def test_session_index_feature_switch_is_forwarded(
+    control: str,
+    method: str,
+    argument: bool,
+) -> None:
+    job = SimpleNamespace(
+        set_enabled=MagicMock(return_value=True),
+        status=MagicMock(
+            return_value={"enabled": argument, "jobState": "idle", "diskBytes": 7}
+        ),
+    )
+
+    status = handle_session_index_command(
+        {"action": "sessionIndexControl", "control": control, "requestId": "switch-1"},
+        RuntimeCommandPorts(session_index_job=job),
+    )
+
+    job.set_enabled.assert_called_once_with(argument, "")
+    assert status["sessionIndex"]["accepted"] is True
+    assert status["sessionIndex"]["enabled"] is argument
+    assert status["sessionIndex"]["diskBytes"] == 7
+
+
+def test_session_index_clear_returns_clear_result() -> None:
+    job = SimpleNamespace(
+        clear_index=MagicMock(
+            return_value={
+                "accepted": True,
+                "error": "",
+                "clearedBytes": 123,
+                "removedFiles": 4,
+            }
+        ),
+        status=MagicMock(
+            return_value={"enabled": True, "coverage": "empty", "diskBytes": 0}
+        ),
+    )
+
+    status = handle_session_index_command(
+        {"action": "sessionIndexControl", "control": "clear", "requestId": "clear-1"},
+        RuntimeCommandPorts(session_index_job=job),
+    )
+
+    job.clear_index.assert_called_once_with()
+    assert status["sessionIndex"]["accepted"] is True
+    assert status["sessionIndex"]["clearedBytes"] == 123
+    assert status["sessionIndex"]["removedFiles"] == 4
+
+
+def test_session_index_clear_publishes_reset_session_cleanup_payload() -> None:
+    job = SimpleNamespace(
+        clear_index=MagicMock(return_value={"accepted": True, "error": ""}),
+        status=MagicMock(return_value={"coverage": "empty", "diskBytes": 0}),
+    )
+    manager = SimpleNamespace(
+        snapshot=MagicMock(
+            return_value={"search": {"indexState": "idle", "matches": []}}
+        )
+    )
+    worker = SimpleNamespace(_publish=MagicMock())
+
+    status = handle_session_index_command(
+        {"action": "sessionIndexControl", "control": "clear", "requestId": "clear-2"},
+        RuntimeCommandPorts(
+            session_index_job=job,
+            cleanup_manager=manager,
+            cleanup_worker=worker,
+        ),
+    )
+
+    assert status["sessionIndex"]["accepted"] is True
+    manager.snapshot.assert_called_once_with()
+    worker._publish.assert_called_once_with(manager.snapshot.return_value)
+
+
 def test_active_session_candidate_command_binds_exact_id() -> None:
     received: list[dict[str, object]] = []
 

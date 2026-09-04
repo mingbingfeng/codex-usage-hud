@@ -84,6 +84,7 @@ class _FakeSearchIndex:
         self.write_calls: list[bool] = []
         self.ensure_scan_index_calls = 0
         self.load_calls = 0
+        self.clear_calls = 0
         self._load_side_effect = load_side_effect
 
     def search_index_entries(self):
@@ -110,6 +111,15 @@ class _FakeSearchIndex:
     def ensure_scan_index(self) -> bool:
         self.ensure_scan_index_calls += 1
         return True
+
+    def disk_usage_bytes(self) -> int:
+        return len(self._committed)
+
+    def clear_index(self) -> dict[str, object]:
+        self.clear_calls += 1
+        cleared = len(self._committed)
+        self._committed.clear()
+        return {"clearedBytes": cleared, "removedFiles": 2, "diskBytes": 0}
 
     def load(self) -> dict[str, object]:
         self.load_calls += 1
@@ -239,6 +249,67 @@ def test_warm_job_builds_default_range_and_finishes(tmp_path: Path) -> None:
         assert status["builtCount"] == 3
         assert status["canExtend"] is True
         assert sorted(index.indexed_session_ids()) == ["a", "b", "c"]
+    finally:
+        job.close()
+
+
+def test_index_feature_switch_persists_and_reenables_building(tmp_path: Path) -> None:
+    entries = _make_entries(tmp_path, {"a": 5, "b": 10})
+    state_path = tmp_path / "warm.json"
+    index = _FakeSearchIndex(entries)
+    job = SessionIndexWarmJob(index, state_path=state_path)
+    try:
+        assert job.set_enabled(False) is True
+        assert job.status()["enabled"] is False
+        assert WarmJobState.load(state_path).enabled is False
+        assert job.start("1m") is False
+        assert index.sync_calls == []
+
+        assert job.set_enabled(True) is True
+        assert job.status()["enabled"] is True
+        assert _wait_until(lambda: job.status()["jobState"] == "idle")
+        assert index.sync_calls == [["a", "b"]]
+    finally:
+        job.close()
+
+
+def test_clear_index_resets_state_and_allows_any_existing_range(tmp_path: Path) -> None:
+    entries = _make_entries(
+        tmp_path,
+        {"new": 5, "mid": 45, "old": 200},
+    )
+    state_path = tmp_path / "warm.json"
+    index = _FakeSearchIndex(entries)
+    lifecycle: list[str] = []
+    job = SessionIndexWarmJob(
+        index,
+        state_path=state_path,
+        before_clear=lambda: lifecycle.append("before") or True,
+        after_clear=lambda: lifecycle.append("after"),
+    )
+    try:
+        assert job.start("1m") is True
+        assert _wait_until(lambda: job.status()["jobState"] == "idle")
+        assert sorted(index.indexed_session_ids()) == ["new"]
+
+        cleared = job.clear_index()
+        assert cleared["accepted"] is True
+        assert lifecycle == ["before", "after"]
+        assert index.clear_calls == 1
+        status = job.status()
+        assert status["coverage"] == "empty"
+        assert status["selectedRange"] == "1m"
+        assert status["builtCount"] == 0
+        assert status["totalCount"] == 0
+        assert status["diskBytes"] == 0
+        assert index.indexed_session_ids() == frozenset()
+
+        assert job.start("6m") is True
+        assert _wait_until(
+            lambda: job.status()["jobState"] == "idle"
+            and job.status()["coverage"] == "range_done(6m)"
+        )
+        assert sorted(index.indexed_session_ids()) == ["mid", "new"]
     finally:
         job.close()
 

@@ -172,6 +172,34 @@ def test_snapshot_restores_resident_index_on_cold_restart(tmp_path: Path) -> Non
     assert fresh.search("snapshot-cold-restart-marker")["matches"]
 
 
+def test_clear_index_removes_database_snapshot_and_journal_artifacts(
+    tmp_path: Path,
+) -> None:
+    rollout = tmp_path / "clear.jsonl"
+    _write_rollout(rollout, "clear-index-marker")
+    database = tmp_path / "clear.sqlite"
+    index = SessionSearchIndex(database)
+    index.upsert("session", (rollout,))
+    # Exercise the companion-file accounting even though SQLite normally
+    # removes these files after a short transaction.
+    for suffix in ("-wal", "-shm", "-journal", ".tmp"):
+        database.with_name(database.name + suffix).write_bytes(b"temporary")
+    snapshot_tmp = index._snapshot_path().with_name(
+        index._snapshot_path().name + ".tmp"
+    )
+    snapshot_tmp.write_bytes(b"temporary")
+
+    assert index.disk_usage_bytes() > 0
+    result = index.clear_index()
+
+    assert result["removedFiles"] >= 2
+    assert index.disk_usage_bytes() == 0
+    assert index._documents == {}
+    assert index._postings == {}
+    assert index.memory_loaded is False
+    assert all(not path.exists() for path in index.index_artifact_paths())
+
+
 def test_snapshot_reconciles_with_newer_sqlite_rows(tmp_path: Path) -> None:
     rollout = tmp_path / "reconcile.jsonl"
     _write_rollout(rollout, "older-content-marker")

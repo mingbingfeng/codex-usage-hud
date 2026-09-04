@@ -392,6 +392,11 @@ TEXT = r"""
         updatePricingApplyAllPreview(!!pricingApplyAll.checked);
         return;
       }
+      const sessionIndexEnabled = event.target?.closest?.('[data-session-index-enabled="true"]');
+      if (sessionIndexEnabled && root.contains(sessionIndexEnabled)) {
+        requestSessionIndexEnabled(sessionIndexEnabled.checked === true);
+        return;
+      }
       const settingControl = event.target?.closest?.('[data-setting-key]');
       const providerSettingControl = event.target?.closest?.(
         '[data-provider-enabled="true"], [data-provider-notification-only="true"], [data-provider-quick-launch="true"]',
@@ -1032,6 +1037,25 @@ TEXT = r"""
         requestSessionCleanupScan();
         return;
       }
+      if (action.dataset.action === "session-index-clear") {
+        event.preventDefault();
+        event.stopPropagation();
+        openSessionIndexClearConfirm();
+        return;
+      }
+      if (action.dataset.action === "session-index-clear-cancel") {
+        event.preventDefault();
+        event.stopPropagation();
+        closeSettingsConfirm();
+        return;
+      }
+      if (action.dataset.action === "session-index-clear-confirm") {
+        event.preventDefault();
+        event.stopPropagation();
+        closeSettingsConfirm();
+        requestSessionIndexClear();
+        return;
+      }
       if (action.dataset.action === "session-index-toggle") {
         event.preventDefault();
         event.stopPropagation();
@@ -1095,8 +1119,6 @@ TEXT = r"""
         };
         const control = controlByKind[kind];
         if (!control) return;
-        const wasAttached = sessionCleanupState.sessionIndexUiAttached === true;
-        sessionCleanupState.sessionIndexUiAttached = true;
         const requestId = typedSettingsRequestId("session-index");
         const command = {
           action: "sessionIndexControl",
@@ -1119,8 +1141,14 @@ TEXT = r"""
           if (!range) return;
           command.range = range;
         } else if (control === "start") {
+          const coverage = action.closest(".codex-usage-hud-session-index-coverage");
+          const select = coverage?.querySelector?.(
+            'select[data-session-index-start="true"]',
+          );
           command.range = String(
-            sessionCleanupState?.sessionIndex?.selectedRange || "1m",
+            select?.value
+            || sessionCleanupState?.sessionIndex?.selectedRange
+            || "1m",
           ).trim().toLowerCase();
         }
         const pendingLabel = {
@@ -1128,23 +1156,7 @@ TEXT = r"""
           resume: "正在继续建立搜索索引...",
           extend: "正在扩展索引范围...",
         }[kind] || "正在更新搜索索引...";
-        sessionCleanupState.sessionIndexControlRequestId = requestId;
-        sessionCleanupState.sessionIndexControlLabel = pendingLabel;
-        const submitted = submitSettingsCommand(command, pendingLabel, { preserveOverlay: true });
-        if (submitted) {
-          refreshStoragePanelIfVisible();
-          ctx.lifecycle.timeout("session_index_control_watchdog", () => {
-            if (sessionCleanupState.sessionIndexControlRequestId !== requestId) return;
-            sessionCleanupState.sessionIndexControlRequestId = "";
-            sessionCleanupState.sessionIndexControlLabel = "";
-            refreshStoragePanelIfVisible();
-            setSettingsStatus("索引控制命令未收到响应，请重试。", "error");
-          }, 15000);
-        } else {
-          sessionCleanupState.sessionIndexControlRequestId = "";
-          sessionCleanupState.sessionIndexControlLabel = "";
-          sessionCleanupState.sessionIndexUiAttached = wasAttached;
-        }
+        requestSessionIndexControl(command, pendingLabel);
       }
       if (action.dataset.action === "settings-provider-tab") {
         event.preventDefault();
