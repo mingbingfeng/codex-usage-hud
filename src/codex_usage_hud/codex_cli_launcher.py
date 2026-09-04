@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 import json
+import ntpath
 import os
 from pathlib import Path
 import re
@@ -103,9 +104,11 @@ def _launch_environment(
         # spawned terminal must inherit the same store or ``codex resume`` can
         # silently open a different profile's history.
         environment["CODEX_HOME"] = str(home)
-    if _platform_name(platform_name) != "windows":
+    active_platform = _platform_name(platform_name)
+    if active_platform != "windows":
         return environment
 
+    path_separator = ";"
     existing_names = {str(name).casefold() for name in environment}
     for name, value in _windows_registry_environment().items():
         normalized_name = str(name)
@@ -120,17 +123,20 @@ def _launch_environment(
             registry_value = str(value or "")
             merged: list[str] = []
             seen_path_entries: set[str] = set()
-            for entry in (*current_value.split(os.pathsep), *registry_value.split(os.pathsep)):
+            for entry in (
+                *current_value.split(path_separator),
+                *registry_value.split(path_separator),
+            ):
                 path_entry = entry.strip()
                 if not path_entry:
                     continue
-                path_key = os.path.normcase(path_entry).rstrip("\\/")
+                path_key = ntpath.normcase(ntpath.normpath(path_entry)).rstrip("\\/")
                 if path_key in seen_path_entries:
                     continue
                 seen_path_entries.add(path_key)
                 merged.append(path_entry)
             if merged:
-                environment[current_name] = os.pathsep.join(merged)
+                environment[current_name] = path_separator.join(merged)
             existing_names.add(current_name.casefold())
             continue
         if normalized_name.casefold() in existing_names:
@@ -548,9 +554,13 @@ def build_codex_cli_args(
     return args
 
 
-def _shell_quote(value: object, shell: str) -> str:
+def _shell_quote(value: object, shell: str, *, force: bool = False) -> str:
     text = str(value or "")
-    if "://" not in text and re.fullmatch(r"[A-Za-z0-9_./:@%+=,-]+", text):
+    if (
+        not force
+        and "://" not in text
+        and re.fullmatch(r"[A-Za-z0-9_./:@%+=,-]+", text)
+    ):
         return text
     if shell == "powershell":
         return "'" + text.replace("'", "''") + "'"
@@ -633,7 +643,12 @@ def build_codex_cli_command(
                 f"export HTTP_PROXY={_shell_quote(proxy, shell_name)} HTTPS_PROXY={_shell_quote(proxy, shell_name)}"
             )
     if str(workdir or "").strip():
-        quoted_workdir = _shell_quote(str(workdir).strip(), shell_name)
+        # Always quote the working directory.  Besides paths containing
+        # spaces, this keeps generated PowerShell commands stable for POSIX
+        # test hosts that exercise the Windows shell boundary.
+        quoted_workdir = _shell_quote(
+            str(workdir).strip(), shell_name, force=True
+        )
         if shell_name == "powershell":
             lines.append(f"Set-Location -LiteralPath {quoted_workdir}")
         elif shell_name == "cmd":

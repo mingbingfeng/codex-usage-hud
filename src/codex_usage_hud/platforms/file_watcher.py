@@ -557,7 +557,11 @@ def _stat_token(path: Path) -> tuple[str, int, int]:
 
 def _path_key(path: Path) -> str:
     try:
-        text = str(path.resolve(strict=False))
+        # Keep the lexical spelling supplied by the watcher.  Resolving here
+        # turns macOS's /var symlink into /private/var (and can similarly
+        # canonicalize Windows junctions), so a changed path reconstructed
+        # from the token no longer compares equal to the caller's Path.
+        text = os.path.abspath(os.path.normpath(str(path)))
     except OSError:
         text = str(path)
     return os.path.normcase(text)

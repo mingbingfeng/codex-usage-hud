@@ -827,6 +827,7 @@ class ActiveSessionTracker:
         send_requested: bool = False,
         collapsed_title: str | None = None,
         collapsed_disclosure_ambiguous: bool | None = None,
+        allow_filesystem_fallback: bool = False,
     ) -> bool:
         """Accept an active conversation ref pushed by the renderer bridge."""
         if not self.enabled:
@@ -881,6 +882,7 @@ class ActiveSessionTracker:
         follow_reason = ""
         match_candidates: list[dict[str, object]] = []
         manual_candidate_id = ""
+        resolved_path: Path | None = None
         if provisional_renderer_id and title:
             with self._lock:
                 if (
@@ -889,7 +891,10 @@ class ActiveSessionTracker:
                     and (not has_incoming_seq or incoming_seq == current_seq)
                 ):
                     candidate_id = self._renderer_manual_candidate_id
-                    candidate_path = self.path_from_renderer_thread_id(candidate_id)
+                    candidate_path = self.path_from_renderer_thread_id(
+                        candidate_id,
+                        allow_filesystem_fallback=True,
+                    )
                     if candidate_path is not None:
                         candidate_record = self._renderer_candidate_record(
                             candidate_id,
@@ -900,7 +905,10 @@ class ActiveSessionTracker:
                             manual_candidate_id = candidate_id
             if manual_candidate_id:
                 resolved_id = manual_candidate_id
-                resolved_path = self.path_from_renderer_thread_id(resolved_id)
+                resolved_path = self.path_from_renderer_thread_id(
+                    resolved_id,
+                    allow_filesystem_fallback=True,
+                )
                 follow_reason = "manual-selection" if resolved_path is not None else ""
             else:
                 (
@@ -932,7 +940,18 @@ class ActiveSessionTracker:
         # Renderer is the authority. A canonical renderer id may only map via
         # its exact state-db record. Provisional rows use only the controlled
         # unique-unarchived title fallback; ambiguity never picks a substitute.
-        path = self.path_from_renderer_thread_id(session_id) if session_id else None
+        path = (
+            resolved_path
+            if resolved_path is not None
+            else (
+                self.path_from_renderer_thread_id(
+                    session_id,
+                    allow_filesystem_fallback=allow_filesystem_fallback,
+                )
+                if session_id
+                else None
+            )
+        )
         # Title-only refs (common when DOM exposes the chrome title but no
         # thread id yet) still need an exact title map or they stick forever on
         # awaiting-exact-mapping with an empty sessionId.
@@ -1695,7 +1714,10 @@ class ActiveSessionTracker:
         candidate = candidates.get(candidate_id)
         if candidate is None or candidate.get("archived") is not False:
             return False
-        path = self.path_from_renderer_thread_id(candidate_id)
+        path = self.path_from_renderer_thread_id(
+            candidate_id,
+            allow_filesystem_fallback=True,
+        )
         if path is None:
             return False
         record = self._renderer_candidate_record(candidate_id, path, title)
@@ -1845,10 +1867,16 @@ class ActiveSessionTracker:
             except sqlite3.Error:
                 row = None
             path = self._normalize_rollout_path(str(row[0] or "")) if row else None
-        # Filesystem fallback:
-        # - threads table missing (newer Codex builds): always search by filename
-        # - threads table present but row absent / lagging: only when explicitly allowed
-        if path is None and (not threads_table_ok or allow_filesystem_fallback):
+        # Filesystem fallback is explicit for a known legacy schema, but a
+        # database that genuinely has no ``threads`` table is a newer Codex
+        # layout where the filename is the only exact-id index.  A completely
+        # missing database is different: it may simply be a cold-start race,
+        # so the initial renderer observation stays pending until the explicit
+        # reconciliation path opts into the fallback.
+        if path is None and (
+            allow_filesystem_fallback
+            or (not threads_table_ok and self.state_db.exists())
+        ):
             # Narrow the search to the session's creation-date directory when
             # local_thread_catalog has source_created_at. A single-directory
             # glob is O(files_in_day) instead of O(all_historical_sessions).
@@ -1976,6 +2004,7 @@ class ActiveSessionTracker:
             renderer_session_id=raw_id or resolved_id or session_id,
             selection_seq=selection_seq,
             observed_at_ms=observed_at_ms,
+            allow_filesystem_fallback=True,
         )
         with self._lock:
             confirmed = (
@@ -2060,6 +2089,7 @@ class ActiveSessionTracker:
                 "",
                 source="filesystem-heal",
                 renderer_session_id=thread_id,
+                allow_filesystem_fallback=True,
             )
             with self._lock:
                 confirmed = (

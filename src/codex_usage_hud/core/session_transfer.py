@@ -12,7 +12,7 @@ from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import queue
 import re
 import shutil
@@ -67,6 +67,19 @@ def _canonical_uuid(value: object) -> str:
 def _provider_id(value: object) -> str:
     candidate = str(value or "").strip().lower()
     return candidate if _PROVIDER_ID_PATTERN.fullmatch(candidate) else ""
+
+
+def _is_absolute_workdir(value: str) -> bool:
+    """Accept native and Windows absolute paths on every test host."""
+    try:
+        if Path(value).is_absolute():
+            return True
+    except (OSError, ValueError):
+        pass
+    try:
+        return PureWindowsPath(value).is_absolute()
+    except (TypeError, ValueError):
+        return False
 
 
 def _codex_executable() -> str:
@@ -352,7 +365,7 @@ class CodexAppServerClient:
         normalized_cwd = str(cwd or "").strip()
         if normalized_cwd:
             try:
-                if Path(normalized_cwd).is_absolute():
+                if _is_absolute_workdir(normalized_cwd):
                     params["cwd"] = normalized_cwd
             except (OSError, ValueError):
                 pass

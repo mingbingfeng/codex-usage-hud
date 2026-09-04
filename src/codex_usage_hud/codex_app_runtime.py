@@ -61,6 +61,21 @@ def _windows_process_started_at(value: object) -> str:
         except (TypeError, ValueError, OverflowError, OSError):
             return ""
     iso_text = text[:-1] + "+00:00" if text.endswith(("Z", "z")) else text
+    # Python 3.10 rejects otherwise valid ISO timestamps whose fractional
+    # seconds are not exactly three or six digits (CIM providers commonly
+    # emit five).  Normalize the fraction before handing it to fromisoformat;
+    # the resulting UTC value keeps the same precision as the source.
+    iso_match = re.fullmatch(
+        r"(?P<prefix>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})"
+        r"\.(?P<fraction>\d+)(?P<offset>[+-]\d{2}:\d{2})?",
+        iso_text,
+    )
+    if iso_match is not None:
+        fraction = iso_match.group("fraction")
+        iso_text = (
+            f"{iso_match.group('prefix')}.{fraction[:6].ljust(6, '0')}"
+            f"{iso_match.group('offset') or ''}"
+        )
     try:
         iso_value = datetime.fromisoformat(iso_text)
     except ValueError:

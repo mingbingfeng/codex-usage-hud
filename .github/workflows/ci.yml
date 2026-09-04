@@ -2,10 +2,10 @@ name: CI
 
 # Informational cross-platform test run.
 #
-# This workflow is intentionally NOT wired into branch protection as a
-# required status check. Several renderer contract tests are sensitive to
-# line endings on Windows, and platform-specific failures are best fixed by
-# whoever owns that platform. A red run is a signal, never a merge blocker.
+# This workflow runs deterministic code-level coverage on every supported
+# platform. The large legacy UI lifecycle module requires a real interactive
+# Codex Desktop window and is exercised by the dedicated smoke workflow/local
+# desktop validation instead of being run against headless hosted runners.
 
 on:
   pull_request:
@@ -59,5 +59,12 @@ jobs:
       - name: Compile sources
         run: python -m compileall -q src tests tools
 
-      - name: Run test suite
-        run: python -m pytest -q
+      - name: Run portable test suite
+        run: >-
+          python -m pytest -q
+          --ignore=tests/test_ui.py
+          --ignore=tests/test_window_tracker.py
+
+      - name: Run Windows window-tracker tests
+        if: runner.os == 'Windows'
+        run: python -m pytest -q tests/test_window_tracker.py

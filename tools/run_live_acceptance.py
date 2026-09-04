@@ -343,6 +343,12 @@ def _untracked_file_records(
     project_root: Path,
     raw_paths: bytes,
 ) -> tuple[list[dict[str, Any]], list[str]]:
+    # Keep lexical and resolved roots separate.  macOS commonly exposes the
+    # same temporary directory as both /var and /private/var, while Windows
+    # runners may return an 8.3 spelling from tempfile.  Comparing a lexical
+    # candidate with a resolved root falsely reports those normal aliases as
+    # paths outside the repository.
+    lexical_root = Path(os.path.abspath(project_root))
     root = project_root.resolve()
     records: list[dict[str, Any]] = []
     errors: list[str] = []
@@ -355,7 +361,7 @@ def _untracked_file_records(
         candidate = project_root / Path(relative_path)
         try:
             lexical_path = Path(os.path.abspath(candidate))
-            lexical_path.relative_to(root)
+            lexical_path.relative_to(lexical_root)
         except (OSError, ValueError) as exc:
             errors.append(f"Could not resolve untracked path {relative_path!r}: {exc}")
             records.append(
