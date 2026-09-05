@@ -230,7 +230,16 @@ def _initialize_runtime_context_resources(context: RuntimeContext) -> None:
             on_deleted=_refresh_usage_after_session_delete,
         )
     if _session_index_warm_job_available(context.session_cleanup_manager):
+        warm_state_path = hud_runtime_dir() / "session-index-warm.json"
+        fresh_install = not warm_state_path.exists()
         context.session_index_warm_job = _build_session_index_warm_job(context)
+        # New installs default to the search index OFF (session-management UX):
+        # the feature switch starts closed and no background build runs until
+        # the user enables it. Existing installs keep whatever they chose
+        # because their persisted state file already exists, so we never
+        # overwrite their preference.
+        if fresh_install:
+            context.session_index_warm_job.set_enabled(False)
         context.session_index_payload = dict(
             context.session_index_warm_job.status()
         )

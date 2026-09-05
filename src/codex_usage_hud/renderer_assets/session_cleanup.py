@@ -660,14 +660,51 @@ TEXT = r"""
         ].map(([key, label]) => ({ key, label, selected: key === current }));
       }
 
-      function sessionIndexPanelHtml({ notice = "", forceVisible = false } = {}) {
+      function sessionIndexPanelVisible(forceVisible = false) {
+        // Single source of truth for drawer visibility: the toggle's
+        // aria-expanded and the rendered content read the same answer, so they
+        // can never drift apart across a re-render.
+        return forceVisible
+          ? !sessionCleanupState.indexPanelHidden
+          : !!sessionCleanupState.indexPanelOpen;
+      }
+
+      function sessionIndexBadge(sessionIndex) {
+        // Badge state drives color + wording so the panel is readable at a
+        // glance even before the sentence is parsed.
+        const jobState = String(sessionIndex?.jobState || "idle");
+        const coverage = String(sessionIndex?.coverage || "empty");
+        if (sessionIndex?.enabled === false) return { state: "off", label: "已关闭" };
+        if (jobState === "error") return { state: "error", label: "建立失败" };
+        if (jobState === "paused") return { state: "paused", label: "已暂停" };
+        if (new Set(["running", "attached"]).has(jobState)) {
+          return {
+            state: "active",
+            label: String(sessionIndex?.phase || "") === "scanning" ? "扫描中" : "索引中",
+          };
+        }
+        if (coverage === "full" || coverage.indexOf("range_done") === 0) {
+          return { state: "ready", label: "已就绪" };
+        }
+        return { state: "empty", label: "未建立" };
+      }
+
+      function sessionIndexMetricsHtml(sessionIndex) {
+        // Numbers the headline drops live here. 已索引 only appears once the
+        // range has an enumerated total, so an unbuilt index shows no 0 / 0.
+        const built = Math.max(0, Number(sessionIndex?.builtCount || 0));
+        const total = Math.max(0, Number(sessionIndex?.totalCount || 0));
+        const metrics = [];
+        if (total > 0) metrics.push(["已索引", `${built} / ${total}`]);
+        metrics.push(["范围", sessionIndexRangeLabel(sessionIndex?.selectedRange)]);
+        metrics.push(["占用", storageFormatBytes(Math.max(0, Number(sessionIndex?.diskBytes || 0)))]);
+        return `<dl class="codex-usage-hud-session-index-metrics">${metrics.map(([label, value]) => `<div class="codex-usage-hud-session-index-metric"><dt>${label}</dt><dd>${escapeHtml(value)}</dd></div>`).join("")}</dl>`;
+      }
+
+      function sessionIndexPanelHtml({ notice = "" } = {}) {
         const sessionIndex = sessionIndexDomainState();
-        if (
-          (!forceVisible && !sessionCleanupState.indexPanelOpen)
-          || (forceVisible && sessionCleanupState.indexPanelHidden)
-        ) return "";
         if (!sessionIndex) {
-          return `<div class="codex-usage-hud-session-index-coverage" data-job-state="unavailable" data-coverage="empty"><span class="codex-usage-hud-session-index-text">搜索索引状态当前不可用</span></div>`;
+          return `<div class="codex-usage-hud-session-index-coverage" data-variant="panel" data-state="empty" data-job-state="unavailable" data-coverage="empty"><p class="codex-usage-hud-session-index-text">搜索索引状态当前不可用</p></div>`;
         }
         const coverage = String(sessionIndex.coverage || "empty");
         const jobState = String(sessionIndex.jobState || "idle");
@@ -677,7 +714,6 @@ TEXT = r"""
         const built = Math.max(0, Number(sessionIndex.builtCount || 0));
         const total = Math.max(0, Number(sessionIndex.totalCount || 0));
         const enabled = sessionIndex.enabled !== false;
-        const diskBytes = Math.max(0, Number(sessionIndex.diskBytes || 0));
         const running = new Set(["running", "attached"]).has(jobState);
         const paused = jobState === "paused";
         const indexing = running || paused;
@@ -691,10 +727,16 @@ TEXT = r"""
         const controlPending = Boolean(sessionCleanupState.sessionIndexControlRequestId);
         const disabled = controlPending || !enabled ? " disabled aria-disabled=\"true\"" : "";
         const controlDisabled = controlPending ? " disabled aria-disabled=\"true\"" : "";
+        // Layout contract: the headline carries prose only. Counts live in the
+        // metric row and timers live on the progress meta line, so the panel
+        // reads as three scannable bands instead of one dense sentence.
+        const badge = sessionIndexBadge(sessionIndex);
         let message = "";
+        let progressPhase = "";
+        let progressMeta = "";
         if (!enabled) {
           message = built > 0
-            ? `索引功能已关闭 · 已保留 ${built} 个会话索引`
+            ? `索引功能已关闭 · 已保留 ${built} 个会话索引，重新开启后可继续扩展`
             : "索引功能已关闭，不会自动建立或更新索引";
         } else if (controlPending && !running) {
           // Command just sent but the live domain hasn't flipped to running
@@ -702,32 +744,45 @@ TEXT = r"""
           // responsive even before the first backend frame arrives.
           message = sessionCleanupState.sessionIndexControlLabel || "正在更新搜索索引...";
         } else if (paused) {
-          message = `索引已暂停：${rangeLabel} · ${built}/${total} 个会话`;
+          message = `索引已暂停，已完成的 ${built} 个会话仍可搜索`;
+          progressPhase = "已暂停 · 写入索引";
+          progressMeta = `${percent}%${elapsedSpan}`;
         } else if (running && phase === "scanning") {
-          message = `正在扫描会话文件… · 准备为「${rangeLabel}」建立索引${elapsedSpan}`;
-        } else if (running && total > 0) {
-          message = `正在建立索引：${rangeLabel} · ${built}/${total} 个会话 · ${percent}%${remaining > 0 ? ` · 预计剩余 ${sessionIndexEtaLabel(remaining)}` : ""}${elapsedSpan}`;
+          message = "正在扫描本地会话文件，扫描完成后开始写入索引";
+          progressPhase = "扫描会话文件 · 第 1/2 步";
+          progressMeta = elapsedSpan ? elapsedSpan.slice(3) : "";
+        } else if (running) {
+          message = `正在为「${rangeLabel}」建立搜索索引，可收起此面板，任务在后台继续`;
+          progressPhase = "写入索引 · 第 2/2 步";
+          progressMeta = `${percent}%${remaining > 0 ? ` · 预计剩余 ${sessionIndexEtaLabel(remaining)}` : ""}${elapsedSpan}`;
         } else if (coverage === "full") {
-          message = `已建立全部会话索引${total ? ` · ${total} 个会话` : ""}`;
+          message = "已建立全部会话索引，可搜索全部历史会话";
+          progressPhase = "已完成";
+          progressMeta = "100%";
         } else if (coverage.indexOf("range_done") === 0) {
-          message = `当前可搜索 ${rangeLabel}${total ? ` · ${total} 个会话` : ""}`;
+          message = `当前可搜索 ${rangeLabel}，更早的会话需要先扩展索引范围`;
+          progressPhase = "已完成";
+          progressMeta = `${percent}%`;
         } else if (jobState === "error") {
-          message = "搜索索引建立失败，可重新开始。";
+          message = "搜索索引建立失败，可重新选择范围再次开始，已有索引不受影响";
         } else {
-          message = `尚未建立 ${rangeLabel} 的搜索索引`;
+          message = "尚未建立搜索索引，建立后可按标题、内容与文件名检索历史会话";
         }
         const extendOptions = sessionIndexExtendOptions(sessionIndex);
         const actions = [];
         // The empty-result codex-usage-hud-session-coverage-hint reuses this
         // same inline block and owns the range selector for extension.
+        // Primary band: the action that moves the index forward. Range
+        // selectors stay attached to their button so the pair reads as one
+        // control instead of two unrelated widgets.
         if (paused) {
-          actions.push(`<button type="button" class="codex-usage-hud-settings-action codex-usage-hud-session-index-action" data-action="session-index-resume" data-size="small"${disabled}>继续</button>`);
+          actions.push(`<button type="button" class="codex-usage-hud-settings-action codex-usage-hud-session-index-action" data-action="session-index-resume" data-size="small" data-primary="true"${disabled}>继续</button>`);
         } else if (coverage === "empty" || jobState === "error") {
           const options = sessionIndexBuildOptions(sessionIndex)
             .map((item) => `<option value="${item.key}"${item.selected ? " selected" : ""}>${item.label}</option>`)
             .join("");
-          actions.push(`<label class="codex-usage-hud-session-index-extend-label">建立范围<select data-session-index-start="true"${controlDisabled}>${options}</select></label>`);
-          actions.push(`<button type="button" class="codex-usage-hud-settings-action codex-usage-hud-session-index-action" data-action="session-index-start" data-size="small"${disabled}>开始索引</button>`);
+          actions.push(`<label class="codex-usage-hud-session-index-field">建立范围<select data-session-index-start="true"${controlDisabled}>${options}</select></label>`);
+          actions.push(`<button type="button" class="codex-usage-hud-settings-action codex-usage-hud-session-index-action" data-action="session-index-start" data-size="small" data-primary="true"${disabled}>开始索引</button>`);
         }
         if (
           sessionIndex.canExtend === true
@@ -736,21 +791,32 @@ TEXT = r"""
           && jobState !== "error"
         ) {
           const options = extendOptions.map((item) => `<option value="${item.key}">${item.label}</option>`).join("");
-          actions.push(`<label class="codex-usage-hud-session-index-extend-label">扩展到<select data-session-index-extend="true"${disabled}>${options}</select></label>`);
-          actions.push(`<button type="button" class="codex-usage-hud-settings-action codex-usage-hud-session-index-action" data-action="session-index-extend" data-size="small"${disabled}>${controlPending ? "处理中..." : "扩展索引"}</button>`);
+          actions.push(`<label class="codex-usage-hud-session-index-field">扩展到<select data-session-index-extend="true"${disabled}>${options}</select></label>`);
+          actions.push(`<button type="button" class="codex-usage-hud-settings-action codex-usage-hud-session-index-action" data-action="session-index-extend" data-size="small" data-primary="true"${disabled}>${controlPending ? "处理中..." : "扩展索引"}</button>`);
         }
+        // Progress band: the bar owns its stage label and timing meta, so the
+        // headline never has to repeat the same numbers.
         const progressHtml = indexing || total > 0
-          ? `<div class="codex-usage-hud-session-index-track" role="progressbar" aria-valuenow="${percent}" aria-valuemin="0" aria-valuemax="100" aria-label="搜索索引建立进度"><div class="codex-usage-hud-session-index-fill" data-phase="${phase === 'indexing' ? 'indexing' : ''}" data-indeterminate="${indexing && (total <= 0 || phase === 'scanning')}" style="width:${phase === 'scanning' ? 8 : Math.max(percent, indexing ? 6 : 0)}%"></div></div>`
+          ? `<div class="codex-usage-hud-session-index-progress" data-state="${badge.state}"><div class="codex-usage-hud-session-index-progress-meta"><span>${escapeHtml(progressPhase)}</span><span>${progressMeta}</span></div><div class="codex-usage-hud-session-index-track" role="progressbar" aria-valuenow="${percent}" aria-valuemin="0" aria-valuemax="100" aria-label="搜索索引建立进度"><div class="codex-usage-hud-session-index-fill" data-phase="${phase === 'indexing' ? 'indexing' : ''}" data-indeterminate="${indexing && (total <= 0 || phase === 'scanning')}" style="width:${phase === 'scanning' ? 8 : Math.max(percent, indexing ? 6 : 0)}%"></div></div></div>`
           : "";
+        // The empty-result hint reuses this structure in a tighter context;
+        // data-variant lets each skin target its own layout instead of the two
+        // fighting each other through class overrides.
+        const variant = notice ? "hint" : "panel";
         const panelClass = notice
           ? "codex-usage-hud-session-index-coverage codex-usage-hud-session-coverage-hint"
           : "codex-usage-hud-session-index-coverage";
-        const noticeAction = notice
-          ? `<span class="codex-usage-hud-session-index-notice">${escapeHtml(notice)}</span>`
+        const noticeHtml = notice
+          ? `<p class="codex-usage-hud-session-index-notice">${cleanupIconSvg("alert")}<span>${escapeHtml(notice)}</span></p>`
           : "";
         const clearDisabled = controlPending ? " disabled aria-disabled=\"true\"" : "";
-        const controlBar = `<div class="codex-usage-hud-session-index-controls"><label class="codex-usage-hud-session-index-switch"><input type="checkbox" data-session-index-enabled="true" ${enabled ? "checked" : ""}${controlPending ? " disabled" : ""} aria-label="启用搜索索引"><span class="codex-usage-hud-session-index-switch-track" aria-hidden="true"><span></span></span><span>索引功能</span><strong>${enabled ? "已开启" : "已关闭"}</strong></label><span class="codex-usage-hud-session-index-storage">${cleanupIconSvg("database")}占用 ${storageFormatBytes(diskBytes)}</span><button type="button" class="codex-usage-hud-settings-action codex-usage-hud-session-index-clear" data-action="session-index-clear" data-size="small"${clearDisabled}>清除索引</button></div>`;
-        return `<div class="${panelClass}" data-job-state="${escapeHtml(jobState)}" data-coverage="${escapeHtml(coverage)}">${noticeAction}<div class="codex-usage-hud-session-index-summary"><span class="codex-usage-hud-session-index-text">${message}</span>${controlBar}</div>${progressHtml}<span class="codex-usage-hud-session-index-actions">${actions.join("")}</span></div>`;
+        // Secondary band sits opposite the primary action: configuration and
+        // the destructive clear must not share a visual weight with 开始索引.
+        const primaryHtml = actions.length
+          ? `<div class="codex-usage-hud-session-index-actions-primary">${actions.join("")}</div>`
+          : "";
+        const secondaryHtml = `<div class="codex-usage-hud-session-index-actions-secondary"><label class="codex-usage-hud-session-index-switch"><input type="checkbox" data-session-index-enabled="true" ${enabled ? "checked" : ""}${controlPending ? " disabled" : ""} aria-label="启用搜索索引"><span class="codex-usage-hud-session-index-switch-track" aria-hidden="true"><span></span></span><span>索引功能</span><strong>${enabled ? "已开启" : "已关闭"}</strong></label><button type="button" class="codex-usage-hud-settings-action codex-usage-hud-session-index-clear" data-action="session-index-clear" data-size="small"${clearDisabled}>清除索引</button></div>`;
+        return `<section class="${panelClass}" data-variant="${variant}" data-state="${badge.state}" data-job-state="${escapeHtml(jobState)}" data-coverage="${escapeHtml(coverage)}" aria-label="搜索索引">${noticeHtml}<header class="codex-usage-hud-session-index-head"><span class="codex-usage-hud-session-index-badge" data-state="${badge.state}"><span class="codex-usage-hud-session-index-badge-dot" aria-hidden="true"></span>${escapeHtml(badge.label)}</span><p class="codex-usage-hud-session-index-text">${message}</p>${sessionIndexMetricsHtml(sessionIndex)}</header>${progressHtml}<div class="codex-usage-hud-session-index-actions">${primaryHtml}${secondaryHtml}</div></section>`;
       }
 
       function sessionIndexDomainState() {
@@ -899,12 +965,14 @@ TEXT = r"""
           if (range === "all") return "";
           return `没搜到结果，可能因为索引只覆盖了 ${rangeLabel}。更早的会话需要先扩展索引范围。`;
         })());
-        const indexPanel = sessionIndexPanelHtml({
-          notice: coverageHint,
-          forceVisible: Boolean(coverageHint),
-        });
+        // The drawer element stays mounted so the open/close transition has
+        // something to animate; only its data-open flips.
+        const indexBody = sessionIndexPanelHtml({ notice: coverageHint });
+        const indexVisible = Boolean(indexBody) && sessionIndexPanelVisible(Boolean(coverageHint));
+        const indexPanel = indexBody
+          ? `<div class="codex-usage-hud-session-index-drawer" data-open="${indexVisible ? "true" : "false"}"${indexVisible ? "" : " inert"}><div class="codex-usage-hud-session-index-drawer-inner">${indexBody}</div></div>`
+          : "";
         const emptyState = rowHtml ? "" : `<div class="codex-usage-hud-cleanup-empty"><div class="codex-usage-hud-cleanup-empty-mark">${cleanupIconSvg("search", "codex-usage-hud-cleanup-icon-lg")}</div><p class="codex-usage-hud-cleanup-empty-title">当前筛选没有会话</p><p class="codex-usage-hud-cleanup-empty-hint">试试调整筛选条件，或清除筛选后重新查看</p></div>`;
-        const indexVisible = Boolean(indexPanel);
         const indexToggle = sessionIndexToggleHtml(sessionIndex, indexVisible);
         return `<section class="codex-usage-hud-session-cleanup" aria-label="会话管理">${unavailable}<div class="codex-usage-hud-session-tools"><div class="codex-usage-hud-session-tools-primary"><div class="codex-usage-hud-session-search">${cleanupIconSvg("search")}<input type="search" data-session-cleanup-search="true" value="${escapeHtml(sessionCleanupState.searchDraft)}" placeholder="搜索会话、内容或文件" aria-label="搜索会话"><button type="button" class="codex-usage-hud-session-search-submit" data-action="session-cleanup-search-submit" aria-label="开始搜索">${cleanupIconSvg("search")}<span>${searchButtonLabel}</span></button></div><div class="codex-usage-hud-session-index-workdir">${indexToggle}${workdirControl}</div><div class="codex-usage-hud-session-date-filter" data-open="${sessionCleanupState.datePickerOpen}"><button type="button" class="codex-usage-hud-session-date-trigger" data-action="session-cleanup-date-toggle" aria-expanded="${sessionCleanupState.datePickerOpen ? "true" : "false"}" aria-haspopup="dialog">${cleanupIconSvg("calendar")}<span>最后活动：${escapeHtml(sessionCleanupDateRangeLabel())}</span>${cleanupIconSvg("chevron")}</button>${datePopover}</div></div>${indexPanel}<div class="codex-usage-hud-session-filter-controls">${controls}</div>${sessionCleanupFilterSummary(data, rows)}</div><div class="codex-usage-hud-session-table"><div class="codex-usage-hud-session-head"><span><input type="checkbox" data-session-cleanup-select-all="true" ${allVisibleSelected ? "checked" : ""} ${visibleSelectable.length ? "" : "disabled"} aria-label="全选当前页"></span><span>会话</span><span aria-hidden="true"></span><span>最后活动</span><span>状态</span><span>占用</span></div>${rowHtml || emptyState}</div>${pagination}${resultHtml}</section>`;
       }

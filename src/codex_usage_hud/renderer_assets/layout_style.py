@@ -3632,41 +3632,265 @@ TEXT = r"""
           #${rootId} .codex-usage-hud-session-cleanup:has(> .codex-usage-hud-cleanup-empty-state):not(:has(> .codex-usage-hud-cleanup-scan-strip)) {
             grid-template-rows: minmax(0, 1fr);
           }
+          #${rootId} .codex-usage-hud-session-index-drawer {
+            min-width: 0;
+            display: grid;
+            grid-template-rows: 0fr;
+            opacity: 0;
+            visibility: hidden;
+            transition: grid-template-rows .22s cubic-bezier(.32, .72, .3, 1), opacity .18s ease, visibility 0s linear .22s;
+          }
+          #${rootId} .codex-usage-hud-session-index-drawer[data-open="true"] {
+            grid-template-rows: 1fr;
+            opacity: 1;
+            visibility: visible;
+            transition: grid-template-rows .22s cubic-bezier(.32, .72, .3, 1), opacity .18s ease, visibility 0s linear 0s;
+          }
+          #${rootId} .codex-usage-hud-session-index-drawer-inner {
+            min-width: 0;
+            min-height: 0;
+            overflow: hidden;
+          }
           #${rootId} .codex-usage-hud-session-index-coverage {
             min-width: 0;
             display: grid;
-            gap: 7px;
-            padding: 10px 13px 11px;
-            border-bottom: 1px solid #393b40;
-            background: linear-gradient(180deg, #1b2532 0%, #151a20 100%);
+            gap: 10px;
+            padding: 11px 12px 12px;
+            border: 1px solid #2b3644;
+            border-radius: 6px;
+            background: linear-gradient(180deg, #19212b 0%, #141a22 100%);
             color: var(--codex-usage-hud-muted, #9da1a8);
             font-size: 11px;
           }
-          #${rootId} .codex-usage-hud-session-index-shield {
-            display: inline-flex;
+          #${rootId} .codex-usage-hud-session-index-coverage[data-variant="hint"] {
+            gap: 8px;
+            border-color: #3d4d63;
+            background: rgba(94, 167, 255, .06);
+          }
+          #${rootId} .codex-usage-hud-session-index-notice {
+            display: flex;
             align-items: center;
-            gap: 7px;
-            color: #7db9f7;
-            font-weight: 650;
+            gap: 6px;
+            margin: 0;
+            padding: 6px 8px;
+            border: 1px solid rgba(255, 184, 107, .28);
+            border-radius: 4px;
+            background: rgba(255, 184, 107, .08);
+            color: #ffd9a8;
+            font-size: 10px;
           }
-          #${rootId} .codex-usage-hud-session-index-text {
-            min-width: 0;
-            color: #b9cbe0;
+          #${rootId} .codex-usage-hud-session-index-notice .codex-usage-hud-cleanup-icon {
+            width: 13px;
+            height: 13px;
+            color: var(--codex-usage-hud-warning, #ffb86b);
           }
-          #${rootId} .codex-usage-hud-session-index-summary {
+          #${rootId} .codex-usage-hud-session-index-head {
             min-width: 0;
             display: grid;
-            grid-template-columns: minmax(0, 1fr) auto;
+            grid-template-columns: auto minmax(0, 1fr) auto;
             align-items: center;
             gap: 10px;
           }
-          #${rootId} .codex-usage-hud-session-index-controls {
-            min-width: 0;
+          #${rootId} .codex-usage-hud-session-index-badge {
             display: inline-flex;
             align-items: center;
-            justify-content: flex-end;
-            flex-wrap: wrap;
-            gap: 7px;
+            gap: 5px;
+            height: 20px;
+            padding: 0 8px 0 7px;
+            border: 1px solid transparent;
+            border-radius: 999px;
+            font-size: 10px;
+            font-weight: 700;
+            white-space: nowrap;
+          }
+          #${rootId} .codex-usage-hud-session-index-badge-dot {
+            width: 6px;
+            height: 6px;
+            flex: 0 0 6px;
+            border-radius: 50%;
+            background: currentColor;
+          }
+          #${rootId} .codex-usage-hud-session-index-badge[data-state="empty"] {
+            border-color: #3a4250;
+            background: rgba(124, 133, 146, .12);
+            color: #7c8592;
+          }
+          #${rootId} .codex-usage-hud-session-index-badge[data-state="off"] {
+            border-color: #434b58;
+            background: rgba(169, 180, 194, .10);
+            color: #a9b4c2;
+          }
+          #${rootId} .codex-usage-hud-session-index-badge[data-state="active"] {
+            border-color: rgba(94, 167, 255, .42);
+            background: rgba(94, 167, 255, .14);
+            color: #9ccbff;
+          }
+          #${rootId} .codex-usage-hud-session-index-badge[data-state="paused"] {
+            border-color: rgba(255, 184, 107, .42);
+            background: rgba(255, 184, 107, .12);
+            color: var(--codex-usage-hud-warning, #ffb86b);
+          }
+          #${rootId} .codex-usage-hud-session-index-badge[data-state="ready"] {
+            border-color: rgba(125, 227, 160, .38);
+            background: rgba(125, 227, 160, .12);
+            color: #7de3a0;
+          }
+          #${rootId} .codex-usage-hud-session-index-badge[data-state="error"] {
+            border-color: rgba(255, 107, 107, .42);
+            background: rgba(255, 107, 107, .12);
+            color: #ffb3a8;
+          }
+          #${rootId} .codex-usage-hud-session-index-badge[data-state="active"] .codex-usage-hud-session-index-badge-dot {
+            animation: codex-usage-hud-session-index-pulse 1.2s ease-in-out infinite;
+          }
+          @keyframes codex-usage-hud-session-index-pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: .25; }
+          }
+          #${rootId} .codex-usage-hud-session-index-text {
+            min-width: 0;
+            margin: 0;
+            color: #b9cbe0;
+            font-size: 11px;
+          }
+          #${rootId} .codex-usage-hud-session-index-metrics {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            margin: 0;
+          }
+          #${rootId} .codex-usage-hud-session-index-metric {
+            display: grid;
+            gap: 1px;
+            text-align: right;
+          }
+          #${rootId} .codex-usage-hud-session-index-metric dt {
+            color: #7c8592;
+            font-size: 9px;
+            letter-spacing: .04em;
+          }
+          #${rootId} .codex-usage-hud-session-index-metric dd {
+            margin: 0;
+            color: #dce6f2;
+            font-size: 12px;
+            font-weight: 700;
+            font-variant-numeric: tabular-nums;
+            white-space: nowrap;
+          }
+          #${rootId} .codex-usage-hud-session-index-progress {
+            min-width: 0;
+            display: grid;
+            gap: 5px;
+          }
+          #${rootId} .codex-usage-hud-session-index-progress-meta {
+            display: flex;
+            align-items: baseline;
+            justify-content: space-between;
+            gap: 10px;
+            color: var(--codex-usage-hud-muted, #9da1a8);
+            font-size: 10px;
+          }
+          #${rootId} .codex-usage-hud-session-index-progress-meta > span:last-child {
+            font-variant-numeric: tabular-nums;
+            text-align: right;
+          }
+          #${rootId} .codex-usage-hud-session-index-track {
+            position: relative;
+            height: 6px;
+            border-radius: 999px;
+            overflow: hidden;
+            background: rgba(255, 255, 255, .08);
+          }
+          #${rootId} .codex-usage-hud-session-index-fill {
+            height: 100%;
+            border-radius: inherit;
+            background: linear-gradient(90deg, #5ea7ff, #9ccbff);
+            box-shadow: 0 0 12px rgba(94, 167, 255, .35);
+            transition: width .28s ease;
+            position: relative;
+            overflow: hidden;
+          }
+          #${rootId} .codex-usage-hud-session-index-progress[data-state="paused"] .codex-usage-hud-session-index-fill {
+            background: linear-gradient(90deg, #d79a4e, #ffc98a);
+            box-shadow: none;
+          }
+          #${rootId} .codex-usage-hud-session-index-fill[data-indeterminate="true"] {
+            width: 38% !important;
+            animation: codex-usage-hud-session-index-indet 1.35s ease-in-out infinite;
+          }
+          @keyframes codex-usage-hud-session-index-indet {
+            0% { transform: translateX(-120%); }
+            100% { transform: translateX(320%); }
+          }
+          #${rootId} .codex-usage-hud-session-index-fill[data-phase="indexing"]::after {
+            content: "";
+            position: absolute;
+            top: 0;
+            bottom: 0;
+            left: 0;
+            width: 42%;
+            background: linear-gradient(90deg, transparent, rgba(255, 255, 255, .7), transparent);
+            transform: translateX(-120%);
+            animation: codex-usage-hud-session-index-shimmer 1.6s ease-in-out infinite;
+          }
+          @keyframes codex-usage-hud-session-index-shimmer {
+            0% { transform: translateX(-120%); }
+            100% { transform: translateX(320%); }
+          }
+          #${rootId} .codex-usage-hud-session-index-actions {
+            min-width: 0;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            padding-top: 10px;
+            border-top: 1px solid rgba(255, 255, 255, .07);
+          }
+          #${rootId} .codex-usage-hud-session-index-actions-primary {
+            min-width: 0;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+          }
+          #${rootId} .codex-usage-hud-session-index-actions-secondary {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-left: auto;
+          }
+          #${rootId} .codex-usage-hud-session-index-field {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            color: #9ccbff;
+            font-size: 10px;
+            white-space: nowrap;
+          }
+          #${rootId} .codex-usage-hud-session-index-field select {
+            max-width: 148px;
+            min-height: 25px;
+            box-sizing: border-box;
+            border: 1px solid #44464c;
+            border-radius: 5px;
+            background: #17191c;
+            color: var(--codex-usage-hud-muted, #9da1a8);
+            font: inherit;
+            font-size: 10px;
+            padding: 2px 5px;
+          }
+          #${rootId} .codex-usage-hud-session-index-action[data-primary="true"] {
+            min-height: 26px;
+            padding: 0 11px;
+            border: 1px solid #3b8eea;
+            border-radius: 5px;
+            background: #3b8eea;
+            color: #ffffff;
+            font-size: 11px;
+            font-weight: 600;
+          }
+          #${rootId} .codex-usage-hud-session-index-action[data-primary="true"]:hover:not(:disabled) {
+            border-color: #4d9af0;
+            background: #4d9af0;
           }
           #${rootId} .codex-usage-hud-session-index-switch {
             position: relative;
@@ -3727,129 +3951,21 @@ TEXT = r"""
             font-weight: 600;
           }
           #${rootId} .codex-usage-hud-session-index-switch input:not(:checked) ~ strong {
-            color: #ffb86b;
-          }
-          #${rootId} .codex-usage-hud-session-index-storage {
-            display: inline-flex;
-            align-items: center;
-            gap: 4px;
-            color: #9da1a8;
-            font-size: 10px;
-            white-space: nowrap;
-          }
-          #${rootId} .codex-usage-hud-session-index-storage .codex-usage-hud-cleanup-icon {
-            width: 12px;
-            height: 12px;
-            color: #9ccbff;
+            color: var(--codex-usage-hud-warning, #ffb86b);
           }
           #${rootId} .codex-usage-hud-session-index-clear {
             min-height: 25px;
-            padding: 2px 7px;
-            color: #ffb3a8;
-            background: rgba(255, 107, 107, .10);
+            padding: 2px 8px;
             border: 1px solid rgba(255, 107, 107, .28);
+            border-radius: 5px;
+            background: rgba(255, 107, 107, .08);
+            color: #ffb3a8;
             font-size: 10px;
           }
           #${rootId} .codex-usage-hud-session-index-clear:hover:not(:disabled) {
-            background: rgba(255, 107, 107, .20);
+            border-color: rgba(255, 107, 107, .42);
+            background: rgba(255, 107, 107, .18);
             color: #ffd2cb;
-          }
-          #${rootId} .codex-usage-hud-session-index-coverage[data-job-state="running"] .codex-usage-hud-session-index-shield,
-          #${rootId} .codex-usage-hud-session-index-coverage[data-job-state="attached"] .codex-usage-hud-session-index-shield {
-            color: #7de3a0;
-          }
-          #${rootId} .codex-usage-hud-session-index-coverage[data-job-state="paused"] .codex-usage-hud-session-index-shield {
-            color: var(--codex-usage-hud-warning, #ffb86b);
-          }
-          #${rootId} .codex-usage-hud-session-index-track {
-            position: relative;
-            height: 6px;
-            border-radius: 999px;
-            overflow: hidden;
-            background: rgba(255, 255, 255, .08);
-          }
-          #${rootId} .codex-usage-hud-session-index-fill {
-            height: 100%;
-            border-radius: inherit;
-            background: linear-gradient(90deg, #5ea7ff, #9ccbff);
-            box-shadow: 0 0 12px rgba(94, 167, 255, .35);
-            transition: width .28s ease;
-            position: relative;
-            overflow: hidden;
-          }
-          #${rootId} .codex-usage-hud-session-index-fill[data-indeterminate="true"] {
-            width: 38% !important;
-            animation: codex-usage-hud-session-index-indet 1.35s ease-in-out infinite;
-          }
-          @keyframes codex-usage-hud-session-index-indet {
-            0% { transform: translateX(-120%); }
-            100% { transform: translateX(320%); }
-          }
-          #${rootId} .codex-usage-hud-session-index-fill[data-phase="indexing"]::after {
-            content: "";
-            position: absolute;
-            top: 0;
-            bottom: 0;
-            left: 0;
-            width: 42%;
-            background: linear-gradient(90deg, transparent, rgba(255, 255, 255, .7), transparent);
-            transform: translateX(-120%);
-            animation: codex-usage-hud-session-index-shimmer 1.6s ease-in-out infinite;
-          }
-          @keyframes codex-usage-hud-session-index-shimmer {
-            0% { transform: translateX(-120%); }
-            100% { transform: translateX(320%); }
-          }
-          #${rootId} .codex-usage-hud-session-index-actions {
-            min-width: 0;
-            display: flex;
-            align-items: center;
-            flex-wrap: wrap;
-            gap: 6px;
-          }
-          #${rootId} .codex-usage-hud-session-index-extend-label {
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-            color: #9ccbff;
-            font-size: 10px;
-            white-space: nowrap;
-          }
-          #${rootId} .codex-usage-hud-session-index-extend-label select {
-            max-width: 148px;
-            min-height: 25px;
-            box-sizing: border-box;
-            border: 1px solid #44464c;
-            border-radius: 5px;
-            background: #17191c;
-            color: var(--codex-usage-hud-muted, #9da1a8);
-            font: inherit;
-            font-size: 10px;
-            padding: 2px 5px;
-          }
-          #${rootId} .codex-usage-hud-session-coverage-hint {
-            min-width: 0;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 10px;
-            padding: 7px 10px;
-            border: 1px solid #3d4d63;
-            border-radius: 5px;
-            background: rgba(94, 167, 255, .06);
-            color: #a9c6e8;
-            font-size: 10px;
-          }
-          #${rootId} .codex-usage-hud-session-coverage-hint.codex-usage-hud-session-index-coverage {
-            display: grid;
-            align-items: center;
-            justify-content: initial;
-          }
-          #${rootId} .codex-usage-hud-session-coverage-hint-action {
-            flex: 0 0 auto;
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
           }
           #${rootId} .codex-usage-hud-session-tools {
             min-width: 0;
@@ -6231,11 +6347,23 @@ TEXT = r"""
             #${rootId} .codex-usage-hud-session-workdir-filter {
               width: 100%;
             }
-            #${rootId} .codex-usage-hud-session-index-summary {
-              grid-template-columns: minmax(0, 1fr);
+            #${rootId} .codex-usage-hud-session-index-head {
+              grid-template-columns: auto minmax(0, 1fr);
             }
-            #${rootId} .codex-usage-hud-session-index-controls {
+            #${rootId} .codex-usage-hud-session-index-metrics {
+              grid-column: 1 / -1;
               justify-content: flex-start;
+            }
+            #${rootId} .codex-usage-hud-session-index-metric {
+              text-align: left;
+            }
+            #${rootId} .codex-usage-hud-session-index-actions {
+              flex-direction: column;
+              align-items: stretch;
+            }
+            #${rootId} .codex-usage-hud-session-index-actions-secondary {
+              margin-left: 0;
+              justify-content: space-between;
             }
             #${rootId} .codex-usage-hud-session-filters { width: 100%; }
             #${rootId} .codex-usage-hud-session-head,
@@ -6408,11 +6536,23 @@ TEXT = r"""
             #${rootId} .codex-usage-hud-session-workdir-filter {
               width: 100%;
             }
-            #${rootId} .codex-usage-hud-session-index-summary {
-              grid-template-columns: minmax(0, 1fr);
+            #${rootId} .codex-usage-hud-session-index-head {
+              grid-template-columns: auto minmax(0, 1fr);
             }
-            #${rootId} .codex-usage-hud-session-index-controls {
+            #${rootId} .codex-usage-hud-session-index-metrics {
+              grid-column: 1 / -1;
               justify-content: flex-start;
+            }
+            #${rootId} .codex-usage-hud-session-index-metric {
+              text-align: left;
+            }
+            #${rootId} .codex-usage-hud-session-index-actions {
+              flex-direction: column;
+              align-items: stretch;
+            }
+            #${rootId} .codex-usage-hud-session-index-actions-secondary {
+              margin-left: 0;
+              justify-content: space-between;
             }
             #${rootId} .codex-usage-hud-session-date-popover {
               left: 0;
