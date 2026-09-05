@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from collections import defaultdict
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 import hashlib
 import json
@@ -132,6 +132,16 @@ _PATH_TOKEN_RE = re.compile(
     r"(?:(?:[A-Za-z]:[\\/])|(?:\\\\)|(?:/)|(?:\.\.?[\\/])|(?:[A-Za-z0-9_.-]+[\\/]))"
     r"[^\s\"'`<>|{}\[\],;()]+"
 )
+# A `_PATH_TOKEN_RE` scan over the whole raw line is the dominant cost of
+# `_extract_paths` and only pays off for small records. A few rollouts contain
+# multi-megabyte single-line records (huge ``item_completed`` tool output) where
+# this regex matches tens of thousands of junk fragments (separator lines,
+# escaped paths) while the *real* changed-file paths live in the structured
+# ``_PATH_KEYS`` fields and the authoritative ``*** Update File:`` patch blocks
+# (captured cheaply by ``_PATCH_TARGET_RE`` below). Skip the broad scan above
+# this line size; structured + patch-block extraction still cover every real
+# path, so the only things dropped are garbage from embedded tool output.
+_PATH_TOKEN_MAX_LINE = 256 * 1024
 _WRITE_COMMAND_RE = re.compile(
     r"(?i)(?:\b(?:sed|perl)\b[^\r\n]*\s-i(?:\s|$)|"
     r"\b(?:tee|set-content|out-file|add-content)\b|>>|(?:^|\s)>\s*)"
@@ -159,6 +169,13 @@ _SNAPSHOT_MIN_INTERVAL = 300.0
 # use a process pool when the runtime allows it.
 _PARALLEL_PARSE_MIN_ENTRIES = 24
 _PARALLEL_PARSE_WORKERS = 8
+# A stale set whose total raw rollout size exceeds this is routed to the process
+# pool even when it is below ``_PARALLEL_PARSE_MIN_ENTRIES``. This keeps the main
+# thread free when a small extension set (e.g. a 1-month -> 3-month step) happens
+# to contain a "whale" session: parsing that one huge rollout inline would
+# otherwise freeze the session-index UI for the whole parse (reproducible for the
+# same corpus, since the same heavy session is always in the extension set).
+_PARALLEL_PARSE_LARGE_BYTES = 8 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -509,10 +526,16 @@ def _extract_paths(payload: Mapping[str, object], raw_line: str) -> set[str]:
             candidate = _clean_path_candidate(match.group(1))
             if candidate:
                 paths.add(candidate)
-    for match in _PATH_TOKEN_RE.finditer(raw_line):
-        candidate = _clean_path_candidate(match.group(0))
-        if _looks_like_path(candidate):
-            paths.add(candidate)
+    # The broad token scan only earns its cost on small records. On the rare
+    # multi-megabyte single-line record it matches tens of thousands of junk
+    # fragments (separator lines, escaped paths) for several seconds, while the
+    # real changed-file paths are already captured above by `visit` (structured
+    # `_PATH_KEYS` fields) and `_PATCH_TARGET_RE` (authoritative `***` blocks).
+    if len(raw_line) <= _PATH_TOKEN_MAX_LINE:
+        for match in _PATH_TOKEN_RE.finditer(raw_line):
+            candidate = _clean_path_candidate(match.group(0))
+            if _looks_like_path(candidate):
+                paths.add(candidate)
     return paths
 
 
@@ -791,27 +814,60 @@ def _parse_fields(
     )
 
 
-def _process_pool_allowed() -> bool:
-    """Return whether worker processes are safe in this runtime.
+# Frozen (PyInstaller) builds may only spawn worker *processes* if the entry
+# point has already called :func:`multiprocessing.freeze_support` (which wires
+# up the ``--multiprocessing-fork`` re-exec). The application entry point enables
+# process pools for frozen builds by calling :func:`_enable_frozen_process_pool`
+# immediately after ``freeze_support()``. Until then -- or in builds that
+# intentionally skip it -- a frozen build uses a thread pool instead of crashing
+# on ``spawn``.
+_FROZEN_PROCESS_POOL_ENABLED = False
 
-    Frozen (PyInstaller) builds re-execute the executable on ``spawn``
-    unless the entry point calls :func:`multiprocessing.freeze_support`,
-    which this application does not; those builds parse inline instead.
+
+def _enable_frozen_process_pool() -> None:
+    """Allow worker processes in a frozen build.
+
+    Call from the application entry point right after
+    ``multiprocessing.freeze_support()`` so ``spawn`` can re-exec the frozen
+    executable and run the worker correctly.
+    """
+    global _FROZEN_PROCESS_POOL_ENABLED
+    _FROZEN_PROCESS_POOL_ENABLED = True
+
+
+def _process_pool_allowed() -> bool:
+    """Return whether worker *processes* are safe in this runtime.
+
+    Frozen (PyInstaller) builds re-execute the executable on ``spawn`` unless the
+    entry point calls :func:`multiprocessing.freeze_support` first. The entry
+    point enables process pools for frozen builds via
+    :func:`_enable_frozen_process_pool`; if it did not (e.g. an older build), we
+    fall back to a thread pool rather than crash.
     """
 
     if os.environ.get("CODEX_HUD_SEARCH_NO_PROCESSES"):
         return False
-    return not getattr(sys, "frozen", False)
+    if getattr(sys, "frozen", False):
+        return _FROZEN_PROCESS_POOL_ENABLED
+    return True
 
 
 def _parse_entry_job(
     job: tuple[str, Sequence[str]],
+    *,
+    return_fields: bool = True,
 ) -> tuple[str, str, str, str, tuple[str, ...], tuple]:
     """Parse one session's rollouts inside a worker process.
 
     The worker also tokenises the four large fields (user/assistant/tool/file)
     here, so the main process only merges postings instead of re-tokenising
     hundreds of megabytes single-threaded.
+
+    ``return_fields=False`` suppresses the (potentially huge) pre-tokenised
+    postings tuple -- used by the ProcessPool path so a "whale" session's
+    millions of grams are not pickled back to the main process (which dominated
+    the old dev path at ~24s). The main thread then re-tokenises the whale on
+    the consumer thread, which has already reported every ordinary session.
     """
 
     session_id, path_strings = job
@@ -819,7 +875,11 @@ def _parse_entry_job(
         user_text, assistant_text, tool_text, changed_paths = parse_rollout(
             [Path(item) for item in path_strings]
         )
-        fields = _parse_fields(user_text, assistant_text, tool_text, changed_paths)
+        fields = (
+            _parse_fields(user_text, assistant_text, tool_text, changed_paths)
+            if return_fields
+            else ()
+        )
     except Exception:
         # Never let one malformed rollout sink the whole pool: a missing
         # session simply degrades to empty fields rather than an error.
@@ -827,6 +887,19 @@ def _parse_entry_job(
         changed_paths = ()
         fields = ()
     return session_id, user_text, assistant_text, tool_text, changed_paths, fields
+
+
+def _job_total_bytes(job: tuple[str, Sequence[str]]) -> int:
+    """Total on-disk size of a stale job's rollout files (0 on any error)."""
+
+    total = 0
+    for raw_path in job[1]:
+        try:
+            total += Path(raw_path).stat().st_size
+        except OSError:
+            pass
+    return total
+
 
 
 def _parse_entries_parallel(
@@ -1608,18 +1681,41 @@ class SessionSearchIndex:
         *,
         cancelled: Callable[[], bool] | None,
     ) -> Iterator[tuple[str, str, str, str, tuple[str, ...], tuple]]:
-        """Yield parsed stale entries as the pool produces them.
+        """Yield parsed stale entries, small sessions first, whales last.
+
+        Ordinary ("small") sessions are parsed **inline** and yielded first so the
+        caller's progress callback fires for every non-heavy session immediately.
+        Only "whale"-class sessions (>= ``_PARALLEL_PARSE_LARGE_BYTES``) are sent
+        to a worker pool, and they are yielded *after* the small ones -- so even
+        a GIL-holding whale parse in a frozen/thread-pool build can only delay
+        the final session's progress instead of freezing the whole batch at the
+        covered count (the reproducible 96->109 freeze).
 
         Unlike :func:`_parse_entries_parallel` (which blocks until the whole
-        corpus is tokenised), this streams via ``imap_unordered`` so callers can
-        upsert and report progress while later sessions are still being parsed in
-        worker processes. Falls back to inline parsing when the pool is
-        unavailable or the batch is below the parallel threshold.
+        corpus is tokenised), this streams via ``as_completed`` for the heavy
+        subset, so the main thread keeps advancing while whales parse.
         """
 
         if not stale_jobs:
             return
-        if not _process_pool_allowed() or len(stale_jobs) < _PARALLEL_PARSE_MIN_ENTRIES:
+        # Split small (parallel pool, first) from whale-class (parallel pool, last).
+        small_jobs: list[tuple[str, list[str]]] = []
+        large_jobs: list[tuple[str, list[str]]] = []
+        total_bytes = 0
+        for job in stale_jobs:
+            total_bytes += _job_total_bytes(job)
+            if _job_total_bytes(job) >= _PARALLEL_PARSE_LARGE_BYTES:
+                large_jobs.append(job)
+            else:
+                small_jobs.append(job)
+
+        # A tiny set with no whale parses inline: no pool-startup overhead, and it
+        # is fast enough that streaming the progress callback buys nothing.
+        if (
+            not large_jobs
+            and len(stale_jobs) < _PARALLEL_PARSE_MIN_ENTRIES
+            and total_bytes < _PARALLEL_PARSE_LARGE_BYTES
+        ):
             for session_id, path_strings in stale_jobs:
                 if callable(cancelled) and cancelled():
                     return
@@ -1627,29 +1723,94 @@ class SessionSearchIndex:
                     user_text, assistant_text, tool_text, changed_paths = parse_rollout(
                         [Path(item) for item in path_strings]
                     )
-                    fields = _parse_fields(user_text, assistant_text, tool_text, changed_paths)
+                    fields = _parse_fields(
+                        user_text, assistant_text, tool_text, changed_paths
+                    )
                 except Exception:
                     user_text = assistant_text = tool_text = ""
                     changed_paths = ()
                     fields = ()
-                yield session_id, user_text, assistant_text, tool_text, changed_paths, fields
+                yield (
+                    session_id,
+                    user_text,
+                    assistant_text,
+                    tool_text,
+                    changed_paths,
+                    fields,
+                )
             return
+
+        # Otherwise run two parallel phases so we keep BOTH properties:
+        #   * the bulk (small sessions) stays parallel -> a first build of
+        #     hundreds of sessions is not serialised onto one thread; and
+        #   * whales are parsed in the SECOND phase, after every small session
+        #     has already been yielded -> the progress callback advances past
+        #     the covered count before the whale's GIL-holding tokenise can
+        #     starve the consumer thread (the reproducible 96->109 freeze).
+        use_proc = _process_pool_allowed()
         workers = max(2, min(_PARALLEL_PARSE_WORKERS, os.cpu_count() or 2))
-        chunksize = max(1, len(stale_jobs) // (workers * 4))
-        with ProcessPoolExecutor(max_workers=workers) as pool:
-            futures = [pool.submit(_parse_entry_job, job) for job in stale_jobs]
-            for future in as_completed(futures):
-                if callable(cancelled) and cancelled():
-                    for pending_future in futures:
-                        pending_future.cancel()
+
+        # Decide the executor once, with a hard fallback to threads. Frozen
+        # (PyInstaller) builds only spawn worker *processes* when the entry point
+        # called ``multiprocessing.freeze_support`` (enabled via
+        # :func:`_enable_frozen_process_pool`); otherwise -- or if constructing
+        # the process pool fails for any reason (spawn blocked, AV, resource
+        # limits) -- degrade to a thread pool instead of crashing. The two-phase
+        # ordering still guarantees small sessions report first either way.
+        effective_proc = False
+        try:
+            if use_proc:
+                pool = ProcessPoolExecutor(max_workers=workers)
+                effective_proc = True
+            else:
+                pool = ThreadPoolExecutor(max_workers=workers)
+        except Exception:
+            pool = ThreadPoolExecutor(max_workers=workers)
+            effective_proc = False
+
+        try:
+
+            def _run_phase(
+                jobs: list[tuple[str, list[str]]]
+            ) -> Iterator[tuple[str, str, str, str, tuple[str, ...], tuple]]:
+                if not jobs:
                     return
-                try:
-                    result = future.result()
-                except Exception:
-                    # Mirror ``_parse_entry_job``'s defensive contract: a failed
-                    # rollout must not sink the whole stream.
-                    continue
-                yield result
+                futures = []
+                for job in jobs:
+                    if effective_proc:
+                        # ProcessPool: do NOT pickle the huge pre-tokenised
+                        # fields back for whales (that dominated the old dev path
+                        # at ~24s); the main thread re-tokenises the whale on the
+                        # consumer thread, which has already reported every small
+                        # session by now. Small sessions keep their fields.
+                        whale = _job_total_bytes(job) >= _PARALLEL_PARSE_LARGE_BYTES
+                        futures.append(
+                            pool.submit(
+                                _parse_entry_job, job, return_fields=not whale
+                            )
+                        )
+                    else:
+                        futures.append(pool.submit(_parse_entry_job, job))
+                for future in as_completed(futures):
+                    if callable(cancelled) and cancelled():
+                        for pending_future in futures:
+                            pending_future.cancel()
+                        return
+                    try:
+                        result = future.result()
+                    except Exception:
+                        # Mirror ``_parse_entry_job``'s defensive contract: a
+                        # failed rollout must not sink the whole stream.
+                        continue
+                    yield result
+
+            # Phase 1: ordinary sessions in parallel. Phase 2: whales in parallel,
+            # yielded only after every small session has reported progress.
+            yield from _run_phase(small_jobs)
+            yield from _run_phase(large_jobs)
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
+
 
     def sync_batches(
         self,
@@ -1695,13 +1856,6 @@ class SessionSearchIndex:
                 precomputed.clear()
             elif processed:
                 connection.commit()
-            if callable(progress_callback) and processed != last_reported:
-                progress_callback(
-                    processed,
-                    expected_total,
-                    self.count(connection=connection),
-                )
-                last_reported = processed
 
         try:
             stale_jobs, fresh_entries = self._partition_stale(connection, values)
@@ -1745,6 +1899,19 @@ class SessionSearchIndex:
                     if fields:
                         precomputed[document.session_id] = fields
                     mutated += 1
+                # Report progress per entry (decoupled from the DB-commit batch
+                # size). Without this, a small extension whose entry count is
+                # below ``safe_batch_size`` would only fire its single progress
+                # callback after the whole batch -- including the heavy
+                # postings merge of a "whale" rollout -- had finished, so the UI
+                # looked frozen at the covered count for the entire parse+merge.
+                if callable(progress_callback) and processed != last_reported:
+                    progress_callback(
+                        processed,
+                        expected_total,
+                        self.count(connection=connection),
+                    )
+                    last_reported = processed
                 if processed % safe_batch_size == 0:
                     commit_batch()
             # Fresh entries: fingerprint already matches, so a cheap upsert touch
@@ -1768,6 +1935,13 @@ class SessionSearchIndex:
                 if document is not None:
                     pending.append(document)
                     mutated += 1
+                if callable(progress_callback) and processed != last_reported:
+                    progress_callback(
+                        processed,
+                        expected_total,
+                        self.count(connection=connection),
+                    )
+                    last_reported = processed
                 if processed % safe_batch_size == 0:
                     commit_batch()
             commit_batch()

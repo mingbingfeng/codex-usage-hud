@@ -411,6 +411,17 @@ def run_daemon(args: argparse.Namespace) -> int:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    # PyInstaller frozen builds must call freeze_support() in __main__ before any
+    # worker process is spawned; otherwise ``spawn`` re-executes this executable
+    # and the search index's ProcessPoolExecutor deadlocks. _enable_frozen_process_pool
+    # then unlocks process pools for the frozen build so the first index build
+    # runs in parallel instead of serialised on one GIL-bound thread.
+    import multiprocessing
+
+    multiprocessing.freeze_support()
+    from .core import session_search as _session_search
+
+    _session_search._enable_frozen_process_pool()
     services = _cli_app_owner.CliAppServices(
         run_daemon=run_daemon, run_once=run_once_snapshot, stop=stop_running_hud,
         run_loading_helper=loading_feedback.run_loading_feedback_helper,

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
 from codex_usage_hud.core import session_search as session_search_module
 from codex_usage_hud.core.session_search import SessionSearchIndex, parse_rollout
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 
 
 def test_rollout_search_reads_late_content_beyond_two_megabytes(tmp_path: Path) -> None:
@@ -84,6 +86,52 @@ def test_read_tool_paths_are_not_reported_as_modified_files(tmp_path: Path) -> N
     _user, _assistant, _tool, changed_paths = parse_rollout((rollout,))
 
     assert not changed_paths
+
+
+def test_giant_change_record_skips_broad_path_scan(tmp_path: Path) -> None:
+    """A multi-megabyte change record must not explode parse_rollout.
+
+    Real rollouts occasionally contain a single 2MB+ ``item_completed`` line whose
+    embedded tool output would make ``_PATH_TOKEN_RE`` match tens of thousands of
+    junk fragments (separator lines, escaped paths) over several seconds. The
+    real changed-file paths live in the structured ``_PATH_KEYS`` fields and the
+    authoritative ``*** Update File:`` blocks (captured cheaply by
+    ``_PATCH_TARGET_RE``). The broad scan is skipped above ``_PATH_TOKEN_MAX_LINE``.
+    """
+
+    import time
+
+    real_path = "E:/real/edited_module.py"
+    # ~2.1MB of separator-like noise; if scanned this yields thousands of garbage
+    # path fragments and pushes parse time into multiple seconds.
+    junk = ("-" * 40 + "\\\n") * 50000
+    item = {
+        "type": "file_change",
+        "file_path": real_path,
+        "output": f"*** Update File: {real_path}\n{junk}",
+    }
+    record = {
+        "type": "event_msg",
+        "payload": {"type": "item_completed", "item": item},
+    }
+    rollout = tmp_path / "giant.jsonl"
+    rollout.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+    start = time.perf_counter()
+    _user, _assistant, _tool, changed_paths = parse_rollout((rollout,))
+    elapsed = time.perf_counter() - start
+
+    # The real path survives via the structured field and the *** patch block.
+    assert real_path in " ".join(changed_paths)
+    # No junk separator/backslash fragments leak into the changed set.
+    junk_like = [
+        p
+        for p in changed_paths
+        if sum(1 for ch in p if ch in "-/\\") > len(p) * 0.4
+    ]
+    assert not junk_like, junk_like[:5]
+    # The guard keeps a multi-megabyte record from blowing up parse time.
+    assert elapsed < 2.0, f"parse_rollout took {elapsed:.2f}s on a giant line"
 
 
 def test_loaded_search_uses_resident_postings_without_reopening_sqlite(
@@ -351,6 +399,211 @@ def test_sync_batches_streams_without_blocking_prefetch(tmp_path: Path) -> None:
     # Progress must advance in multiple steps, not a single terminal call.
     assert progress and progress[-1] == 30 and len(progress) > 1
     assert index.search("stream-worker-marker-17")["matches"][0]["sessionId"] == "session-17"
+
+
+def test_stream_parses_routes_whale_in_small_set_to_pool(tmp_path: Path) -> None:
+    # Regression guard: a small stale set (< _PARALLEL_PARSE_MIN_ENTRIES) that
+    # nonetheless contains a "whale" rollout must still parse in the process
+    # pool, so the main thread never freezes on the single heavy parse. This is
+    # exactly the 1-month -> 3-month extension case (a few new sessions, one of
+    # them huge) that previously hung the session-index UI for the whole parse.
+    big = tmp_path / "big.jsonl"
+    # ~12 MB single record, comfortably above _PARALLEL_PARSE_LARGE_BYTES (8 MiB).
+    big.write_bytes(
+        json.dumps(
+            {"type": "event_msg", "payload": {"type": "user_message", "message": "x"}}
+        ).encode("utf-8")
+        * 200_000
+    )
+    small = tmp_path / "small.jsonl"
+    _write_rollout(small, "small-marker")
+    index = SessionSearchIndex(tmp_path / "whale.sqlite")
+    assert session_search_module._process_pool_allowed()
+
+    stale_jobs = [("big", [str(big)]), ("small", [str(small)])]
+    used_pool: dict[str, bool] = {"flag": False}
+    real_exec = ProcessPoolExecutor
+
+    def _tracking(*args, **kwargs):
+        used_pool["flag"] = True
+        return real_exec(*args, **kwargs)
+
+    with patch("codex_usage_hud.core.session_search.ProcessPoolExecutor", _tracking):
+        results = list(index._stream_parses(stale_jobs, cancelled=None))
+    assert used_pool["flag"] is True
+    assert {r[0] for r in results} == {"big", "small"}
+
+
+def test_stream_parses_inline_for_tiny_small_set(tmp_path: Path) -> None:
+    # The complement: a tiny stale set with no heavy rollout must stay inline
+    # (no process startup overhead) -- the pool is only engaged when the work is
+    # large enough to amortise it or contains a whale.
+    small = tmp_path / "small.jsonl"
+    _write_rollout(small, "tiny-marker")
+    index = SessionSearchIndex(tmp_path / "tiny.sqlite")
+
+    stale_jobs = [("small", [str(small)])]
+    used_pool: dict[str, bool] = {"flag": False}
+    real_exec = ProcessPoolExecutor
+
+    def _tracking(*args, **kwargs):
+        used_pool["flag"] = True
+        return real_exec(*args, **kwargs)
+
+    with patch("codex_usage_hud.core.session_search.ProcessPoolExecutor", _tracking):
+        results = list(index._stream_parses(stale_jobs, cancelled=None))
+    assert used_pool["flag"] is False
+    assert len(results) == 1
+
+
+def test_stream_parses_frozen_build_without_freeze_support_uses_thread_pool(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # Frozen (PyInstaller) builds that did NOT enable process pools (the entry
+    # point never called ``freeze_support`` + ``_enable_frozen_process_pool``)
+    # must fall back to a *thread* pool, never spawn worker processes -- even
+    # though ``spawn`` would re-execute the executable and deadlock.
+    big = tmp_path / "big.jsonl"
+    big.write_bytes(
+        json.dumps(
+            {"type": "event_msg", "payload": {"type": "user_message", "message": "x"}}
+        ).encode("utf-8")
+        * 200_000
+    )
+    small = tmp_path / "small.jsonl"
+    _write_rollout(small, "small-marker")
+    index = SessionSearchIndex(tmp_path / "frozen.sqlite")
+
+    stale_jobs = [("big", [str(big)]), ("small", [str(small)])]
+    used_proc: dict[str, bool] = {"flag": False}
+    used_thread: dict[str, bool] = {"flag": False}
+
+    def _track_proc(*args, **kwargs):
+        used_proc["flag"] = True
+        return ProcessPoolExecutor(*args, **kwargs)
+
+    def _track_thread(*args, **kwargs):
+        used_thread["flag"] = True
+        return ThreadPoolExecutor(*args, **kwargs)
+
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(
+        session_search_module, "_FROZEN_PROCESS_POOL_ENABLED", False
+    )
+    with patch(
+        "codex_usage_hud.core.session_search.ProcessPoolExecutor", _track_proc
+    ), patch(
+        "codex_usage_hud.core.session_search.ThreadPoolExecutor", _track_thread
+    ):
+        results = list(index._stream_parses(stale_jobs, cancelled=None))
+    assert (
+        used_proc["flag"] is False
+    ), "frozen build without freeze_support must not spawn processes"
+    assert (
+        used_thread["flag"] is True
+    ), "frozen build must use a thread pool for whales"
+    assert {r[0] for r in results} == {"big", "small"}
+
+
+def test_process_pool_allowed_gating(monkeypatch) -> None:
+    # The gating logic that decides threads vs processes. The actual *spawn* of a
+    # process pool in a frozen build is wired by ``freeze_support()`` (called in
+    # the entry point) and cannot be faithfully exercised inside a dev
+    # interpreter, so we unit-test the gate directly; the process-pool execution
+    # path itself is covered by the non-frozen dev tests below.
+    monkeypatch.setattr(sys, "frozen", False, raising=False)
+    monkeypatch.setattr(session_search_module, "_FROZEN_PROCESS_POOL_ENABLED", False)
+    assert session_search_module._process_pool_allowed() is True
+
+    # Frozen build that did NOT enable process pools stays on threads.
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(session_search_module, "_FROZEN_PROCESS_POOL_ENABLED", False)
+    assert session_search_module._process_pool_allowed() is False
+
+    # Frozen build that DID call freeze_support + _enable_frozen_process_pool
+    # unlocks process pools (the frozen exe's spawn is wired by freeze_support).
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(session_search_module, "_FROZEN_PROCESS_POOL_ENABLED", True)
+    assert session_search_module._process_pool_allowed() is True
+
+    # The escape hatch always wins, regardless of frozen/flag state.
+    monkeypatch.setenv("CODEX_HUD_SEARCH_NO_PROCESSES", "1")
+    assert session_search_module._process_pool_allowed() is False
+
+
+def test_stream_parses_uses_process_pool_when_allowed(tmp_path: Path, monkeypatch) -> None:
+    # The non-frozen (dev/test) path must spawn worker *processes* -- this is the
+    # exact path the frozen exe reaches once its entry point enables process pools
+    # via ``_enable_frozen_process_pool``. Confirms the executor selection routes
+    # to ProcessPoolExecutor and still streams small sessions before the whale.
+    big = tmp_path / "big.jsonl"
+    big.write_bytes(
+        json.dumps(
+            {"type": "event_msg", "payload": {"type": "user_message", "message": "x"}}
+        ).encode("utf-8")
+        * 200_000
+    )
+    small = tmp_path / "small.jsonl"
+    _write_rollout(small, "small-marker")
+    index = SessionSearchIndex(tmp_path / "proc.sqlite")
+
+    stale_jobs = [("big", [str(big)]), ("small", [str(small)])]
+    used_proc: dict[str, bool] = {"flag": False}
+    used_thread: dict[str, bool] = {"flag": False}
+
+    def _track_proc(*args, **kwargs):
+        used_proc["flag"] = True
+        return ProcessPoolExecutor(*args, **kwargs)
+
+    def _track_thread(*args, **kwargs):
+        used_thread["flag"] = True
+        return ThreadPoolExecutor(*args, **kwargs)
+
+    monkeypatch.setattr(sys, "frozen", False, raising=False)
+    with patch(
+        "codex_usage_hud.core.session_search.ProcessPoolExecutor", _track_proc
+    ), patch(
+        "codex_usage_hud.core.session_search.ThreadPoolExecutor", _track_thread
+    ):
+        results = list(index._stream_parses(stale_jobs, cancelled=None))
+    assert used_proc["flag"] is True, "non-frozen build must use a process pool"
+    assert used_thread["flag"] is False
+    ids = [r[0] for r in results]
+    assert ids.index("small") < ids.index("big")
+
+
+def test_stream_parses_yields_small_sessions_before_whale(tmp_path: Path) -> None:
+    # Core regression guard for the 96->109 freeze: a small extension set that
+    # mixes ordinary ("small") sessions with a "whale" must stream the small
+    # sessions FIRST (parsed inline), so the progress callback advances 96 -> 108
+    # immediately instead of freezing at the covered count until the whole whale
+    # parse finishes. The whale is only parsed in the pool and yielded last.
+    big = tmp_path / "big.jsonl"
+    big.write_bytes(
+        json.dumps(
+            {"type": "event_msg", "payload": {"type": "user_message", "message": "x"}}
+        ).encode("utf-8")
+        * 200_000
+    )
+    small_a = tmp_path / "small_a.jsonl"
+    small_b = tmp_path / "small_b.jsonl"
+    _write_rollout(small_a, "small-a-marker")
+    _write_rollout(small_b, "small-b-marker")
+    index = SessionSearchIndex(tmp_path / "order.sqlite")
+
+    stale_jobs = [
+        ("big", [str(big)]),
+        ("small_a", [str(small_a)]),
+        ("small_b", [str(small_b)]),
+    ]
+    results = list(index._stream_parses(stale_jobs, cancelled=None))
+    session_ids = [r[0] for r in results]
+    assert set(session_ids) == {"big", "small_a", "small_b"}
+    # Every ordinary session must appear before the whale, in every execution
+    # mode (ProcessPool in dev, ThreadPool in frozen builds).
+    whale_pos = session_ids.index("big")
+    assert whale_pos > session_ids.index("small_a")
+    assert whale_pos > session_ids.index("small_b")
 
 
 def test_ensure_scan_index_covers_stamp_scans_and_reports_repairs(tmp_path: Path) -> None:

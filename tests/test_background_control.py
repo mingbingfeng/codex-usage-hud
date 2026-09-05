@@ -131,3 +131,49 @@ class BackgroundControlServiceTests(unittest.TestCase):
             self.assertFalse(result["restartAvailable"])
             self.assertIn("部分 Codex 版本可能需要重启", result["message"])
             self.assertEqual(read_codex_config(config)["features"]["memories"], False)
+
+    def test_memories_set_normalizes_bool_leaf_subtable(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config = root / "config.toml"
+            config.write_text(
+                "[features]\nmemories = true\nhooks = true\n"
+                "[features.context_management]\nexperimental_mode = true\n",
+                encoding="utf-8",
+            )
+            service = BackgroundControlService(root, codex_config_path=config)
+
+            result = service.set("memory_consolidation", "disabled", 0, "event-1")
+
+            self.assertEqual(result["verificationState"], "verified")
+            text = config.read_text(encoding="utf-8")
+            # sub-table collapsed to a bool key; the surrounding flat keys kept
+            self.assertIn("context_management = true", text)
+            self.assertNotIn("[features.context_management]", text)
+            self.assertIn("memories = false", text)
+            self.assertIn("hooks = true", text)
+            self.assertIn("归一化", result["message"])
+            backups = list(root.glob("config.toml.bak-*"))
+            self.assertTrue(backups, "应生成归一化前的备份")
+
+    def test_memories_set_warns_not_flattens_structured_subtable(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config = root / "config.toml"
+            config.write_text(
+                "[features]\nmemories = true\n"
+                "[features.multi_agent_v2]\nmax_concurrent_threads_per_session = 8\n",
+                encoding="utf-8",
+            )
+            service = BackgroundControlService(root, codex_config_path=config)
+
+            result = service.set("memory_consolidation", "disabled", 0, "event-1")
+
+            # a structured sub-table we must not clobber -> do NOT report success
+            self.assertEqual(result["verificationState"], "failed")
+            self.assertEqual(result["error"]["code"], "config_write_failed")
+            text = config.read_text(encoding="utf-8")
+            # structured tuning preserved verbatim, memories still applied
+            self.assertIn("max_concurrent_threads_per_session = 8", text)
+            self.assertIn("memories = false", text)
+            self.assertIn("multi_agent_v2", result["message"])

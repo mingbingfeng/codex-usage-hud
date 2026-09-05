@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import time
 from typing import Any, Callable, Mapping
 import webbrowser
 
@@ -81,6 +82,159 @@ def _set_features_memories(text: str, enabled: bool) -> str:
             return "".join(lines)
     lines.insert(section_end, f"memories = {value}\n")
     return "".join(lines)
+
+
+# Feature keys whose value may legitimately be a nested TOML table in some Codex
+# versions (e.g. `memories` historically carried generate_memories / use_memories
+# sub-keys, and our own writer preserves them verbatim). We must never
+# auto-flatten these.
+_FEATURE_SUBTABLE_PRESERVE = frozenset({"memories"})
+
+
+def _parse_features(text: str) -> dict[str, object]:
+    """Parse a config *text* into a dict using the shared lenient path.
+
+    ``read_codex_config`` takes a path, so we round-trip through a temp file to
+    reuse its full-parser-first / subset-fallback compatibility behaviour.
+    """
+    import tempfile as _tf
+    with _tf.NamedTemporaryFile("w", encoding="utf-8", suffix=".toml", delete=False) as handle:
+        handle.write(text)
+        tmp = handle.name
+    try:
+        payload = read_codex_config(tmp)
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+    return payload if isinstance(payload, dict) else {}
+
+
+def _features_block_issues(text: str) -> tuple[list[str], list[str]]:
+    """Inspect a Codex config's ``[features]`` block.
+
+    Returns ``(issues, flattenable_keys)``:
+    - ``issues``: shapes the *running* Codex is likely to reject (nested
+      sub-tables that are not in the preserve set, or a top-level
+      ``features = bool`` master flag).
+    - ``flattenable_keys``: nested sub-tables whose leaves are all booleans and
+      that we can safely collapse to ``<key> = <bool>`` without losing tuning.
+
+    This is a heuristic, not a schema oracle: Codex's exact ``features`` schema
+    varies by version, so we only auto-flatten the safe, unambiguous case and
+    leave anything richer alone (with a warning) rather than risk clobbering
+    user intent.
+    """
+    features = _parse_features(text).get("features")
+    if features is None:
+        return [], []
+    if not isinstance(features, dict):
+        return [f"features 被写成布尔值（{features!r}），当前 Codex 版本期望 [features] 表"], []
+    issues: list[str] = []
+    flattenable: list[str] = []
+    for key, value in features.items():
+        if not isinstance(value, dict):
+            continue
+        if key in _FEATURE_SUBTABLE_PRESERVE:
+            continue
+        leaves = list(value.values())
+        if all(isinstance(v, bool) for v in leaves):
+            flattenable.append(key)
+        else:
+            issues.append(
+                f"features.{key} 是带非布尔参数的子表，当前 Codex 版本可能拒绝"
+                f"（已原样保留，请按当前 Codex 版本手动修正）"
+            )
+    return issues, flattenable
+
+
+def _drop_features_subtable(text: str, key: str) -> str:
+    """Remove a ``[features.<key>]`` sub-table block (header + body)."""
+    lines = text.splitlines(keepends=True)
+    out: list[str] = []
+    dropping = False
+    for line in lines:
+        stripped = line.strip()
+        if dropping:
+            if stripped.startswith("["):
+                dropping = False
+                out.append(line)
+            continue
+        if stripped == f"[features.{key}]":
+            dropping = True
+            continue
+        out.append(line)
+    return "".join(out)
+
+
+def _set_features_bool_key(text: str, key: str, enabled: bool) -> str:
+    """Set ``<key> = <bool>`` inside ``[features]`` (mirrors ``_set_features_memories``)."""
+    lines = text.splitlines(keepends=True)
+    section_start = None
+    section_end = len(lines)
+    for index, line in enumerate(lines):
+        if line.strip() == "[features]":
+            section_start = index
+            for tail in range(index + 1, len(lines)):
+                if lines[tail].lstrip().startswith("["):
+                    section_end = tail
+                    break
+            break
+    value = "true" if enabled else "false"
+    if section_start is None:
+        suffix = "" if not text or text.endswith(("\n", "\r")) else "\n"
+        return f"{text}{suffix}\n[features]\n{key} = {value}\n"
+    for index in range(section_start + 1, section_end):
+        raw = lines[index]
+        before_comment = raw.split("#", 1)[0]
+        key_text, separator, _ = before_comment.partition("=")
+        if separator and key_text.strip() == key:
+            indent = raw[: len(raw) - len(raw.lstrip())]
+            comment = raw[raw.find("#") :].rstrip("\r\n") if "#" in raw else ""
+            newline = "\r\n" if raw.endswith("\r\n") else "\n"
+            lines[index] = f"{indent}{key} = {value}{(' ' + comment) if comment else ''}{newline}"
+            return "".join(lines)
+    lines.insert(section_end, f"{key} = {value}\n")
+    return "".join(lines)
+
+
+def _replace_top_level_features_bool(text: str, value: bool) -> str:
+    """Replace a top-level ``features = <bool>`` master flag with a ``[features]`` table."""
+    lines = text.splitlines(keepends=True)
+    out: list[str] = []
+    for line in lines:
+        before_comment = line.split("#", 1)[0]
+        key_text, separator, rest = before_comment.partition("=")
+        if separator and key_text.strip() == "features" and rest.strip().lower() in ("true", "false"):
+            out.append("[features]\n")
+            out.append(f"memories = {rest.strip().lower()}\n")
+            continue
+        out.append(line)
+    return "".join(out)
+
+
+def _normalize_features_block(text: str) -> tuple[str, list[str]]:
+    """Collapse safe ``[features.<key>]`` sub-tables into ``<key> = <bool>``.
+
+    Idempotent and conservative: only bool-leaf sub-tables outside the preserve
+    set are flattened, and a top-level ``features = bool`` master flag is
+    rewritten as a ``[features]`` table. Returns ``(new_text, changes)``.
+    """
+    changes: list[str] = []
+    working = text
+    features = _parse_features(working).get("features")
+    if isinstance(features, bool):
+        working = _replace_top_level_features_bool(working, features)
+        changes.append(f"features = {str(features).lower()} -> [features] 表（memories = {str(features).lower()}）")
+    issues, flattenable = _features_block_issues(working)
+    for key in flattenable:
+        sub = _parse_features(working).get("features", {}).get(key, {})
+        enabled = any(bool(v) for v in sub.values()) if isinstance(sub, dict) else False
+        working = _drop_features_subtable(working, key)
+        working = _set_features_bool_key(working, key, enabled)
+        changes.append(f"features.{key} 子表折叠为 {key} = {str(enabled).lower()}")
+    return working, changes
 
 
 @dataclass(frozen=True)
@@ -174,8 +328,36 @@ class BackgroundControlService:
     def _apply_memories(self, policies: dict[str, BackgroundPolicy], current: BackgroundPolicy, desired: str, event_id: object, source: object) -> dict[str, object]:
         try:
             before = self.codex_config_path.read_text(encoding="utf-8") if self.codex_config_path.exists() else ""
-            candidate = _set_features_memories(before, desired == "enabled")
+            changes: list[str] = []
+            issues, flattenable = _features_block_issues(before)
+            parsed_before = _parse_features(before)
+            features_before = parsed_before.get("features") if isinstance(parsed_before, dict) else None
+            if flattenable or isinstance(features_before, bool):
+                backup_name = f"{self.codex_config_path.name}.bak-{int(time.time())}"
+                backup_path = self.codex_config_path.with_name(backup_name)
+                try:
+                    backup_path.write_text(before, encoding="utf-8")
+                except OSError:
+                    backup_path = None
+                working, changes = _normalize_features_block(before)
+                _atomic_write(self.codex_config_path, working)
+            else:
+                working = before
+            candidate = _set_features_memories(working, desired == "enabled")
             _atomic_write(self.codex_config_path, candidate)
+            # Success gate: even after our write, the running Codex must still be
+            # able to load the [features] block. If an incompatible shape remains
+            # (e.g. a structured sub-table we deliberately refused to flatten), do
+            # not report false success.
+            remaining_issues, _ = _features_block_issues(candidate)
+            if remaining_issues:
+                return self._failed(
+                    current.feature_key,
+                    "config_write_failed",
+                    f"memories 已写入（{desired}），但配置仍含当前 Codex 版本拒绝的 features 形态："
+                    f"{'; '.join(remaining_issues)}。原配置已备份，请按当前 Codex 版本手动修正后再重启。",
+                    current,
+                )
             features = read_codex_config(self.codex_config_path).get("features", {})
             actual = features.get("memories") if isinstance(features, Mapping) else None
             if actual != (desired == "enabled"):
@@ -195,6 +377,8 @@ class BackgroundControlService:
             f"Memories {action}。设置已写入，HUD 已立即按目标状态更新；"
             "部分 Codex 版本可能需要重启后才会完全采用新配置。"
         )
+        if changes:
+            message += f"\n（已自动归一化 features：{'；'.join(changes)}；原配置已备份）"
         result.update({"kind": "policyApply", "evidence": "config_readback", "error": "", "message": message})
         return result
 
