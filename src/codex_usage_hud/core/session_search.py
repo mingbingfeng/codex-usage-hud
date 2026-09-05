@@ -8,9 +8,9 @@ is retained only for compatibility with older on-disk indexes.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from collections import defaultdict
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 import hashlib
 import json
@@ -1547,28 +1547,29 @@ class SessionSearchIndex:
             batch_size=max(1, len(values)),
         )
 
-    def _prefetch_parses(
+    def _partition_stale(
         self,
         connection: sqlite3.Connection,
         values: list[tuple[str, Sequence[Path], str, str, str, str]],
-        *,
-        cancelled: Callable[[], bool] | None,
-    ) -> dict[str, tuple[str, str, str, tuple[str, ...], tuple]]:
-        """Parse stale rollouts in parallel before the upsert loop.
+    ) -> tuple[
+        list[tuple[str, list[str]]],
+        list[tuple[str, Sequence[Path], str, str, str, str]],
+    ]:
+        """Split entries into stale (fingerprint changed/missing) and fresh.
 
-        Only entries whose fingerprints no longer match the snapshot are sent
-        to the pool, so incremental jobs (a handful of files) stay inline and
-        never pay process startup. Returns an empty dict when the pool is
-        unavailable or cancelled; the upsert loop then parses inline.
+        Stale entries must be re-parsed (tokenised) before upsert; fresh
+        entries already match the snapshot and only need a cheap metadata
+        touch. Empty ids and duplicates are folded into ``fresh`` so the
+        caller's progress counter still advances for every input entry.
         """
 
-        if len(values) < _PARALLEL_PARSE_MIN_ENTRIES or not _process_pool_allowed():
-            return {}
         stale: list[tuple[str, list[str]]] = []
+        fresh: list[tuple[str, Sequence[Path], str, str, str, str]] = []
         seen: set[str] = set()
         for entry in values:
             canonical = str(entry[0] or "").strip()
             if not canonical or canonical in seen:
+                fresh.append(entry)
                 continue
             seen.add(canonical)
             fingerprints = rollout_fingerprints(entry[1])
@@ -1578,7 +1579,77 @@ class SessionSearchIndex:
             ).fetchone()
             if row is None or self._decode_fingerprints(row[0]) != fingerprints:
                 stale.append((canonical, [str(item) for item in entry[1]]))
+            else:
+                fresh.append(entry)
+        return stale, fresh
+
+    def _prefetch_parses(
+        self,
+        connection: sqlite3.Connection,
+        values: list[tuple[str, Sequence[Path], str, str, str, str]],
+        *,
+        cancelled: Callable[[], bool] | None,
+    ) -> dict[str, tuple[str, str, str, tuple[str, ...], tuple]]:
+        """Parse stale rollouts in parallel and return a ``session_id`` -> parse map.
+
+        Kept for the standalone perf harness (``artifacts/perf/profile_build.py``),
+        which measures the parse phase in isolation. The product path streams
+        parses via :meth:`_stream_parses` so progress advances during
+        tokenisation instead of after a single blocking prefetch of the whole
+        corpus.
+        """
+
+        stale, _ = self._partition_stale(connection, values)
         return _parse_entries_parallel(stale, cancelled=cancelled)
+
+    def _stream_parses(
+        self,
+        stale_jobs: list[tuple[str, list[str]]],
+        *,
+        cancelled: Callable[[], bool] | None,
+    ) -> Iterator[tuple[str, str, str, str, tuple[str, ...], tuple]]:
+        """Yield parsed stale entries as the pool produces them.
+
+        Unlike :func:`_parse_entries_parallel` (which blocks until the whole
+        corpus is tokenised), this streams via ``imap_unordered`` so callers can
+        upsert and report progress while later sessions are still being parsed in
+        worker processes. Falls back to inline parsing when the pool is
+        unavailable or the batch is below the parallel threshold.
+        """
+
+        if not stale_jobs:
+            return
+        if not _process_pool_allowed() or len(stale_jobs) < _PARALLEL_PARSE_MIN_ENTRIES:
+            for session_id, path_strings in stale_jobs:
+                if callable(cancelled) and cancelled():
+                    return
+                try:
+                    user_text, assistant_text, tool_text, changed_paths = parse_rollout(
+                        [Path(item) for item in path_strings]
+                    )
+                    fields = _parse_fields(user_text, assistant_text, tool_text, changed_paths)
+                except Exception:
+                    user_text = assistant_text = tool_text = ""
+                    changed_paths = ()
+                    fields = ()
+                yield session_id, user_text, assistant_text, tool_text, changed_paths, fields
+            return
+        workers = max(2, min(_PARALLEL_PARSE_WORKERS, os.cpu_count() or 2))
+        chunksize = max(1, len(stale_jobs) // (workers * 4))
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(_parse_entry_job, job) for job in stale_jobs]
+            for future in as_completed(futures):
+                if callable(cancelled) and cancelled():
+                    for pending_future in futures:
+                        pending_future.cancel()
+                    return
+                try:
+                    result = future.result()
+                except Exception:
+                    # Mirror ``_parse_entry_job``'s defensive contract: a failed
+                    # rollout must not sink the whole stream.
+                    continue
+                yield result
 
     def sync_batches(
         self,
@@ -1590,13 +1661,17 @@ class SessionSearchIndex:
         cancelled: Callable[[], bool] | None = None,
         write_snapshot: bool = True,
     ) -> int:
-        """Update the snapshot in cancellable, resident-memory batches.
+        """Update the snapshot, streaming tokenisation into cancellable batches.
 
-        ``write_snapshot=True`` (default) persists the resident pickle inline,
-        as before.  Pass ``write_snapshot=False`` to defer the (GIL-heavy,
-        ~200 MB) pickle to a background daemon thread so the caller's thread is
-        free to publish its post-build "done" state immediately instead of
-        freezing the UI at 100% while the snapshot serialises.
+        Tokenisation dominates a first build and is embarrassingly parallel, so
+        it runs in worker processes. Parses now stream back via
+        :meth:`_stream_parses`: each session is upserted and the progress
+        callback fires as soon as it is ready, instead of after a single
+        blocking prefetch of the entire corpus. That keeps the session-index UI
+        advancing (``phase`` flips to ``indexing`` after the first batch) rather
+        than appearing frozen on "scanning" for the whole initial tokenisation.
+        ``write_snapshot=False`` defers the (GIL-heavy, ~200 MB) pickle to the
+        caller's background thread so the renderer is never frozen at 100%.
         """
 
         self._load_memory()
@@ -1629,14 +1704,55 @@ class SessionSearchIndex:
                 last_reported = processed
 
         try:
-            parsed_cache = self._prefetch_parses(
-                connection, values, cancelled=cancelled
-            )
-            for session_id, paths, title, workdir, provider, client_kind in values:
+            stale_jobs, fresh_entries = self._partition_stale(connection, values)
+            entry_by_id = {
+                str(entry[0] or "").strip(): entry
+                for entry in values
+                if str(entry[0] or "").strip()
+            }
+            # Stale entries: tokenise in a pool and upsert each as it streams
+            # back, so the progress callback fires during tokenisation rather
+            # than after a single blocking prefetch of the whole corpus.
+            for (
+                session_id,
+                user_text,
+                assistant_text,
+                tool_text,
+                changed,
+                fields,
+            ) in self._stream_parses(stale_jobs, cancelled=cancelled):
                 if callable(cancelled) and cancelled():
                     break
                 canonical = str(session_id or "").strip()
-                parsed = parsed_cache.get(canonical)
+                entry = entry_by_id.get(canonical)
+                if entry is None:
+                    continue
+                session_id_e, paths, title, workdir, provider, client_kind = entry
+                result, document = self._upsert_connection(
+                    connection,
+                    session_id_e,
+                    paths,
+                    title=title,
+                    workdir=workdir,
+                    model_provider=provider,
+                    client_kind=client_kind,
+                    parsed=(user_text, assistant_text, tool_text, changed),
+                )
+                processed += 1
+                count += int(result)
+                if document is not None:
+                    pending.append(document)
+                    if fields:
+                        precomputed[document.session_id] = fields
+                    mutated += 1
+                if processed % safe_batch_size == 0:
+                    commit_batch()
+            # Fresh entries: fingerprint already matches, so a cheap upsert touch
+            # is enough to keep the progress counter moving without re-tokenising.
+            for entry in fresh_entries:
+                if callable(cancelled) and cancelled():
+                    break
+                session_id, paths, title, workdir, provider, client_kind = entry
                 result, document = self._upsert_connection(
                     connection,
                     session_id,
@@ -1645,16 +1761,12 @@ class SessionSearchIndex:
                     workdir=workdir,
                     model_provider=provider,
                     client_kind=client_kind,
-                    parsed=parsed,
+                    parsed=None,
                 )
                 processed += 1
                 count += int(result)
                 if document is not None:
                     pending.append(document)
-                    # The worker pre-tokenised the four large fields; carry
-                    # them through so the main process skips re-tokenisation.
-                    if parsed is not None and len(parsed) > 4 and parsed[4]:
-                        precomputed[document.session_id] = parsed[4]
                     mutated += 1
                 if processed % safe_batch_size == 0:
                     commit_batch()

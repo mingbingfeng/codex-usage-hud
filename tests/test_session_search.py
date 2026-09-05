@@ -317,6 +317,42 @@ def test_large_batch_parses_in_worker_processes(tmp_path: Path) -> None:
     assert index.search("parallel-worker-marker-17")["matches"][0]["sessionId"] == "session-17"
 
 
+def test_sync_batches_streams_without_blocking_prefetch(tmp_path: Path) -> None:
+    # Regression guard for the progressive warm-up fix: the product path must
+    # tokenise and upsert entries as they become ready (so the session-index UI
+    # advances during indexing) instead of blocking on a single full-corpus
+    # prefetch. If ``sync_batches`` ever reverts to calling the blocking
+    # ``_prefetch_parses`` helper, this test fails because that helper is made
+    # to raise here.
+    entries = []
+    for number in range(30):
+        rollout = tmp_path / f"stream-{number}.jsonl"
+        _write_rollout(rollout, f"stream-worker-marker-{number}")
+        entries.append((f"session-{number}", (rollout,), "", "", "", ""))
+
+    index = SessionSearchIndex(tmp_path / "stream.sqlite")
+    assert session_search_module._process_pool_allowed()
+
+    def _blocking_prefetch_raises(*_args, **_kwargs):
+        raise RuntimeError("blocking _prefetch_parses must not run on the product path")
+
+    index._prefetch_parses = _blocking_prefetch_raises  # type: ignore[assignment]
+
+    progress: list[int] = []
+    processed = index.sync_batches(
+        entries,
+        total=len(entries),
+        batch_size=8,
+        progress_callback=lambda done, total, indexed: progress.append(done),
+    )
+
+    assert processed == 30
+    assert index.count() == 30
+    # Progress must advance in multiple steps, not a single terminal call.
+    assert progress and progress[-1] == 30 and len(progress) > 1
+    assert index.search("stream-worker-marker-17")["matches"][0]["sessionId"] == "session-17"
+
+
 def test_ensure_scan_index_covers_stamp_scans_and_reports_repairs(tmp_path: Path) -> None:
     # The document table stores multi-megabyte text columns, so a two-column
     # full scan walks every overflow page of a multi-GB database (~8.5 s
