@@ -273,7 +273,9 @@ def test_index_feature_switch_persists_and_reenables_building(tmp_path: Path) ->
         job.close()
 
 
-def test_clear_index_resets_state_and_allows_any_existing_range(tmp_path: Path) -> None:
+def test_clear_index_disables_rebuild_and_allows_explicit_new_range(
+    tmp_path: Path,
+) -> None:
     entries = _make_entries(
         tmp_path,
         {"new": 5, "mid": 45, "old": 200},
@@ -302,9 +304,20 @@ def test_clear_index_resets_state_and_allows_any_existing_range(tmp_path: Path) 
         assert status["builtCount"] == 0
         assert status["totalCount"] == 0
         assert status["diskBytes"] == 0
+        assert status["enabled"] is False
+        assert index.indexed_session_ids() == frozenset()
+        persisted = WarmJobState.load(state_path)
+        assert persisted.enabled is False
+        assert persisted.completed_range == ""
+        assert persisted.built_count == 0
+        assert persisted.total_count == 0
+
+        # A delayed startup-prime or filesystem event cannot recreate the
+        # physically deleted artifacts after clear.
+        assert job.start("all") is False
         assert index.indexed_session_ids() == frozenset()
 
-        assert job.start("6m") is True
+        assert job.set_enabled(True, "6m") is True
         assert _wait_until(
             lambda: job.status()["jobState"] == "idle"
             and job.status()["coverage"] == "range_done(6m)"

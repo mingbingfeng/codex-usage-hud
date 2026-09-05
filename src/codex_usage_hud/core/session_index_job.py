@@ -626,7 +626,6 @@ class SessionIndexWarmJob:
             if callable(reset_search_state):
                 reset_search_state()
             with self._lock:
-                enabled = bool(self._state.enabled)
                 self._state.selected_range = DEFAULT_RANGE
                 self._state.completed_range = ""
                 self._state.coverage_boundary = 0.0
@@ -638,7 +637,13 @@ class SessionIndexWarmJob:
                 self._state.started_at = 0.0
                 self._state.updated_at = self._clock()
                 self._state.last_error = ""
-                self._state.enabled = enabled
+                # A successful clear is a durable opt-out from automatic
+                # rebuilding.  Otherwise the startup-prime thread or the next
+                # session filesystem delta can call start() immediately after
+                # the artifacts are unlinked and silently recreate the whole
+                # index.  The user can explicitly re-enable indexing and pick
+                # a new range from the Renderer controls.
+                self._state.enabled = False
                 self._range_reconciled = False
                 self._pending_snapshot_write = False
                 self._last_progress_emitted = 0.0
