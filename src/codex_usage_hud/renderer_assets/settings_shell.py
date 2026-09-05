@@ -4622,6 +4622,10 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
         const status = payload?.settingsCommandStatus;
         const sessionIndex = status?.sessionIndex || payload?.sessionIndex;
         if (sessionIndex && typeof sessionIndex === "object") {
+          // Capture the prior job state BEFORE the optimistic overwrite so we
+          // can detect a build finishing on this exact frame (running/attached
+          // -> idle). The overwrite below would otherwise hide the transition.
+          const prevIndexJobState = String(sessionCleanupState.sessionIndex?.jobState || "");
           // Terminal range_done/idle snapshots must replace the optimistic
           // progress state immediately, including when the modal is open.
           sessionCleanupState.sessionIndex = { ...sessionIndex };
@@ -4644,6 +4648,32 @@ _TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」�
               sessionCleanupState.sessionIndexUiAttached = new Set(["running", "attached", "paused"]).has(
                 String(sessionIndex.jobState || ""),
               );
+            }
+          }
+          // When a warm-index build (initial build OR range extension) reaches
+          // its terminal idle state, immediately re-run any active session
+          // search so the newly indexed sessions surface without a manual
+          // re-query. Only the running/attached -> idle transition fires; the
+          // follow-up idle snapshot emitted by the off-thread finalizer is
+          // suppressed by this guard because prevIndexJobState is already idle.
+          const newIndexJobState = String(sessionIndex.jobState || "idle");
+          if (
+            new Set(["running", "attached"]).has(prevIndexJobState)
+            && newIndexJobState === "idle"
+          ) {
+            const indexRoot = document.getElementById(rootId);
+            const indexSearchInput = indexRoot
+              ? indexRoot.querySelector('[data-session-cleanup-search="true"]')
+              : null;
+            const indexSearchText = indexSearchInput
+              ? String(indexSearchInput.value || "").trim()
+              : "";
+            // Prefer the live input box; fall back to the committed query when
+            // the storage panel is not mounted (modal closed but a prior search
+            // was active). Empty content means nothing to refresh.
+            const indexSearchQuery = indexSearchText || String(sessionCleanupState.search || "").trim();
+            if (indexSearchQuery) {
+              requestSessionCleanupSearch(indexSearchQuery);
             }
           }
         }
