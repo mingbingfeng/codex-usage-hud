@@ -1076,6 +1076,38 @@ class SessionCleanupManager:
         except OSError:
             return None
 
+    def session_route_target_for_item(
+        self, item_id: object, revision: object
+    ) -> dict[str, str] | None:
+        """Resolve one inventory item to its Desktop route target.
+
+        Mirrors :meth:`workdir_for_item`: the renderer only holds an opaque id,
+        so the real thread id, host kind and working directory are re-read here
+        behind the manager boundary instead of being published in the payload.
+        """
+        normalized_id = str(item_id or "").strip()
+        normalized_revision = str(revision or "").strip()
+        if (
+            not normalized_id
+            or not normalized_revision
+            or normalized_revision != self._revision
+        ):
+            return None
+        item = self._items.get(normalized_id)
+        if item is None or not item._session_id:
+            return None
+        if (
+            normalized_revision != self._revision
+            or self._items.get(normalized_id) is not item
+        ):
+            return None
+        return {
+            "sessionId": str(item._session_id),
+            "clientKind": str(item.client_kind or "unknown"),
+            "modelProvider": str(item.model_provider or "unknown"),
+            "cwd": str(item._cwd or ""),
+        }
+
     def workdir_for_transfer_target(
         self,
         session_id: object,

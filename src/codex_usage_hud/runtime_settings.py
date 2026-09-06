@@ -111,6 +111,8 @@ def partial_domains_for_command(
         "openUsageInsightsSession",
         "openUsageInsightsWorkdir",
         "openSessionCleanupWorkdir",
+        "openSessionCleanupSession",
+        "resumeSessionCleanupSession",
         "openBackgroundUsageWorkdir",
         "applyDisplayMode",
     }:

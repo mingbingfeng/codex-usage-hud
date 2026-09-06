@@ -4451,6 +4451,50 @@ TEXT = r"""
             text-overflow: ellipsis;
             white-space: nowrap;
           }
+          #${rootId} button.codex-usage-hud-session-jump {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            flex: 0 0 auto;
+            width: 24px;
+            height: 24px;
+            margin-left: 6px;
+            padding: 0;
+            border: 1px solid color-mix(in srgb, var(--codex-usage-hud-divider, #273241) 80%, transparent);
+            border-radius: 999px;
+            background: color-mix(in srgb, var(--codex-usage-hud-surface-soft, #2a2f3a) 80%, transparent);
+            color: #b9bcc3;
+            cursor: pointer;
+            font: inherit;
+            transition: color .12s ease, border-color .12s ease, background .12s ease, opacity .12s ease;
+            vertical-align: middle;
+          }
+          #${rootId} button.codex-usage-hud-session-jump:hover {
+            color: var(--codex-usage-hud-accent, #f3d27a);
+            border-color: color-mix(in srgb, var(--codex-usage-hud-accent, #f3d27a) 55%, transparent);
+          }
+          #${rootId} button.codex-usage-hud-session-jump:focus-visible {
+            outline: 1px solid var(--codex-usage-hud-accent, #f3d27a);
+            outline-offset: 2px;
+          }
+          #${rootId} button.codex-usage-hud-session-jump[disabled] {
+            cursor: progress;
+            opacity: .55;
+          }
+          #${rootId} button.codex-usage-hud-session-jump[data-kind="fallback"] {
+            color: var(--codex-usage-hud-warning, #ffb86b);
+          }
+          #${rootId} button.codex-usage-hud-session-jump > .codex-usage-hud-cleanup-icon {
+            width: 12px;
+            height: 12px;
+          }
+          @keyframes codex-usage-hud-session-jump-spin {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+          }
+          #${rootId} button.codex-usage-hud-session-jump.codex-usage-hud-session-jump-inflight > .codex-usage-hud-cleanup-icon {
+            animation: codex-usage-hud-session-jump-spin 0.9s linear infinite;
+          }
           #${rootId} .codex-usage-hud-session-cell {
             color: var(--codex-usage-hud-muted, #9da1a8);
             font-size: 10px;

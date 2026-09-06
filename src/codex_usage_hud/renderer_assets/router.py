@@ -11,6 +11,45 @@ TEXT = r"""
     }[char]));
   }
 
+  const SESSION_JUMP_INFLIGHT_TTL_MS = 1500;
+  const SESSION_JUMP_INFLIGHT_ATTR = "data-session-cleanup-jump-inflight";
+
+  function setSessionCleanupJumpInflightAttributes(itemId, kind, enabled) {
+    if (!itemId) return;
+    const selector = `[data-session-cleanup-jump-id="${CSS.escape(itemId)}"]`;
+    for (const node of document.querySelectorAll(selector)) {
+      const button = node;
+      if (!(button instanceof HTMLButtonElement)) continue;
+      if (kind) {
+        button.dataset.kind = kind;
+      }
+      if (enabled) {
+        button.disabled = true;
+        button.classList.add("codex-usage-hud-session-jump-inflight");
+        button.setAttribute(SESSION_JUMP_INFLIGHT_ATTR, "true");
+      } else {
+        button.disabled = false;
+        button.classList.remove("codex-usage-hud-session-jump-inflight");
+        button.removeAttribute(SESSION_JUMP_INFLIGHT_ATTR);
+      }
+    }
+  }
+
+  function markSessionCleanupJumpInflight(itemId, kind) {
+    if (!itemId || typeof window === "undefined") return;
+    setSessionCleanupJumpInflightAttributes(itemId, kind, true);
+    const previousToken = window.__codexUsageHudSessionJumpInflightTokens?.[itemId] || 0;
+    const token = previousToken + 1;
+    window.__codexUsageHudSessionJumpInflightTokens = window.__codexUsageHudSessionJumpInflightTokens || {};
+    window.__codexUsageHudSessionJumpInflightTokens[itemId] = token;
+    const clear = () => {
+      const current = window.__codexUsageHudSessionJumpInflightTokens?.[itemId];
+      if (current !== token) return;
+      setSessionCleanupJumpInflightAttributes(itemId, "", false);
+    };
+    setTimeout(clear, SESSION_JUMP_INFLIGHT_TTL_MS);
+  }
+
   function currentPayload() {
     const payload = ctx.state.payload();
     if (Array.isArray(payload.supportImages) && payload.supportImages.length) {
@@ -1023,6 +1062,34 @@ TEXT = r"""
           "正在打开工作目录...",
           { preserveOverlay: true },
         );
+        return;
+      }
+      if (action.dataset.action === "session-cleanup-open-session") {
+        event.preventDefault();
+        event.stopPropagation();
+        const itemId = String(action.dataset.sessionCleanupJumpId || "").trim();
+        const inventoryRevision = String(action.dataset.sessionCleanupInventoryRevision || "").trim();
+        if (!itemId || !inventoryRevision) return;
+        const submitted = submitSettingsCommand(
+          { action: "openSessionCleanupSession", itemId, inventoryRevision },
+          "正在打开会话...",
+          { preserveOverlay: true },
+        );
+        if (submitted) markSessionCleanupJumpInflight(itemId, "jump");
+        return;
+      }
+      if (action.dataset.action === "session-cleanup-resume-session") {
+        event.preventDefault();
+        event.stopPropagation();
+        const itemId = String(action.dataset.sessionCleanupJumpId || "").trim();
+        const inventoryRevision = String(action.dataset.sessionCleanupInventoryRevision || "").trim();
+        if (!itemId || !inventoryRevision) return;
+        const submitted = submitSettingsCommand(
+          { action: "resumeSessionCleanupSession", itemId, inventoryRevision },
+          "正在终端恢复会话...",
+          { preserveOverlay: true },
+        );
+        if (submitted) markSessionCleanupJumpInflight(itemId, "fallback");
         return;
       }
       if (action.dataset.action === "session-cleanup-cancel") {

@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 import logging
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 from threading import Event
@@ -55,6 +56,10 @@ from .desktop_overlay_setup import (
 from .overlay_runtime import _handle_work_overlay_command
 from .overlay_projection import _work_overlay_screen_max_items
 from .platforms import SessionSwitchController
+from .platforms.desktop_thread_navigator import (
+    DesktopThreadNavigationError,
+    DesktopThreadNavigator,
+)
 from .runtime_context import RuntimeContext
 from .runtime_snapshot_service import _apply_pre_send_pricing
 from .runtime_policies import budget_warning_messages
@@ -135,6 +140,7 @@ class RuntimeCommandPorts:
     cleanup_worker: object | None = None
     cleanup_manager: object | None = None
     session_index_job: object | None = None
+    desktop_thread_navigator: object | None = None
     insights_worker: object | None = None
     insights_payload: Mapping[str, object] | None = None
     activate_session: Callable[[Mapping[str, object]], object | None] | None = None
@@ -891,6 +897,218 @@ def _session_index_attach(job: object) -> None:
             pass
 
 
+_SESSION_JUMP_ERROR_MESSAGES = {
+    "thread-not-owned": "Codex Desktop 未保留该会话，无法跳转。",
+    "desktop-bridge-unavailable": "Codex Desktop 会话通道不可用，无法跳转。",
+    "navigation-unverified": "已发送跳转请求，但未能确认 Codex Desktop 已切换会话。",
+}
+
+_PROVIDER_ID_TEXT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+
+
+def _desktop_thread_navigator(context: object) -> DesktopThreadNavigator:
+    """Prefer an injected navigator; otherwise build one from the environment.
+
+    Construction only reads the CDP port from the environment, and the port can
+    change when the HUD (re)launches Codex Desktop, so it is re-read per call
+    instead of being cached.
+    """
+    existing = getattr(context, "desktop_thread_navigator", None)
+    if existing is not None:
+        return existing
+    return DesktopThreadNavigator()
+
+
+def _session_cleanup_route_target(
+    command: Mapping[str, Any], ports: RuntimeCommandPorts
+) -> Mapping[str, str] | None:
+    target_for_item = getattr(
+        ports.cleanup_manager, "session_route_target_for_item", None
+    )
+    if not callable(target_for_item):
+        return None
+    try:
+        target = target_for_item(
+            str(command.get("itemId") or "").strip(),
+            str(command.get("inventoryRevision") or "").strip(),
+        )
+    except Exception as exc:
+        _exc_detail_log(exc, tag="session_cleanup_route_target_failed")
+        return None
+    if not isinstance(target, Mapping):
+        return None
+    if not str(target.get("sessionId") or "").strip():
+        return None
+    return target
+
+
+def _session_jump_status(
+    message: str,
+    *,
+    kind: str = "",
+    item_id: str = "",
+    error: str = "",
+    verified: bool = False,
+    can_resume: bool = False,
+) -> dict[str, object]:
+    status = _status(message, kind=kind)
+    status["sessionCleanupSessionJump"] = {
+        "itemId": item_id,
+        "verified": verified,
+        "error": error,
+        "canResume": can_resume,
+    }
+    return status
+
+
+def _open_session_cleanup_session(
+    command: Mapping[str, Any], ports: RuntimeCommandPorts
+) -> dict[str, object]:
+    """Route Codex Desktop to one inventory session, even a long-lost one."""
+    item_id = str(command.get("itemId") or "").strip()
+    target = _session_cleanup_route_target(command, ports)
+    if target is None:
+        return _session_jump_status(
+            "该会话当前不可跳转。",
+            kind="error",
+            item_id=item_id,
+            error="target-unresolved",
+        )
+    navigator = ports.desktop_thread_navigator
+    if not callable(getattr(navigator, "navigate", None)):
+        try:
+            navigator = DesktopThreadNavigator()
+        except Exception:  # pragma: no cover - construction only reads env
+            navigator = None
+    navigate = getattr(navigator, "navigate", None)
+    if not callable(navigate):
+        return _session_jump_status(
+            "Codex Desktop 会话跳转当前不可用。",
+            kind="error",
+            item_id=item_id,
+            error="navigator-unavailable",
+            can_resume=True,
+        )
+    try:
+        report = navigate(
+            str(target.get("sessionId") or "").strip(),
+            client_kind=str(target.get("clientKind") or ""),
+        )
+    except DesktopThreadNavigationError as exc:
+        return _session_jump_status(
+            f"无法跳转到此会话：{exc}",
+            kind="error",
+            item_id=item_id,
+            error="navigation-unavailable",
+            can_resume=True,
+        )
+    except Exception as exc:
+        error_detail = _exc_detail_log(
+            exc, tag="session_cleanup_session_jump_failed"
+        )
+        return _session_jump_status(
+            f"跳转失败：{error_detail}",
+            kind="error",
+            item_id=item_id,
+            error=error_detail,
+            can_resume=True,
+        )
+    if report.verified:
+        return _session_jump_status(
+            "已跳转到 Codex Desktop 会话。",
+            item_id=item_id,
+            verified=True,
+        )
+    error = str(report.error or "navigation-unverified").strip()
+    message = _SESSION_JUMP_ERROR_MESSAGES.get(error) or "未能跳转到该会话。"
+    return _session_jump_status(
+        message,
+        kind="error",
+        item_id=item_id,
+        error=error,
+        can_resume=True,
+    )
+
+
+def _resume_session_cleanup_session(
+    command: Mapping[str, Any], ports: RuntimeCommandPorts
+) -> dict[str, object]:
+    """Fallback: reopen a session the Desktop no longer owns via ``codex resume``."""
+    item_id = str(command.get("itemId") or "").strip()
+    revision = str(command.get("inventoryRevision") or "").strip()
+    target = _session_cleanup_route_target(command, ports)
+    if target is None:
+        return _status("该会话当前不可恢复。", kind="error")
+    session_id = str(target.get("sessionId") or "").strip()
+    workdir_text = str(target.get("cwd") or "").strip()
+    if not workdir_text:
+        workdir_for_item = getattr(ports.cleanup_manager, "workdir_for_item", None)
+        if callable(workdir_for_item):
+            try:
+                resolved = workdir_for_item(item_id, revision)
+            except Exception as exc:
+                _exc_detail_log(
+                    exc, tag="session_cleanup_resume_workdir_failed"
+                )
+                resolved = None
+            if isinstance(resolved, Path):
+                workdir_text = str(resolved)
+    if not workdir_text:
+        return _status("该会话没有可用于恢复的工作目录。", kind="error")
+    try:
+        options = discover_codex_cli_options()
+    except Exception as exc:
+        error_detail = _exc_detail_log(
+            exc, tag="session_cleanup_resume_options_failed"
+        )
+        return _status(f"无法读取终端选项：{error_detail}", kind="error")
+    options_map = options if isinstance(options, Mapping) else {}
+    terminal_id = str(options_map.get("defaultTerminal") or "").strip()
+    terminal_options = options_map.get("terminals")
+    selected_terminal = (
+        next(
+            (
+                item
+                for item in terminal_options
+                if isinstance(item, Mapping)
+                and str(item.get("id") or "") == terminal_id
+            ),
+            {},
+        )
+        if isinstance(terminal_options, Sequence)
+        and not isinstance(terminal_options, (str, bytes, bytearray))
+        else {}
+    )
+    shell = str(selected_terminal.get("shell") or "powershell").strip().lower()
+    if shell not in {"powershell", "cmd", "bash", "zsh"}:
+        shell = "powershell"
+    provider = str(target.get("modelProvider") or "").strip()
+    if not _PROVIDER_ID_TEXT.fullmatch(provider) or provider == "unknown":
+        provider = ""
+    try:
+        launch_command = build_codex_cli_command(
+            provider=provider,
+            default_provider=str(options_map.get("defaultProvider") or ""),
+            permission="workspace-write",
+            resume=True,
+            resume_session_id=session_id,
+            workdir=workdir_text,
+            shell=shell,
+        )
+        launch_codex_cli(
+            terminal_id=terminal_id,
+            command=launch_command,
+            workdir=workdir_text,
+            provider=provider,
+        )
+    except Exception as exc:
+        error_detail = _exc_detail_log(
+            exc, tag="session_cleanup_resume_launch_failed"
+        )
+        return _status(f"无法在终端恢复该会话：{error_detail}", kind="error")
+    return _status("已在终端执行 codex resume。")
+
+
 def handle_cleanup_command(
     command: Mapping[str, Any], ports: RuntimeCommandPorts
 ) -> dict[str, object] | object:
@@ -932,6 +1150,10 @@ def handle_cleanup_command(
             "detailed": detailed,
         }
         return status
+    if action == "openSessionCleanupSession":
+        return _open_session_cleanup_session(command, ports)
+    if action == "resumeSessionCleanupSession":
+        return _resume_session_cleanup_session(command, ports)
     if action == "openSessionCleanupWorkdir":
         workdir_for_item = getattr(ports.cleanup_manager, "workdir_for_item", None)
         if not callable(workdir_for_item):
@@ -1611,6 +1833,7 @@ def _handle_renderer_session_cleanup_command(
             cleanup_worker=getattr(context, "session_cleanup_worker", None),
             cleanup_manager=getattr(context, "session_cleanup_manager", None),
             session_index_job=getattr(context, "session_index_warm_job", None),
+            desktop_thread_navigator=_desktop_thread_navigator(context),
         ),
     )
     if result is UNHANDLED:
@@ -1685,6 +1908,7 @@ def _handle_renderer_settings_command(
         cleanup_worker=getattr(context, "session_cleanup_worker", None),
         cleanup_manager=getattr(context, "session_cleanup_manager", None),
         session_index_job=getattr(context, "session_index_warm_job", None),
+        desktop_thread_navigator=_desktop_thread_navigator(context),
         insights_worker=getattr(context, "usage_insights_worker", None),
         insights_payload=getattr(context, "usage_insights_payload", None),
         resolve_active_session=lambda candidate: _resolve_renderer_active_session_candidate(

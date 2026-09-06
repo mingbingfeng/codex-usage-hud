@@ -43,6 +43,8 @@ TEXT = r"""
           database: '<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v7c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12v7c0 1.7 3.6 3 8 3s8-1.3 8-3v-7"/>',
           copy: '<rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>',
           folder: '<path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.7-.9L9.6 3.9A2 2 0 0 0 7.9 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/><path d="M2 10h20"/>',
+          external: '<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><path d="M15 3h6v6"/><path d="M10 14 21 3"/>',
+          terminal: '<path d="m7 11 3 3-3 3"/><path d="M13 17h4"/><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/>',
         };
         const body = paths[String(name || "")] || paths.scan;
         const klass = ["codex-usage-hud-cleanup-icon", extraClass].filter(Boolean).join(" ");
@@ -909,20 +911,35 @@ TEXT = r"""
           const workdirButton = (position) => workdirName && id && inventoryRevision
             ? `<button type="button" class="codex-usage-hud-session-workdir" data-action="session-cleanup-open-workdir" data-session-cleanup-workdir-id="${escapeHtml(id)}" data-session-cleanup-inventory-revision="${escapeHtml(inventoryRevision)}" data-session-cleanup-workdir-position="${escapeHtml(position)}" aria-label="打开工作目录 ${escapeHtml(workdirName)}" title="打开工作目录：${escapeHtml(workdirName)}">${cleanupIconSvg("folder")}<span>${escapeHtml(workdirName)}</span></button>`
             : "";
+          // Once Desktop reports it no longer holds the thread the same slot
+          // becomes a terminal `codex resume` fallback instead of a dead jump.
+          const jumpUnavailable = sessionCleanupState.sessionJumpUnavailableIds.has(id);
+          const jumpInflight = sessionCleanupState.sessionJumpInflight.has(id);
+          const jumpLabel = jumpUnavailable
+            ? "Codex Desktop 未保留此会话，在终端用 codex resume 恢复"
+            : "在 Codex Desktop 中打开此会话";
+          const jumpKind = jumpUnavailable ? "fallback" : "jump";
+          const jumpClass = jumpInflight
+            ? `codex-usage-hud-session-jump codex-usage-hud-session-jump-inflight`
+            : `codex-usage-hud-session-jump`;
+          const jumpButton = (position) => id && inventoryRevision
+            ? `<button type="button" class="${jumpClass}" data-action="${jumpUnavailable ? "session-cleanup-resume-session" : "session-cleanup-open-session"}" data-session-cleanup-jump-id="${escapeHtml(id)}" data-session-cleanup-inventory-revision="${escapeHtml(inventoryRevision)}" data-session-cleanup-jump-position="${escapeHtml(position)}" data-kind="${jumpKind}" aria-label="${escapeHtml(jumpLabel)}" title="${escapeHtml(jumpLabel)}" ${jumpInflight ? "disabled" : ""}>${cleanupIconSvg(jumpUnavailable ? "terminal" : "external")}</button>`
+            : "";
           const secondaryMeta = [
             updatedAt,
             `${client} · ${provider}`,
             descendants ? `含 ${descendants} 个关联子任务` : "无关联子任务",
           ].filter(Boolean).join(" · ");
           const secondaryWorkdir = workdirButton("secondary");
-          const secondary = `${secondaryWorkdir}${secondaryWorkdir && secondaryMeta ? " · " : ""}${escapeHtml(secondaryMeta)}`;
+          const secondaryJump = jumpButton("secondary");
+          const secondary = `${secondaryWorkdir}${secondaryWorkdir && secondaryMeta ? " · " : ""}${escapeHtml(secondaryMeta)}${secondaryJump ? ` ${secondaryJump}` : ""}`;
           const related = [client, provider, descendants ? `含 ${descendants} 个关联子任务` : "无关联子任务"].join(" · ");
           const status = String(item?.status || "idle");
           const archivedBadge = item?.archived === true && status !== "archived"
             ? `<span class="codex-usage-hud-session-badge" data-state="archived">已归档</span>`
             : "";
-          const workdirColumn = workdirButton("column")
-            || `<span class="codex-usage-hud-session-workdir" title="未记录工作目录">--</span>`;
+          const workdirColumn = `<span class="codex-usage-hud-session-workdir-cell">${workdirButton("column")
+            || `<span class="codex-usage-hud-session-workdir" title="未记录工作目录">--</span>`}${jumpButton("column")}</span>`;
           return `<div class="codex-usage-hud-session-row" data-selectable="${selectable}" data-selected="${checked}"><label class="codex-usage-hud-session-select"><input type="checkbox" data-session-cleanup-id="${escapeHtml(id)}" aria-label="选择会话 ${escapeHtml(item?.title || "未命名会话")}" ${checked ? "checked" : ""} ${selectable ? "" : "disabled"}></label><div class="codex-usage-hud-session-title"><strong title="${escapeHtml(item?.title || "未命名会话")}">${escapeHtml(item?.title || "未命名会话")}</strong>${hitLabel}<span>${escapeHtml(related)}</span><span data-secondary="true">${secondary}</span>${item?.blockedReason ? `<span data-kind="warning">${escapeHtml(sessionCleanupReasonLabel(item.blockedReason))}</span>` : ""}</div>${workdirColumn}<span class="codex-usage-hud-session-cell">${escapeHtml(updatedAt)}</span><span class="codex-usage-hud-session-status-cell"><span class="codex-usage-hud-session-badge" data-state="${escapeHtml(status)}">${escapeHtml(sessionCleanupStatusLabel(item))}</span>${archivedBadge}</span><span class="codex-usage-hud-session-size">${storageFormatBytes(item?.bytes)}</span></div>`;
         }).join("");
         const results = Array.isArray(operation?.results) ? operation.results : [];

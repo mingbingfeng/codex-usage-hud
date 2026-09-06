@@ -146,6 +146,8 @@ def reduce_event(
             "openUsageInsightsSession",
             "openUsageInsightsWorkdir",
             "openSessionCleanupWorkdir",
+            "openSessionCleanupSession",
+            "resumeSessionCleanupSession",
             "openBackgroundUsageWorkdir",
         }:
             plan.request_domains("settings", force_fast=True)
